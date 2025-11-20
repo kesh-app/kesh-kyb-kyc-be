@@ -6,9 +6,11 @@ import { UsersModule } from './modules/users/users.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ApplicationsModule } from './modules/applications/applications.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
+import { BusinessModule } from './modules/business/business.module';
+import { WatchlistModule } from './modules/watchlist/watchlist.module';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule, BusinessModule, WatchlistModule],
   controllers: [HealthController],
   providers: [],
 })
