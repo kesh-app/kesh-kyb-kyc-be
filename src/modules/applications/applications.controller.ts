@@ -17,7 +17,12 @@ import {
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { ApplicationsService } from "./applications.service";
-import { CreateIndividualDto, CreateBusinessDto, AddDocumentDto } from "./dto";
+import {
+  CreateIndividualDto,
+  CreateBusinessDto,
+  AddDocumentDto,
+  CreatePartyDto,
+} from "./dto";
 import { JwtAuthGuard } from "../auth/jwt.guard";
 import { Roles } from "../auth/roles.decorator";
 import { RolesGuard } from "../auth/roles.guard";
@@ -75,6 +80,30 @@ export class ApplicationsController {
       doc_type: dto.doc_type,
       file_uri: dto.file_uri,
     });
+  }
+
+  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Get(":id/parties")
+  async listParties(@Param("id", ParseIntPipe) appId: number) {
+    return this.svc.listParties(appId);
+  }
+
+  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Post(":id/parties")
+  async addParty(
+    @Param("id", ParseIntPipe) appId: number,
+    @Body(new ValidationPipe({ whitelist: true })) dto: CreatePartyDto
+  ) {
+    return this.svc.addParty(appId, dto);
+  }
+
+  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Delete(":id/parties/:partyId")
+  async removeParty(
+    @Param("id", ParseIntPipe) appId: number,
+    @Param("partyId", ParseIntPipe) partyId: number
+  ) {
+    return this.svc.deleteParty(appId, partyId);
   }
 
   // detail aplikasi sdh ada; tambahkan endpoint hasil screening & risk

@@ -11,14 +11,14 @@ export declare class AuthController {
             id: number;
             name: string;
             email: string;
-            role: "BranchAdmin" | "ComplianceReviewer" | "ComplianceLead" | "Auditor";
+            role: "SystemAdmin" | "BranchAdmin" | "ComplianceReviewer" | "ComplianceLead" | "Auditor" | "FinanceStaff" | "FinanceManager";
         };
     }>;
     me(req: any): Promise<{
         id: number | undefined;
         name: string | undefined;
         email: string | undefined;
-        role: "BranchAdmin" | "ComplianceReviewer" | "ComplianceLead" | "Auditor" | undefined;
+        role: "SystemAdmin" | "BranchAdmin" | "ComplianceReviewer" | "ComplianceLead" | "Auditor" | "FinanceStaff" | "FinanceManager" | undefined;
         last_login_at: Date | null | undefined;
     }>;
 }

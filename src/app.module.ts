@@ -8,9 +8,12 @@ import { ApplicationsModule } from './modules/applications/applications.module';
 import { UploadsModule } from './modules/uploads/uploads.module';
 import { BusinessModule } from './modules/business/business.module';
 import { WatchlistModule } from './modules/watchlist/watchlist.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { RegistrantsModule } from './modules/registrants/registrants.module';
+import { TransfersModule } from './modules/transfers/transfers.module';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule, BusinessModule, WatchlistModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule, BusinessModule, WatchlistModule, DashboardModule, RegistrantsModule, TransfersModule],
   controllers: [HealthController],
   providers: [],
 })

@@ -1,13 +1,26 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { Pool } from 'pg'
-import * as bcrypt from 'bcryptjs';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  Inject,
+} from "@nestjs/common";
+import { Pool } from "pg";
+import * as bcrypt from "bcryptjs";
+import { CreateAdminUserDto, UpdateAdminUserDto } from "./admin.dto";
 
 export type UserRow = {
   id: number;
   name: string;
   email: string;
   password_hash: string;
-  role: 'BranchAdmin'|'ComplianceReviewer'|'ComplianceLead'|'Auditor';
+  role:
+    | "BranchAdmin"
+    | "ComplianceReviewer"
+    | "ComplianceLead"
+    | "Auditor"
+    | "FinanceStaff"
+    | "FinanceManager"
+    | "SystemAdmin"; // ✅ tambah
   branch_id: number | null;
   last_login_at: Date | null;
   created_at: Date;
@@ -15,15 +28,21 @@ export type UserRow = {
 
 @Injectable()
 export class UsersService {
-  constructor(@Inject('PG_POOL') private readonly pool: Pool) {}
+  constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
 
   async findByEmail(email: string): Promise<UserRow | null> {
-    const { rows } = await this.pool.query('SELECT * FROM users WHERE email=$1 LIMIT 1', [email]);
+    const { rows } = await this.pool.query(
+      "SELECT * FROM users WHERE email=$1 LIMIT 1",
+      [email]
+    );
     return rows[0] || null;
   }
 
   async findById(id: number): Promise<UserRow | null> {
-    const { rows } = await this.pool.query('SELECT * FROM users WHERE id=$1 LIMIT 1', [id]);
+    const { rows } = await this.pool.query(
+      "SELECT * FROM users WHERE id=$1 LIMIT 1",
+      [id]
+    );
     return rows[0] || null;
   }
 
@@ -32,6 +51,125 @@ export class UsersService {
   }
 
   async touchLastLogin(userId: number) {
-    await this.pool.query('UPDATE users SET last_login_at = now() WHERE id=$1', [userId]);
+    await this.pool.query(
+      "UPDATE users SET last_login_at = now() WHERE id=$1",
+      [userId]
+    );
+  }
+
+  async listAdmins() {
+    const res = await this.pool.query(
+      `SELECT
+       id,
+       email,
+       name AS full_name,      -- ✅ pakai kolom name, alias jadi full_name
+       role,
+       branch_id,
+       is_active,
+       created_at
+     FROM users
+     ORDER BY id DESC`
+    );
+    return res.rows;
+  }
+
+  async createAdmin(dto: CreateAdminUserDto, actorId: number) {
+    // cek email unik
+    const existing = await this.pool.query(
+      "SELECT id FROM users WHERE email = $1",
+      [dto.email]
+    );
+    const emailCount = existing.rowCount ?? 0;
+    if (emailCount > 0) {
+      throw new BadRequestException("Email already exists");
+    }
+
+    const passwordHash = await bcrypt.hash(dto.password, 10);
+
+    const res = await this.pool.query(
+      `INSERT INTO users (
+      name,
+      email,
+      password_hash,
+      role,
+      branch_id,
+      is_active,
+      created_at
+   )
+   VALUES ($1,$2,$3,$4,$5,TRUE,now())
+   RETURNING
+     id,
+     email,
+     name AS full_name,
+     role,
+     branch_id,
+     is_active,
+     created_at`,
+      [dto.fullName, dto.email, passwordHash, dto.role, dto.branchId ?? null]
+    );
+
+    const user = res.rows[0];
+
+    await this.pool.query(
+      `INSERT INTO audit_logs(actor_id, action, object_type, object_id, before_json, after_json)
+       VALUES ($1,'USER_CREATE','USER',$2,NULL,$3)`,
+      [actorId, String(user.id), user]
+    );
+
+    return user;
+  }
+
+  async updateAdmin(id: number, dto: UpdateAdminUserDto, actorId: number) {
+    const existing = await this.pool.query(
+      `SELECT
+      id,
+      email,
+      name AS full_name,    -- ✅ alias
+      role,
+      branch_id,
+      is_active
+   FROM users
+   WHERE id = $1`,
+      [id]
+    );
+
+    const rowCount = existing.rowCount ?? 0;
+    if (rowCount === 0) {
+      throw new NotFoundException("User not found");
+    }
+    const before = existing.rows[0];
+
+    const nextRole = dto.role ?? before.role;
+    const nextActive =
+      dto.isActive !== undefined ? dto.isActive : before.is_active;
+    const nextBranch =
+      dto.branchId !== undefined ? dto.branchId : before.branch_id;
+
+    const res = await this.pool.query(
+      `UPDATE users
+   SET role = $2,
+       is_active = $3,
+       branch_id = $4
+   WHERE id = $1
+   RETURNING
+     id,
+     email,
+     name AS full_name,
+     role,
+     branch_id,
+     is_active,
+     created_at`,
+      [id, nextRole, nextActive, nextBranch]
+    );
+
+    const after = res.rows[0];
+
+    await this.pool.query(
+      `INSERT INTO audit_logs(actor_id, action, object_type, object_id, before_json, after_json)
+       VALUES ($1,'USER_UPDATE_ADMIN','USER',$2,$3,$4)`,
+      [actorId, String(id), before, after]
+    );
+
+    return after;
   }
 }

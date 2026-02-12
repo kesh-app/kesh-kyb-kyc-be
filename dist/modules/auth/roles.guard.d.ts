@@ -3,5 +3,5 @@ import { Reflector } from '@nestjs/core';
 export declare class RolesGuard implements CanActivate {
     private reflector;
     constructor(reflector: Reflector);
-    canActivate(ctx: ExecutionContext): boolean;
+    canActivate(context: ExecutionContext): boolean;
 }

@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.AddDocumentDto = exports.CreateBusinessDto = exports.CreateIndividualDto = void 0;
+exports.CreatePartyDto = exports.AddDocumentDto = exports.CreateBusinessDto = exports.CreateIndividualDto = void 0;
 const class_validator_1 = require("class-validator");
 /**
  * INDIVIDUAL (KYC)
@@ -170,4 +170,45 @@ __decorate([
     (0, class_validator_1.IsNotEmpty)(),
     __metadata("design:type", String)
 ], AddDocumentDto.prototype, "file_uri", void 0);
+class CreatePartyDto {
+}
+exports.CreatePartyDto = CreatePartyDto;
+__decorate([
+    (0, class_validator_1.IsIn)(['DIRECTOR', 'COMMISSIONER', 'MANAGER', 'BO', 'AUTHORIZED_REP']),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "role", void 0);
+__decorate([
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.IsNotEmpty)(),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "full_name", void 0);
+__decorate([
+    (0, class_validator_1.IsIn)(['KTP', 'SIM', 'PASPOR', 'LAINNYA']),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "identity_type", void 0);
+__decorate([
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.IsNotEmpty)(),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "identity_number", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsDateString)(),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "dob", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "nationality", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "phone", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsEmail)(),
+    __metadata("design:type", String)
+], CreatePartyDto.prototype, "email", void 0);
 //# sourceMappingURL=dto.js.map

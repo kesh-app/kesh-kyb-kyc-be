@@ -12,21 +12,28 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.RolesGuard = void 0;
 const common_1 = require("@nestjs/common");
 const core_1 = require("@nestjs/core");
-const roles_decorator_1 = require("./roles.decorator");
 let RolesGuard = class RolesGuard {
     constructor(reflector) {
         this.reflector = reflector;
     }
-    canActivate(ctx) {
-        const roles = this.reflector.getAllAndOverride(roles_decorator_1.ROLES_KEY, [
-            ctx.getHandler(),
-            ctx.getClass(),
+    canActivate(context) {
+        const requiredRoles = this.reflector.getAllAndOverride('roles', [
+            context.getHandler(),
+            context.getClass(),
         ]);
-        if (!roles || roles.length === 0)
+        // kalau endpoint tidak pakai @Roles → allow
+        if (!requiredRoles || requiredRoles.length === 0) {
             return true;
-        const req = ctx.switchToHttp().getRequest();
-        const user = req.user;
-        return !!user && roles.includes(user.role);
+        }
+        const request = context.switchToHttp().getRequest();
+        const user = request.user;
+        if (!user)
+            return false;
+        // ✅ SystemAdmin selalu boleh
+        if (user.role === 'SystemAdmin') {
+            return true;
+        }
+        return requiredRoles.includes(user.role);
     }
 };
 exports.RolesGuard = RolesGuard;

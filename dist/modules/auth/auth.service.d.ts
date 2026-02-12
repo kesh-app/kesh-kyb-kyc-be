@@ -10,7 +10,7 @@ export declare class AuthService {
             id: number;
             name: string;
             email: string;
-            role: "BranchAdmin" | "ComplianceReviewer" | "ComplianceLead" | "Auditor";
+            role: "SystemAdmin" | "BranchAdmin" | "ComplianceReviewer" | "ComplianceLead" | "Auditor" | "FinanceStaff" | "FinanceManager";
         };
     }>;
     verifyUser(id: number): Promise<import("../users/users.service").UserRow | null>;

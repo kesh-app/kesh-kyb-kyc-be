@@ -111,3 +111,29 @@ export class AddDocumentDto {
   @IsString() @IsNotEmpty()
   file_uri!: string;
 }
+
+export class CreatePartyDto {
+  @IsIn(['DIRECTOR','COMMISSIONER','MANAGER','BO','AUTHORIZED_REP'])
+  role!: 'DIRECTOR'|'COMMISSIONER'|'MANAGER'|'BO'|'AUTHORIZED_REP';
+
+  @IsString() @IsNotEmpty()
+  full_name!: string;
+
+  @IsIn(['KTP','SIM','PASPOR','LAINNYA'])
+  identity_type!: 'KTP'|'SIM'|'PASPOR'|'LAINNYA';
+
+  @IsString() @IsNotEmpty()
+  identity_number!: string;
+
+  @IsOptional() @IsDateString()
+  dob?: string;
+
+  @IsOptional() @IsString()
+  nationality?: string;
+
+  @IsOptional() @IsString()
+  phone?: string;
+
+  @IsOptional() @IsEmail()
+  email?: string;
+}

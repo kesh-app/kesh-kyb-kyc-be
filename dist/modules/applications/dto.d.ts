@@ -42,3 +42,13 @@ export declare class AddDocumentDto {
     doc_type: string;
     file_uri: string;
 }
+export declare class CreatePartyDto {
+    role: 'DIRECTOR' | 'COMMISSIONER' | 'MANAGER' | 'BO' | 'AUTHORIZED_REP';
+    full_name: string;
+    identity_type: 'KTP' | 'SIM' | 'PASPOR' | 'LAINNYA';
+    identity_number: string;
+    dob?: string;
+    nationality?: string;
+    phone?: string;
+    email?: string;
+}

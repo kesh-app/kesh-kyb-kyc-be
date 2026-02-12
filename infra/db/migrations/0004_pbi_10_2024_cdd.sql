@@ -62,6 +62,7 @@ BEGIN
       IF cnt = 0 THEN
         RAISE EXCEPTION 'Dokumen identitas (KTP/SIM/PASPOR) wajib diunggah';
       END IF;
+
     ELSE
       PERFORM 1 FROM business_entities b
        WHERE b.id = NEW.business_id
@@ -79,28 +80,45 @@ BEGIN
         RAISE EXCEPTION 'KYB CDD minimum (BUSINESS) belum lengkap';
       END IF;
 
-      SELECT COUNT(*) INTO cnt_mgmt FROM business_roles WHERE business_id = NEW.business_id AND role IN ('DIRECTOR','COMMISSIONER');
-      SELECT COUNT(*) INTO cnt_bo FROM business_roles WHERE business_id = NEW.business_id AND role = 'BO';
-      IF cnt_mgmt = 0 OR cnt_bo = 0 THEN
-        RAISE EXCEPTION 'Data pengurus dan/atau BO belum lengkap';
+      -- ✅ UBAH RULE: cukup salah satu saja (pengurus ATAU BO ATAU authorized rep)
+      SELECT COUNT(*) INTO cnt_mgmt
+        FROM business_roles
+       WHERE business_id = NEW.business_id
+         AND role IN ('DIRECTOR','COMMISSIONER');
+
+      SELECT COUNT(*) INTO cnt_bo
+        FROM business_roles
+       WHERE business_id = NEW.business_id
+         AND role = 'BO';
+
+      SELECT COUNT(*) INTO cnt_authrep
+        FROM authorized_representatives
+       WHERE business_id = NEW.business_id;
+
+      IF (cnt_mgmt + cnt_bo + cnt_authrep) = 0 THEN
+        RAISE EXCEPTION 'Minimal isi salah satu: Pengurus (DIRECTOR/COMMISSIONER) atau BO atau Kuasa Bertindak';
       END IF;
 
-      SELECT COUNT(*) INTO cnt_authrep FROM authorized_representatives WHERE business_id = NEW.business_id;
-      IF cnt_authrep = 0 THEN
-        RAISE EXCEPTION 'Wajib isi data kuasa bertindak (authorized representative)';
-      END IF;
-
-      SELECT COUNT(*) INTO cnt FROM documents d WHERE d.application_id = NEW.id AND d.doc_type IN ('AKTA_PENDIRIAN','NIB_SIUP','NPWP_BADAN');
+      -- dokumen korporasi wajib
+      SELECT COUNT(*) INTO cnt
+        FROM documents d
+       WHERE d.application_id = NEW.id
+         AND d.doc_type IN ('AKTA_PENDIRIAN','NIB_SIUP','NPWP_BADAN');
       IF cnt < 3 THEN
         RAISE EXCEPTION 'Dokumen korporasi wajib: AKTA_PENDIRIAN, NIB/SIUP, NPWP_BADAN';
       END IF;
 
-      SELECT COUNT(*) INTO cnt FROM documents d WHERE d.application_id = NEW.id AND d.doc_type IN ('KTP_KUASA','PASPOR_KUASA');
+      -- identitas kuasa tetap wajib (sesuai aturan lama)
+      SELECT COUNT(*) INTO cnt
+        FROM documents d
+       WHERE d.application_id = NEW.id
+         AND d.doc_type IN ('KTP_KUASA','PASPOR_KUASA');
       IF cnt = 0 THEN
         RAISE EXCEPTION 'Unggah identitas kuasa (KTP/Paspor)';
       END IF;
     END IF;
   END IF;
+
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

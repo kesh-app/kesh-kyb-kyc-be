@@ -82,37 +82,83 @@ export class ApplicationsService {
     );
   }
 
+  // applications.service.ts
   async createIndividual(dto: any, userId: number, branchId?: number) {
-    const q = await this.pool.query(
-      `INSERT INTO persons (full_name, identity_type, identity_number, address_identity, address_residential,
-                            pob, dob, nationality, phone, occupation, gender, email, signature_uri)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-       RETURNING id`,
-      [
-        dto.full_name,
-        dto.identity_type,
-        dto.identity_number,
-        dto.address_identity,
-        dto.address_residential || null,
-        dto.pob,
-        dto.dob,
-        dto.nationality,
-        dto.phone,
-        dto.occupation,
-        dto.gender,
-        dto.email || null,
-        dto.signature_uri || null,
-      ]
-    );
-    const personId = q.rows[0].id;
+    const norm = (s: string) => (s || "").replace(/\D+/g, "").trim(); // buang non-digit untuk KTP
+    if (dto.identity_type === "KTP")
+      dto.identity_number = norm(dto.identity_number);
 
-    const appRes = await this.pool.query(
-      `INSERT INTO applications (type, status, branch_id, created_by, person_id)
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 1) coba cari person existing (khususnya utk KTP)
+      let personId: number | null = null;
+      const { rows: found } = await client.query(
+        `SELECT id FROM persons WHERE identity_type = $1 AND identity_number = $2 LIMIT 1`,
+        [dto.identity_type, dto.identity_number]
+      );
+      if (found[0]) personId = found[0].id;
+
+      // 2) kalau belum ada, insert person baru
+      if (!personId) {
+        const ins = await client.query(
+          `INSERT INTO persons (full_name, identity_type, identity_number, address_identity, address_residential,
+                              pob, dob, nationality, phone, occupation, gender, email, signature_uri)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         RETURNING id`,
+          [
+            dto.full_name,
+            dto.identity_type,
+            dto.identity_number,
+            dto.address_identity,
+            dto.address_residential || null,
+            dto.pob,
+            dto.dob,
+            dto.nationality,
+            dto.phone,
+            dto.occupation,
+            dto.gender,
+            dto.email || null,
+            dto.signature_uri || null,
+          ]
+        );
+        personId = ins.rows[0].id;
+      }
+
+      // 3) buat application
+      const appRes = await client.query(
+        `INSERT INTO applications (type, status, branch_id, created_by, person_id)
        VALUES ('INDIVIDUAL','DRAFT',$1,$2,$3)
        RETURNING id, status`,
-      [branchId || null, userId, personId]
-    );
-    return appRes.rows[0];
+        [branchId || null, userId, personId]
+      );
+
+      await client.query("COMMIT");
+      return appRes.rows[0];
+    } catch (e: any) {
+      await client.query("ROLLBACK");
+      // race condition fallback: jika bentrok unik, ambil person existing lalu lanjut bikin app
+      if (e?.code === "23505") {
+        const { rows } = await this.pool.query(
+          `SELECT id FROM persons WHERE identity_type=$1 AND identity_number=$2 LIMIT 1`,
+          [dto.identity_type, dto.identity_number]
+        );
+        const personId = rows[0]?.id;
+        if (personId) {
+          const appRes = await this.pool.query(
+            `INSERT INTO applications (type, status, branch_id, created_by, person_id)
+           VALUES ('INDIVIDUAL','DRAFT',$1,$2,$3)
+           RETURNING id, status`,
+            [branchId || null, userId, personId]
+          );
+          return appRes.rows[0];
+        }
+      }
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   async createBusiness(dto: any, userId: number, branchId?: number) {
@@ -255,13 +301,15 @@ export class ApplicationsService {
       const hasBO = roles.has("BO");
       const hasAuthRep = roles.has("AUTHORIZED_REP");
 
+      const hasAnyRequiredParty = hasPengurus || hasBO || hasAuthRep;
+
       const missing: string[] = [];
       if (missingDocs.length)
         missing.push(`dokumen korporasi: ${missingDocs.join(", ")}`);
-      if (!hasPengurus)
-        missing.push("minimal 1 PENGURUS (DIRECTOR atau COMMISSIONER)");
-      if (!hasBO) missing.push("minimal 1 BENEFICIAL OWNER (BO)");
-      if (!hasAuthRep) missing.push("minimal 1 AUTHORIZED_REP");
+      if (!hasAnyRequiredParty)
+        missing.push(
+          "minimal 1 party: (DIRECTOR/COMMISSIONER) atau BO atau AUTHORIZED_REP"
+        );
 
       if (missing.length) {
         throw new BadRequestException({
@@ -434,6 +482,121 @@ export class ApplicationsService {
     );
 
     return { risk_score: score, risk_level, factors };
+  }
+
+  // List parties for a BUSINESS application
+  async listParties(appId: number) {
+    // pastikan application-nya BUSINESS
+    const { rows: appRows } = await this.pool.query(
+      `SELECT id, business_id, type FROM applications WHERE id=$1`,
+      [appId]
+    );
+    const app = appRows[0];
+    if (!app) throw new NotFoundException("Application not found");
+    if (app.type !== "BUSINESS" || !app.business_id)
+      throw new BadRequestException(
+        "Parties only apply to BUSINESS applications"
+      );
+
+    const { rows } = await this.pool.query(
+      `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
+            p.id AS person_id, p.full_name, p.identity_type, p.identity_number, p.dob, p.nationality
+     FROM business_parties bp
+     JOIN persons p ON p.id = bp.person_id
+     WHERE bp.business_id = $1
+     ORDER BY bp.created_at DESC`,
+      [app.business_id]
+    );
+    return rows;
+  }
+
+  // Create / upsert person, then attach into business_parties
+  async addParty(appId: number, dto: any) {
+    const { rows: appRows } = await this.pool.query(
+      `SELECT id, business_id, type FROM applications WHERE id=$1`,
+      [appId]
+    );
+    const app = appRows[0];
+    if (!app) throw new NotFoundException("Application not found");
+    if (app.type !== "BUSINESS" || !app.business_id)
+      throw new BadRequestException(
+        "Parties only apply to BUSINESS applications"
+      );
+
+    // cari existing person by (identity_type, identity_number)
+    const { rows: existing } = await this.pool.query(
+      `SELECT id FROM persons WHERE identity_type=$1 AND identity_number=$2 LIMIT 1`,
+      [dto.identity_type, dto.identity_number]
+    );
+
+    let personId: number;
+    if (existing[0]) {
+      personId = existing[0].id;
+      // optional: update data dasar
+      await this.pool.query(
+        `UPDATE persons
+       SET full_name=COALESCE($1, full_name),
+           dob=COALESCE($2::date, dob),
+           nationality=COALESCE($3, nationality),
+           phone=COALESCE($4, phone),
+           email=COALESCE($5, email)
+       WHERE id=$6`,
+        [
+          dto.full_name || null,
+          dto.dob || null,
+          dto.nationality || null,
+          dto.phone || null,
+          dto.email || null,
+          personId,
+        ]
+      );
+    } else {
+      const ins = await this.pool.query(
+        `INSERT INTO persons (full_name, identity_type, identity_number, dob, nationality, phone, email)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+        [
+          dto.full_name,
+          dto.identity_type,
+          dto.identity_number,
+          dto.dob || null,
+          dto.nationality || null,
+          dto.phone || null,
+          dto.email || null,
+        ]
+      );
+      personId = ins.rows[0].id;
+    }
+
+    // insert ke business_parties (unique per business/person/role)
+    const party = await this.pool.query(
+      `INSERT INTO business_parties (business_id, person_id, role, is_active)
+     VALUES ($1,$2,$3,TRUE)
+     ON CONFLICT (business_id, person_id, role) DO UPDATE SET is_active=TRUE
+     RETURNING id, business_id, person_id, role, is_active, created_at`,
+      [app.business_id, personId, dto.role]
+    );
+
+    return party.rows[0];
+  }
+
+  async deleteParty(appId: number, partyId: number) {
+    const { rows: appRows } = await this.pool.query(
+      `SELECT id, business_id, type FROM applications WHERE id=$1`,
+      [appId]
+    );
+    const app = appRows[0];
+    if (!app) throw new NotFoundException("Application not found");
+    if (app.type !== "BUSINESS" || !app.business_id)
+      throw new BadRequestException(
+        "Parties only apply to BUSINESS applications"
+      );
+
+    const { rows } = await this.pool.query(
+      `DELETE FROM business_parties WHERE id=$1 AND business_id=$2 RETURNING id`,
+      [partyId, app.business_id]
+    );
+    if (!rows[0]) throw new NotFoundException("Party not found");
+    return { ok: true };
   }
 
   async submit(appId: number, reviewerId: number) {

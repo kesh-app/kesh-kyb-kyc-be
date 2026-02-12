@@ -29,6 +29,13 @@ let ApplicationsController = class ApplicationsController {
     async list(limit = 20, offset = 0) {
         return this.svc.list(Number(limit), Number(offset));
     }
+    async detail(appId) {
+        return this.svc.getDetail(appId);
+    }
+    /** (Opsional) quick pre-check tanpa submit */
+    async precheck(appId) {
+        return this.svc.validateBeforeSubmit(appId);
+    }
     async createInd(req, dto) {
         return this.svc.createIndividual(dto, req.user.sub, 1);
     }
@@ -41,6 +48,22 @@ let ApplicationsController = class ApplicationsController {
             file_uri: dto.file_uri,
         });
     }
+    async listParties(appId) {
+        return this.svc.listParties(appId);
+    }
+    async addParty(appId, dto) {
+        return this.svc.addParty(appId, dto);
+    }
+    async removeParty(appId, partyId) {
+        return this.svc.deleteParty(appId, partyId);
+    }
+    // detail aplikasi sdh ada; tambahkan endpoint hasil screening & risk
+    async screening(appId) {
+        const { rows: results } = await this.svc["pool"].query(`SELECT subject_type, subject_ref, list_type, watchlist_id, matched_name, matched_dob, matched_nationality, score, created_at
+     FROM screening_results WHERE application_id=$1 ORDER BY score DESC, created_at DESC`, [appId]);
+        const { rows: risk } = await this.svc["pool"].query(`SELECT application_id, risk_score, risk_level, factors, created_at FROM application_risk WHERE application_id=$1`, [appId]);
+        return { results, risk: risk[0] || null };
+    }
     async listDocs(appId) {
         return this.svc.listDocuments(appId);
     }
@@ -49,7 +72,7 @@ let ApplicationsController = class ApplicationsController {
     }
     async uploadDocument(appId, file, docType) {
         if (!file)
-            throw new common_1.BadRequestException('No file uploaded');
+            throw new common_1.BadRequestException("No file uploaded");
         const ext = mimeToExt(file.mimetype);
         const { url, key } = await this.uploads.uploadBuffer(file.buffer, file.mimetype, ext);
         const saved = await this.svc.addDocument(appId, {
@@ -78,15 +101,29 @@ let ApplicationsController = class ApplicationsController {
 exports.ApplicationsController = ApplicationsController;
 __decorate([
     (0, common_1.Get)(),
-    __param(0, (0, common_1.Query)('limit')),
-    __param(1, (0, common_1.Query)('offset')),
+    __param(0, (0, common_1.Query)("limit")),
+    __param(1, (0, common_1.Query)("offset")),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, Object]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "list", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('BranchAdmin', 'ComplianceReviewer', 'ComplianceLead'),
-    (0, common_1.Post)('individual'),
+    (0, common_1.Get)(":id"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "detail", null);
+__decorate([
+    (0, common_1.Get)(":id/precheck"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "precheck", null);
+__decorate([
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Post)("individual"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
     __metadata("design:type", Function),
@@ -94,8 +131,8 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "createInd", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('BranchAdmin', 'ComplianceReviewer', 'ComplianceLead'),
-    (0, common_1.Post)('business'),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Post)("business"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
     __metadata("design:type", Function),
@@ -103,98 +140,131 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "createBiz", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('BranchAdmin', 'ComplianceReviewer', 'ComplianceLead'),
-    (0, common_1.Post)(':id/documents'),
-    __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Post)(":id/documents"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Number, dto_1.AddDocumentDto]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "addDoc", null);
 __decorate([
-    (0, common_1.Get)(':id/documents'),
-    __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Get)(":id/parties"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "listParties", null);
+__decorate([
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Post)(":id/parties"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, dto_1.CreatePartyDto]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "addParty", null);
+__decorate([
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Delete)(":id/parties/:partyId"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Param)("partyId", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Number]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "removeParty", null);
+__decorate([
+    (0, common_1.Get)(":id/screening"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "screening", null);
+__decorate([
+    (0, common_1.Get)(":id/documents"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Number]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "listDocs", null);
 __decorate([
-    (0, common_1.Get)(':id/documents/:docId'),
-    __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
-    __param(1, (0, common_1.Param)('docId', common_1.ParseIntPipe)),
+    (0, common_1.Get)(":id/documents/:docId"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Param)("docId", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Number, Number]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "getDoc", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('BranchAdmin', 'ComplianceReviewer', 'ComplianceLead'),
-    (0, common_1.Post)(':id/documents/upload'),
-    (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)('file', {
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Post)(":id/documents/upload"),
+    (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)("file", {
         limits: {
             fileSize: Number(process.env.MAX_UPLOAD_MB || 10) * 1024 * 1024,
         },
         fileFilter: (req, file, cb) => {
-            const allowed = ['image/png', 'image/jpeg', 'application/pdf'];
+            const allowed = ["image/png", "image/jpeg", "application/pdf"];
             if (!allowed.includes(file.mimetype)) {
-                return cb(new common_1.BadRequestException('File type not allowed'), false);
+                return cb(new common_1.BadRequestException("File type not allowed"), false);
             }
             cb(null, true);
         },
     })),
-    __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.UploadedFile)()),
-    __param(2, (0, common_1.Body)('doc_type')),
+    __param(2, (0, common_1.Body)("doc_type")),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Number, Object, String]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "uploadDocument", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('ComplianceReviewer', 'ComplianceLead'),
-    (0, common_1.Patch)(':id/submit'),
-    __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
+    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Patch)(":id/submit"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Req)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Number, Object]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "submit", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('ComplianceReviewer', 'ComplianceLead'),
-    (0, common_1.Delete)(':id/documents/:docId'),
-    __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
-    __param(1, (0, common_1.Param)('docId', common_1.ParseIntPipe)),
+    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Delete)(":id/documents/:docId"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Param)("docId", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Number, Number]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "deleteDoc", null);
 exports.ApplicationsController = ApplicationsController = __decorate([
-    (0, common_1.Controller)('applications'),
+    (0, common_1.Controller)("applications"),
     (0, common_1.UseGuards)(jwt_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
     __metadata("design:paramtypes", [applications_service_1.ApplicationsService,
         uploads_service_1.UploadsService])
 ], ApplicationsController);
 function mimeToExt(mime) {
-    if (mime === 'image/png')
-        return 'png';
-    if (mime === 'image/jpeg')
-        return 'jpg';
-    if (mime === 'application/pdf')
-        return 'pdf';
-    return '';
+    if (mime === "image/png")
+        return "png";
+    if (mime === "image/jpeg")
+        return "jpg";
+    if (mime === "application/pdf")
+        return "pdf";
+    return "";
 }
 function inferDocType(name) {
-    const n = (name || '').toUpperCase();
-    if (n.includes('KTP'))
-        return 'KTP';
-    if (n.includes('PASPOR'))
-        return 'PASPOR';
-    if (n.includes('SIM'))
-        return 'SIM';
-    if (n.includes('AKTA'))
-        return 'AKTA_PENDIRIAN';
-    if (n.includes('NIB') || n.includes('SIUP'))
-        return 'NIB_SIUP';
-    if (n.includes('NPWP'))
-        return 'NPWP_BADAN';
-    return 'OTHER';
+    const n = (name || "").toUpperCase();
+    if (n.includes("KTP"))
+        return "KTP";
+    if (n.includes("PASPOR"))
+        return "PASPOR";
+    if (n.includes("SIM"))
+        return "SIM";
+    if (n.includes("AKTA"))
+        return "AKTA_PENDIRIAN";
+    if (n.includes("NIB") || n.includes("SIUP"))
+        return "NIB_SIUP";
+    if (n.includes("NPWP"))
+        return "NPWP_BADAN";
+    return "OTHER";
 }
 //# sourceMappingURL=applications.controller.js.map

@@ -15,12 +15,17 @@ const users_module_1 = require("./modules/users/users.module");
 const auth_module_1 = require("./modules/auth/auth.module");
 const applications_module_1 = require("./modules/applications/applications.module");
 const uploads_module_1 = require("./modules/uploads/uploads.module");
+const business_module_1 = require("./modules/business/business.module");
+const watchlist_module_1 = require("./modules/watchlist/watchlist.module");
+const dashboard_module_1 = require("./modules/dashboard/dashboard.module");
+const registrants_module_1 = require("./modules/registrants/registrants.module");
+const transfers_module_1 = require("./modules/transfers/transfers.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
 exports.AppModule = AppModule = __decorate([
     (0, common_1.Module)({
-        imports: [config_1.ConfigModule.forRoot({ isGlobal: true }), db_module_1.DbModule, users_module_1.UsersModule, auth_module_1.AuthModule, applications_module_1.ApplicationsModule, uploads_module_1.UploadsModule],
+        imports: [config_1.ConfigModule.forRoot({ isGlobal: true }), db_module_1.DbModule, users_module_1.UsersModule, auth_module_1.AuthModule, applications_module_1.ApplicationsModule, uploads_module_1.UploadsModule, business_module_1.BusinessModule, watchlist_module_1.WatchlistModule, dashboard_module_1.DashboardModule, registrants_module_1.RegistrantsModule, transfers_module_1.TransfersModule],
         controllers: [health_controller_1.HealthController],
         providers: [],
     })

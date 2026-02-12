@@ -23,8 +23,16 @@ function buildPgConfig() {
   const client = new Client(buildPgConfig());
   await client.connect();
 
-  // roles idempotent
-  const roles = ['BranchAdmin', 'ComplianceReviewer', 'ComplianceLead', 'Auditor'];
+  // 🔹 roles idempotent – sekalian tambahin role finance & SystemAdmin
+  const roles = [
+    'BranchAdmin',
+    'ComplianceReviewer',
+    'ComplianceLead',
+    'Auditor',
+    'FinanceStaff',
+    'FinanceManager',
+    'SystemAdmin',
+  ];
   for (const r of roles) {
     await client.query(
       'INSERT INTO roles(name) VALUES($1) ON CONFLICT (name) DO NOTHING',
@@ -32,7 +40,7 @@ function buildPgConfig() {
     );
   }
 
-  // branch MAIN
+  // 🔹 branch MAIN
   await client.query(
     `INSERT INTO branches(code, name, city)
      VALUES($1,$2,$3)
@@ -40,18 +48,34 @@ function buildPgConfig() {
     ['MAIN', 'Main Branch', 'Jakarta']
   );
 
-  // admin default
-  const email = 'admin@example.com'.toLowerCase();
-  const hash = await bcrypt.hash('Admin123!', 10);
+  // 🔹 admin Compliance default (boleh dipertahankan untuk testing)
+  const emailCompliance = 'admin@example.com'.toLowerCase();
+  const hashCompliance = await bcrypt.hash('Admin123!', 10);
   await client.query(
     `INSERT INTO users(name,email,password_hash,role,branch_id)
      VALUES($1,$2,$3,$4,(SELECT id FROM branches WHERE code=$5))
      ON CONFLICT (email) DO NOTHING`,
-    ['System Admin', email, hash, 'ComplianceLead', 'MAIN']
+    ['Default Compliance Admin', emailCompliance, hashCompliance, 'ComplianceLead', 'MAIN']
+  );
+
+  // 🔹 SystemAdmin default
+  const sysEmail = 'sysadmin@kesh.local'.toLowerCase();
+  // bisa override lewat env kalau mau: SEED_SYSADMIN_PASSWORD
+  const sysPassword = process.env.SEED_SYSADMIN_PASSWORD || 'SystemAdmin@123';
+  const sysHash = await bcrypt.hash(sysPassword, 10);
+
+  await client.query(
+    `INSERT INTO users(name,email,password_hash,role,branch_id)
+     VALUES($1,$2,$3,$4,(SELECT id FROM branches WHERE code=$5))
+     ON CONFLICT (email) DO NOTHING`,
+    ['System Admin', sysEmail, sysHash, 'SystemAdmin', 'MAIN']
   );
 
   await client.end();
   console.log('Seeding complete.');
+  console.log('SystemAdmin credentials:');
+  console.log(`  email    : ${sysEmail}`);
+  console.log(`  password : ${sysPassword}`);
 })().catch(e => {
   console.error('Seed error:', e);
   process.exit(1);
