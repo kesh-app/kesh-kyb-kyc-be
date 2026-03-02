@@ -1,6 +1,6 @@
-import { Pool } from 'pg';
+import { Pool } from "pg";
 type IngestRow = {
-    list_type: 'PEP' | 'DTTOT' | 'PPPSPM';
+    list_type: "PEP" | "DTTOT" | "PPPSPM";
     list_source: string;
     unique_id?: string | null;
     full_name?: string | null;
@@ -35,29 +35,20 @@ type IngestRow = {
 export declare class WatchlistService {
     private readonly pool;
     constructor(pool: Pool);
-    /** Normalize (upper + trim + collapse spaces, strip accents) */
+    /** Normalize string */
     norm(v?: string | null): string | null;
     buildNaturalKey(r: IngestRow): string;
     parseAliases(v?: string | null): string[] | null;
     parseAssociated(v?: string | null): string[] | null;
-    /** Helper ambil string dari beberapa kemungkinan header */
-    private pick;
-    /** Map satu row XLSX/CSV ke IngestRow sesuai header template */
-    mapRow(raw: any, list_type: IngestRow['list_type'], list_source: string): IngestRow;
-    /** Parse Excel/CSV buffer → rows */
-    parseWorkbook(buf: Buffer, list_type: IngestRow['list_type'], list_source: string): IngestRow[];
-    /** Upsert satu row ke DB */
+    mapRow(raw: any, list_type: IngestRow["list_type"], list_source: string): IngestRow;
+    parseWorkbook(buf: Buffer, list_type: IngestRow["list_type"], list_source: string): IngestRow[];
     upsertRow(r: IngestRow): Promise<void>;
-    ingestBuffer(buf: Buffer, list_type: IngestRow['list_type'], list_source: string): Promise<{
+    ingestBuffer(buf: Buffer, list_type: IngestRow["list_type"], list_source: string, userId: number, originalFilename: string): Promise<{
         ok: boolean;
-        count: number;
+        total: number;
+        success: number;
+        errors: string | null;
     }>;
-    /** Screening candidates by name + optional DOB, Nationality */
-    screenPerson(q: {
-        name: string;
-        dob?: string | null;
-        nationality?: string | null;
-        limit?: number;
-    }): Promise<any[]>;
+    listIngestHistory(limit?: number): Promise<any[]>;
 }
 export {};

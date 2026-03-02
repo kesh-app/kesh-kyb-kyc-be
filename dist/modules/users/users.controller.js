@@ -35,6 +35,15 @@ let UsersController = class UsersController {
     async updateAdmin(req, id, dto) {
         return this.usersService.updateAdmin(id, dto, req.user.id);
     }
+    async getUser(applicationId) {
+        return this.usersService.getUserByApplicationId(applicationId);
+    }
+    /** List semua user individu (pagination opsional) */
+    async listIndividuals(limit, offset) {
+        const l = limit ? parseInt(limit) : 50;
+        const o = offset ? parseInt(offset) : 0;
+        return this.usersService.listIndividuals(l, o);
+    }
 };
 exports.UsersController = UsersController;
 __decorate([
@@ -63,6 +72,21 @@ __decorate([
     __metadata("design:paramtypes", [Object, Number, admin_dto_1.UpdateAdminUserDto]),
     __metadata("design:returntype", Promise)
 ], UsersController.prototype, "updateAdmin", null);
+__decorate([
+    (0, common_1.Get)(':applicationId'),
+    __param(0, (0, common_1.Param)('applicationId')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], UsersController.prototype, "getUser", null);
+__decorate([
+    (0, common_1.Get)(),
+    __param(0, (0, common_1.Query)('limit')),
+    __param(1, (0, common_1.Query)('offset')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", Promise)
+], UsersController.prototype, "listIndividuals", null);
 exports.UsersController = UsersController = __decorate([
     (0, common_1.Controller)('users'),
     (0, common_1.UseGuards)(jwt_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),

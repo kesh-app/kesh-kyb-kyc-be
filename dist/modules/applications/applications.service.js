@@ -111,12 +111,33 @@ let ApplicationsService = class ApplicationsService {
                 ]);
                 personId = ins.rows[0].id;
             }
-            // 3) buat application
+            // 3) buat application dengan status DRAFT
             const appRes = await client.query(`INSERT INTO applications (type, status, branch_id, created_by, person_id)
        VALUES ('INDIVIDUAL','DRAFT',$1,$2,$3)
        RETURNING id, status`, [branchId || null, userId, personId]);
+            const app = appRes.rows[0];
+            // --- Auto-approve ---
+            const nameNorm = (dto.full_name || "").trim().toUpperCase();
+            const aliasNorms = (dto.aliases || []).map((a) => a.trim().toUpperCase());
+            const identityNumber = dto.identity_number;
+            const watchlistCheck = await client.query(`SELECT id FROM watchlist_entries
+       WHERE name_norm = $1
+          OR $2::text[] && aliases
+          OR national_id_number = $3
+       LIMIT 1`, [nameNorm, aliasNorms, identityNumber]);
+            if (watchlistCheck.rowCount === 0) {
+                // Tidak ada di watchlist → auto approve
+                await client.query(`UPDATE applications SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`, [app.id]);
+                app.status = "APPROVED";
+                app.approved_at = new Date();
+            }
+            else {
+                // Ada di watchlist → tetap SUBMITTED untuk review manual
+                await client.query(`UPDATE applications SET status='SUBMITTED', updated_at=now() WHERE id=$1`, [app.id]);
+                app.status = "SUBMITTED";
+            }
             await client.query("COMMIT");
-            return appRes.rows[0];
+            return app;
         }
         catch (e) {
             await client.query("ROLLBACK");
@@ -128,7 +149,26 @@ let ApplicationsService = class ApplicationsService {
                     const appRes = await this.pool.query(`INSERT INTO applications (type, status, branch_id, created_by, person_id)
            VALUES ('INDIVIDUAL','DRAFT',$1,$2,$3)
            RETURNING id, status`, [branchId || null, userId, personId]);
-                    return appRes.rows[0];
+                    const app = appRes.rows[0];
+                    // repeat auto-approve check
+                    const nameNorm = (dto.full_name || "").trim().toUpperCase();
+                    const aliasNorms = (dto.aliases || []).map((a) => a.trim().toUpperCase());
+                    const identityNumber = dto.identity_number;
+                    const watchlistCheck = await this.pool.query(`SELECT id FROM watchlist_entries
+           WHERE name_norm = $1
+              OR $2::text[] && aliases
+              OR national_id_number = $3
+           LIMIT 1`, [nameNorm, aliasNorms, identityNumber]);
+                    if (watchlistCheck.rowCount === 0) {
+                        await this.pool.query(`UPDATE applications SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`, [app.id]);
+                        app.status = "APPROVED";
+                        app.approved_at = new Date();
+                    }
+                    else {
+                        await this.pool.query(`UPDATE applications SET status='SUBMITTED', updated_at=now() WHERE id=$1`, [app.id]);
+                        app.status = "SUBMITTED";
+                    }
+                    return app;
                 }
             }
             throw e;
@@ -136,6 +176,16 @@ let ApplicationsService = class ApplicationsService {
         finally {
             client.release();
         }
+    }
+    async isOnWatchlist(fullName, aliases, identityNumber) {
+        const nameNorm = fullName.trim().toUpperCase();
+        const aliasNorms = (aliases || []).map((a) => a.trim().toUpperCase());
+        const q = await this.pool.query(`SELECT id FROM watchlist_entries
+     WHERE name_norm = $1
+        OR $2::text[] && aliases
+        OR national_id_number = $3
+     LIMIT 1`, [nameNorm, aliasNorms, identityNumber]);
+        return (q.rowCount ?? 0) > 0; // true kalau ada di watchlist
     }
     async createBusiness(dto, userId, branchId) {
         const q = await this.pool.query(`INSERT INTO business_entities (legal_name, legal_form, incorporation_place, incorporation_date,

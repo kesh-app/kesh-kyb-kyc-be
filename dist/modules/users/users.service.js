@@ -147,6 +147,59 @@ let UsersService = class UsersService {
        VALUES ($1,'USER_UPDATE_ADMIN','USER',$2,$3,$4)`, [actorId, String(id), before, after]);
         return after;
     }
+    async getUserByApplicationId(applicationId) {
+        const sql = `
+    SELECT
+      p.id AS person_id,
+      p.full_name,
+      p.identity_type,
+      p.identity_number,
+      p.dob,
+      p.pob,
+      p.nationality,
+      p.phone,
+      p.email,
+      p.occupation,
+      p.gender,
+      p.address_identity,
+      p.address_residential,
+      a.id AS application_id,
+      a.type AS application_type,
+      a.status AS application_status,
+      a.created_at AS application_created_at,
+      a.approved_at AS application_approved_at,
+      a.branch_id
+    FROM persons p
+    LEFT JOIN applications a ON a.person_id = p.id
+    WHERE a.id = $1
+    LIMIT 1
+  `;
+        const { rows } = await this.pool.query(sql, [applicationId]);
+        if (!rows.length)
+            return null;
+        return rows[0];
+    }
+    /** List semua user individu (opsional pagination) */
+    async listIndividuals(limit = 50, offset = 0) {
+        const sql = `
+      SELECT 
+        p.id AS person_id,
+        p.full_name,
+        p.phone,
+        p.email,
+        p.pep_self_declared,
+        a.status AS application_status,
+        a.created_at AS registration_date
+      FROM persons p
+      LEFT JOIN applications a
+        ON a.person_id = p.id
+      WHERE a.type = 'INDIVIDUAL'
+      ORDER BY a.created_at DESC
+      LIMIT $1 OFFSET $2
+    `;
+        const { rows } = await this.pool.query(sql, [limit, offset]);
+        return rows;
+    }
 };
 exports.UsersService = UsersService;
 exports.UsersService = UsersService = __decorate([

@@ -20,4 +20,7 @@ export declare class UsersService {
     listAdmins(): Promise<any[]>;
     createAdmin(dto: CreateAdminUserDto, actorId: number): Promise<any>;
     updateAdmin(id: number, dto: UpdateAdminUserDto, actorId: number): Promise<any>;
+    getUserByApplicationId(applicationId: number): Promise<any>;
+    /** List semua user individu (opsional pagination) */
+    listIndividuals(limit?: number, offset?: number): Promise<any[]>;
 }

@@ -32,6 +32,19 @@ let TransfersService = class TransfersService {
         if (!isStaff && !isManager) {
             throw new common_1.ForbiddenException("Not allowed");
         }
+        // ✅ validasi sender_application_id
+        const { rows: senderRows } = await this.pool.query(`SELECT person_id, status 
+     FROM applications 
+     WHERE id = $1`, [dto.sender_application_id]);
+        if (!senderRows[0]) {
+            throw new common_1.BadRequestException("Sender application not found");
+        }
+        const senderApp = senderRows[0];
+        if (senderApp.status !== "APPROVED") {
+            throw new common_1.BadRequestException("Sender is not KYC/KYB approved");
+        }
+        const senderId = senderApp.person_id;
+        // ✅ insert transfer
         const q = await this.pool.query(`INSERT INTO transfers(
       branch_id,
       amount,
@@ -42,11 +55,12 @@ let TransfersService = class TransfersService {
       description,
       requested_transfer_at,
       created_by,
+      sender_id,
       updated_at
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
     RETURNING *`, [
-            null, // ✅ selalu NULL, kita tidak pakai branch dulu
+            null, // selalu NULL, karena branch belum dipakai
             dto.amount,
             dto.beneficiaryBankName,
             dto.beneficiaryBankCode ?? null,
@@ -55,6 +69,7 @@ let TransfersService = class TransfersService {
             dto.description ?? null,
             dto.requestedTransferAt ?? null,
             user.id,
+            senderId,
         ]);
         const row = q.rows[0];
         await this.audit(user.id, "TRANSFER_CREATE", String(row.id), null, row, ip);
@@ -107,11 +122,11 @@ let TransfersService = class TransfersService {
         ]);
         const rowCount = prev.rowCount ?? 0;
         if (rowCount === 0)
-            throw new common_1.NotFoundException('Transfer not found');
+            throw new common_1.NotFoundException("Transfer not found");
         const row = prev.rows[0];
         // ✅ Hanya cek status, tidak cek created_by lagi
-        if (row.status !== 'DRAFT') {
-            throw new common_1.BadRequestException('Only DRAFT can be submitted');
+        if (row.status !== "DRAFT") {
+            throw new common_1.BadRequestException("Only DRAFT can be submitted");
         }
         const next = await this.pool.query(`UPDATE transfers SET
        status = 'SUBMITTED',
@@ -119,7 +134,7 @@ let TransfersService = class TransfersService {
        updated_at = now()
      WHERE id = $1
      RETURNING *`, [id]);
-        await this.audit(user.id, 'TRANSFER_SUBMIT', String(id), row, next.rows[0], ip);
+        await this.audit(user.id, "TRANSFER_SUBMIT", String(id), row, next.rows[0], ip);
         return next.rows[0];
     }
     // ---------------------------------------------------------------------------

@@ -54,25 +54,25 @@ let WatchlistService = class WatchlistService {
     constructor(pool) {
         this.pool = pool;
     }
-    /** Normalize (upper + trim + collapse spaces, strip accents) */
+    /** Normalize string */
     norm(v) {
         if (!v)
             return null;
         return v
-            .normalize('NFKD')
-            .replace(/\p{Diacritic}/gu, '')
-            .replace(/\s+/g, ' ')
+            .normalize("NFKD")
+            .replace(/\p{Diacritic}/gu, "")
+            .replace(/\s+/g, " ")
             .trim()
             .toUpperCase();
     }
     buildNaturalKey(r) {
         const key = [
-            r.list_type || '',
-            this.norm(r.list_source) || '',
-            this.norm(r.full_name) || this.norm(r.entity_name) || '',
-            r.date_of_birth || '',
-        ].join('|');
-        return (0, crypto_1.createHash)('sha1').update(key).digest('hex'); // 40-char
+            r.list_type || "",
+            this.norm(r.list_source) || "",
+            this.norm(r.full_name) || this.norm(r.entity_name) || "",
+            r.date_of_birth || "",
+        ].join("|");
+        return (0, crypto_1.createHash)("sha1").update(key).digest("hex");
     }
     parseAliases(v) {
         if (!v)
@@ -86,233 +86,71 @@ let WatchlistService = class WatchlistService {
     parseAssociated(v) {
         return this.parseAliases(v);
     }
-    /** Helper ambil string dari beberapa kemungkinan header */
-    pick(raw, keys) {
-        for (const k of keys) {
-            if (raw == null)
-                continue;
-            const v = raw[k];
-            if (v === undefined || v === null)
-                continue;
-            // Jika Excel memberi Date object → format ke YYYY-MM-DD
-            if (v instanceof Date) {
-                const year = v.getFullYear();
-                const month = String(v.getMonth() + 1).padStart(2, '0');
-                const day = String(v.getDate()).padStart(2, '0');
-                return `${year}-${month}-${day}`;
-            }
-            const s = String(v).trim();
-            if (s !== '')
-                return s;
-        }
-        return null;
-    }
-    /** Map satu row XLSX/CSV ke IngestRow sesuai header template */
     mapRow(raw, list_type, list_source) {
-        // Dukungan header:
-        // - Versi resmi kamu: Full_Name, Alias_Name, Date_of_Birth, ...
-        // - Versi template kita: full_name, aliases, dob, date_of_birth, ...
-        const full_name = this.pick(raw, ['Full_Name', 'full_name', 'FULL_NAME']);
-        const entity_name = this.pick(raw, [
-            'Entity_Name',
-            'entity_name',
-            'ENTITY_NAME',
-            'organization',
-            'Organization',
-        ]);
-        const aliasRaw = this.pick(raw, ['Alias_Name', 'aliases', 'Aliases']);
-        const gender = this.pick(raw, ['Gender', 'gender']);
-        const date_of_birth = this.pick(raw, ['Date_of_Birth', 'date_of_birth']) ||
-            this.pick(raw, ['dob']); // fallback ke "dob"
-        const place_of_birth = this.pick(raw, [
-            'Place_of_Birth',
-            'place_of_birth',
-            'pob',
-        ]);
-        const nationality = this.pick(raw, ['Nationality', 'nationality']);
-        const national_id_number = this.pick(raw, [
-            'National_ID_Number',
-            'national_id_number',
-        ]);
-        const tax_identification_number = this.pick(raw, [
-            'Tax_Identification_Number',
-            'tax_identification_number',
-        ]);
-        const position_title = this.pick(raw, [
-            'Position_Title',
-            'position_title',
-            'position',
-            'Position',
-        ]);
-        const institution_name = this.pick(raw, [
-            'Institution_Name',
-            'institution_name',
-        ]);
-        const pep_type = this.pick(raw, ['PEP_Type', 'pep_type']);
-        const status = this.pick(raw, ['Status', 'status']);
-        const address = this.pick(raw, ['Address', 'address']);
-        const city = this.pick(raw, ['City', 'city']);
-        const country = this.pick(raw, ['Country', 'country']);
-        const registration_number = this.pick(raw, [
-            'Registration_Number',
-            'registration_number',
-        ]);
-        const legal_form = this.pick(raw, ['Legal_Form', 'legal_form']);
-        const country_of_registration = this.pick(raw, [
-            'Country_of_Registration',
-            'country_of_registration',
-        ]);
-        const associated_individuals_raw = this.pick(raw, [
-            'Associated_Individuals',
-            'associated_individuals',
-        ]);
-        const associated_entities_raw = this.pick(raw, [
-            'Associated_Entities',
-            'associated_entities',
-        ]);
-        const relationship_type = this.pick(raw, [
-            'Relationship_Type',
-            'relationship_type',
-        ]);
-        const sanction_number = this.pick(raw, [
-            'Sanction_Number',
-            'sanction_number',
-        ]);
-        const inclusion_date = this.pick(raw, [
-            'Inclusion_Date',
-            'inclusion_date',
-        ]);
-        const removal_date = this.pick(raw, ['Removal_Date', 'removal_date']);
-        const list_updated_date = this.pick(raw, [
-            'List_Updated_Date',
-            'list_updated_date',
-        ]);
-        const source_url = this.pick(raw, ['Source_URL', 'source_url']);
-        const remarks = this.pick(raw, ['Remarks', 'remarks']) ||
-            this.pick(raw, ['Notes', 'notes']);
-        const unique_id = this.pick(raw, ['Unique_ID', 'UNIQUE_ID', 'unique_id', 'reference_id']) ??
-            null;
         const r = {
             list_type,
             list_source,
-            unique_id,
-            full_name,
-            alias_name: this.parseAliases(aliasRaw),
-            gender,
-            date_of_birth,
-            place_of_birth,
-            nationality,
-            national_id_number,
-            tax_identification_number,
-            position_title,
-            institution_name,
-            pep_type,
-            status,
-            address,
-            city,
-            country,
-            entity_name,
-            registration_number,
-            legal_form,
-            country_of_registration,
-            associated_individuals: this.parseAssociated(associated_individuals_raw),
-            associated_entities: this.parseAssociated(associated_entities_raw),
-            relationship_type,
-            sanction_number,
-            inclusion_date,
-            removal_date,
-            list_updated_date,
-            source_url,
-            remarks,
+            unique_id: raw.Unique_ID || null,
+            full_name: raw.Full_Name || null,
+            alias_name: this.parseAliases(raw.Alias_Name || null),
+            gender: raw.Gender || null,
+            date_of_birth: raw.Date_of_Birth || null,
+            place_of_birth: raw.Place_of_Birth || null,
+            nationality: raw.Nationality || null,
+            national_id_number: raw.National_ID_Number || null,
+            tax_identification_number: raw.Tax_Identification_Number || null,
+            position_title: raw.Position_Title || null,
+            institution_name: raw.Institution_Name || null,
+            pep_type: raw.PEP_Type || null,
+            status: raw.Status || null,
+            address: raw.Address || null,
+            city: raw.City || null,
+            country: raw.Country || null,
+            entity_name: raw.Entity_Name || null,
+            registration_number: raw.Registration_Number || null,
+            legal_form: raw.Legal_Form || null,
+            country_of_registration: raw.Country_of_Registration || null,
+            associated_individuals: this.parseAssociated(raw.Associated_Individuals || null),
+            associated_entities: this.parseAssociated(raw.Associated_Entities || null),
+            relationship_type: raw.Relationship_Type || null,
+            sanction_number: raw.Sanction_Number || null,
+            inclusion_date: raw.Inclusion_Date || null,
+            removal_date: raw.Removal_Date || null,
+            list_updated_date: raw.List_Updated_Date || null,
+            source_url: raw.Source_URL || null,
+            remarks: raw.Remarks || null,
         };
         return r;
     }
-    /** Parse Excel/CSV buffer → rows */
     parseWorkbook(buf, list_type, list_source) {
-        const wb = XLSX.read(buf, {
-            type: 'buffer',
-            cellDates: true,
-            raw: false,
-        });
+        const wb = XLSX.read(buf, { type: "buffer", cellDates: true, raw: false });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
-        return rows
-            .map((r) => this.mapRow(r, list_type, list_source))
-            .filter((r) => {
-            // skip baris kosong total
-            const hasAny = Object.values(r).filter((v) => v !== null && v !== undefined && String(v).trim() !== '').length > 0;
-            return hasAny;
-        });
+        return rows.map((r) => this.mapRow(r, list_type, list_source));
     }
-    /** Upsert satu row ke DB */
     async upsertRow(r) {
-        // Tentukan nama utama (untuk individu atau entitas).
-        const primaryName = r.full_name || r.entity_name || null;
-        // Kalau tidak ada nama sama sekali → SKIP baris, jangan insert.
-        if (!primaryName) {
-            return;
-        }
-        const name_norm = this.norm(primaryName) || '';
+        const name_norm = this.norm(r.full_name || r.entity_name || "");
         const aliases = r.alias_name || null;
-        const aliases_concat = aliases ? aliases.join(' ') : null;
+        const aliases_concat = aliases ? aliases.join(" ") : null;
         const natural_key = this.buildNaturalKey(r);
-        const values = [
-            r.list_type,
-            r.list_source,
-            r.unique_id || null,
-            natural_key,
-            primaryName, // full_name
-            primaryName, // name
-            name_norm,
-            aliases,
-            aliases_concat,
-            r.gender,
-            r.date_of_birth,
-            r.place_of_birth,
-            r.nationality,
-            r.national_id_number,
-            r.tax_identification_number,
-            r.position_title,
-            r.institution_name,
-            r.pep_type,
-            r.status,
-            r.address,
-            r.city,
-            r.country,
-            r.entity_name,
-            r.registration_number,
-            r.legal_form,
-            r.country_of_registration,
-            r.associated_individuals,
-            r.associated_entities,
-            r.relationship_type,
-            r.sanction_number,
-            r.inclusion_date,
-            r.removal_date,
-            r.list_updated_date,
-            r.source_url,
-            r.remarks,
-        ];
-        const insertBase = `
+        const text = `
       INSERT INTO watchlist_entries
       (list_type, list_source, unique_id, natural_key,
-       full_name, name, name_norm, aliases, aliases_concat, gender, date_of_birth, place_of_birth, nationality,
+       name, name_norm, aliases, aliases_concat, gender, date_of_birth, place_of_birth, nationality,
        national_id_number, tax_identification_number, position_title, institution_name, pep_type, status,
        address, city, country, entity_name, registration_number, legal_form, country_of_registration,
        associated_individuals, associated_entities, relationship_type, sanction_number, inclusion_date,
        removal_date, list_updated_date, source_url, remarks, updated_at)
       VALUES
       ($1,$2,$3,$4,
-       $5,$6,$7,$8,$9,$10,$11,$12,$13,
-       $14,$15,$16,$17,$18,$19,
-       $20,$21,$22,$23,$24,$25,$26,
-       $27,$28,$29,$30,$31,
-       $32,$33,$34,$35, now())
-    `;
-        const conflictUpdate = `
+       $5,$6,$7,$8,$9,$10,$11,$12,
+       $13,$14,$15,$16,$17,$18,
+       $19,$20,$21,$22,$23,$24,$25,
+       $26,$27,$28,$29,$30,
+       $31,$32,$33,$34, now())
+      ON CONFLICT (unique_id) WHERE $3 IS NOT NULL DO UPDATE SET
         list_type = EXCLUDED.list_type,
         list_source = EXCLUDED.list_source,
-        full_name = EXCLUDED.full_name,
         name = EXCLUDED.name,
         name_norm = EXCLUDED.name_norm,
         aliases = EXCLUDED.aliases,
@@ -344,80 +182,97 @@ let WatchlistService = class WatchlistService {
         source_url = EXCLUDED.source_url,
         remarks = EXCLUDED.remarks,
         updated_at = now()
-    `;
-        // coba by unique_id dulu
-        const text = `
-      ${insertBase}
-      ON CONFLICT (unique_id) WHERE $3 IS NOT NULL DO UPDATE SET
-        ${conflictUpdate}
       RETURNING id;
     `;
-        try {
-            await this.pool.query(text, values);
-            return;
-        }
-        catch (e) {
-            // jika unique_id null → conflict clause tak aktif; lakukan upsert by natural_key:
-            const text2 = `
-        ${insertBase}
-        ON CONFLICT (natural_key) DO UPDATE SET
-          ${conflictUpdate}
-        RETURNING id;
-      `;
-            await this.pool.query(text2, values);
-            return;
-        }
+        const values = [
+            r.list_type,
+            r.list_source,
+            r.unique_id || null,
+            natural_key,
+            r.full_name || r.entity_name || null,
+            name_norm,
+            aliases,
+            aliases_concat,
+            r.gender,
+            r.date_of_birth,
+            r.place_of_birth,
+            r.nationality,
+            r.national_id_number,
+            r.tax_identification_number,
+            r.position_title,
+            r.institution_name,
+            r.pep_type,
+            r.status,
+            r.address,
+            r.city,
+            r.country,
+            r.entity_name,
+            r.registration_number,
+            r.legal_form,
+            r.country_of_registration,
+            r.associated_individuals,
+            r.associated_entities,
+            r.relationship_type,
+            r.sanction_number,
+            r.inclusion_date,
+            r.removal_date,
+            r.list_updated_date,
+            r.source_url,
+            r.remarks,
+        ];
+        await this.pool.query(text, values);
     }
-    async ingestBuffer(buf, list_type, list_source) {
+    async ingestBuffer(buf, list_type, list_source, userId, originalFilename) {
         const rows = this.parseWorkbook(buf, list_type, list_source);
         if (!rows.length)
-            throw new common_1.BadRequestException('File kosong / sheet pertama tanpa data yang valid');
-        // pastikan unique index natural_key ada
-        await this.pool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_indexes WHERE indexname = 'ux_watchlist_natural_key'
-        ) THEN
-          EXECUTE 'CREATE UNIQUE INDEX ux_watchlist_natural_key ON watchlist_entries(natural_key)';
-        END IF;
-      END$$;
-    `);
-        let count = 0;
+            throw new common_1.BadRequestException("File kosong / sheet pertama tanpa data yang valid");
+        let successRows = 0;
+        let errorMessage = null;
         for (const r of rows) {
-            await this.upsertRow(r);
-            count++;
+            try {
+                await this.upsertRow(r);
+                successRows++;
+            }
+            catch (err) {
+                if (!errorMessage)
+                    errorMessage = "";
+                errorMessage += `${err.message}; `;
+            }
         }
-        return { ok: true, count };
-    }
-    /** Screening candidates by name + optional DOB, Nationality */
-    async screenPerson(q) {
-        const name_norm = this.norm(q.name || '');
-        const limit = Math.min(Math.max(q.limit ?? 10, 1), 50);
-        const sql = `
-      SELECT id, list_type, list_source, name, name_norm, aliases, date_of_birth, nationality,
-             position_title, institution_name, pep_type, status,
-             similarity(name_norm, $1) AS score
-      FROM watchlist_entries
-      WHERE name_norm % $1
-        AND ($2::date IS NULL OR date_of_birth = $2::date)
-        AND ($3::text IS NULL OR upper(nationality) = upper($3))
-      ORDER BY score DESC
-      LIMIT $4
-    `;
-        const { rows } = await this.pool.query(sql, [
-            name_norm,
-            q.dob || null,
-            q.nationality || null,
-            limit,
+        // insert ke log
+        await this.pool.query(`INSERT INTO watchlist_ingest_logs(actor_id, list_type, list_source, original_filename, total_rows, success_rows, error_message)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
+            userId,
+            list_type,
+            list_source,
+            originalFilename,
+            rows.length,
+            successRows,
+            errorMessage,
         ]);
-        return rows;
+        return {
+            ok: true,
+            total: rows.length,
+            success: successRows,
+            errors: errorMessage,
+        };
+    }
+    async listIngestHistory(limit = 20) {
+        const q = await this.pool.query(`SELECT l.id, l.created_at, l.list_type, l.list_source, l.original_filename,
+       l.total_rows, l.success_rows, l.error_message,
+       u.name AS uploaded_by      -- <-- ganti full_name menjadi name
+FROM watchlist_ingest_logs l
+LEFT JOIN users u ON u.id = l.actor_id
+ORDER BY l.created_at DESC
+LIMIT $1
+`, [limit]);
+        return q.rows;
     }
 };
 exports.WatchlistService = WatchlistService;
 exports.WatchlistService = WatchlistService = __decorate([
     (0, common_1.Injectable)(),
-    __param(0, (0, common_1.Inject)('PG_POOL')),
+    __param(0, (0, common_1.Inject)("PG_POOL")),
     __metadata("design:paramtypes", [pg_1.Pool])
 ], WatchlistService);
 //# sourceMappingURL=watchlist.service.js.map

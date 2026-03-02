@@ -26,15 +26,18 @@ import {
 export class TransfersController {
   constructor(private readonly svc: TransfersService) {}
 
+  // CREATE TRANSFER → sekarang termasuk sender_application_id
   @Post()
   @Roles("FinanceStaff")
-  create(@Req() req: any, @Body() dto: CreateTransferDto) {
+  async create(@Req() req: any, @Body() dto: CreateTransferDto) {
+    // req.user → FinanceStaff atau FinanceManager yang membuat transfer
     return this.svc.create(req.user, dto, req.ip);
   }
 
+  // UPDATE DRAFT
   @Patch(":id")
   @Roles("FinanceStaff")
-  updateDraft(
+  async updateDraft(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
     @Body() dto: UpdateTransferDto
@@ -42,15 +45,17 @@ export class TransfersController {
     return this.svc.updateDraft(id, req.user, dto, req.ip);
   }
 
+  // SUBMIT
   @Post(":id/submit")
   @Roles("FinanceStaff")
-  submit(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
+  async submit(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.submit(id, req.user, req.ip);
   }
 
+  // DECIDE (APPROVE / REJECT)
   @Post(":id/decision")
   @Roles("FinanceManager")
-  decide(
+  async decide(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
     @Body() dto: DecideTransferDto
@@ -58,9 +63,10 @@ export class TransfersController {
     return this.svc.decide(id, req.user, dto, req.ip);
   }
 
+  // SET RESULT (SUCCESS / FAILED)
   @Post(":id/result")
   @Roles("FinanceManager")
-  setResult(
+  async setResult(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
     @Body() dto: SetTransferResultDto
@@ -68,15 +74,17 @@ export class TransfersController {
     return this.svc.setResult(id, req.user, dto, req.ip);
   }
 
+  // LIST TRANSFERS
   @Get()
   @Roles("FinanceStaff", "FinanceManager")
-  list(@Req() req: any, @Query("status") status?: string) {
+  async list(@Req() req: any, @Query("status") status?: string) {
     return this.svc.list(req.user, status);
   }
 
+  // GET TRANSFER DETAIL
   @Get(":id")
   @Roles("FinanceStaff", "FinanceManager")
-  getById(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
+  async getById(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getById(id, req.user);
   }
 }

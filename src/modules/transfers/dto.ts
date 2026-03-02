@@ -9,6 +9,9 @@ export class CreateTransferDto {
 
   @IsOptional() @IsString()
   beneficiaryBankCode?: string;
+  
+  @IsInt()
+  sender_application_id!: number;
 
   @IsString()
   beneficiaryAccountNumber!: string;

@@ -24,49 +24,54 @@ let WatchlistController = class WatchlistController {
     constructor(svc) {
         this.svc = svc;
     }
-    // Upload Excel/CSV PEP / DTTOT / PPPSPM
-    async upload(file, body) {
+    async upload(file, body, req) {
         if (!file)
-            throw new common_1.BadRequestException('No file uploaded');
-        return this.svc.ingestBuffer(file.buffer, body.list_type, body.list_source);
+            throw new common_1.BadRequestException("No file uploaded");
+        return this.svc.ingestBuffer(file.buffer, body.list_type, body.list_source, req.user?.id, file.originalname);
     }
-    // Screening: input nama (+ optional DOB/Nationality) → kandidat watchlist
-    async screen(body) {
-        if (!body?.name)
-            throw new common_1.BadRequestException('name is required');
-        return this.svc.screenPerson({ name: body.name, dob: body.dob || null, nationality: body.nationality || null, limit: body.limit });
+    async history(limit) {
+        const n = Math.min(Number(limit) || 20, 100);
+        return this.svc.listIngestHistory(n);
     }
 };
 exports.WatchlistController = WatchlistController;
 __decorate([
-    (0, roles_decorator_1.Roles)('ComplianceReviewer', 'ComplianceLead'),
-    (0, common_1.Post)('upload'),
-    (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)('file', {
-        limits: { fileSize: Number(process.env.MAX_UPLOAD_MB || 10) * 1024 * 1024 },
+    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Post)("upload"),
+    (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)("file", {
+        limits: {
+            fileSize: Number(process.env.MAX_UPLOAD_MB || 10) * 1024 * 1024,
+        },
         fileFilter: (req, file, cb) => {
-            const ok = ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv'].includes(file.mimetype)
-                || /\.xlsx?$/i.test(file.originalname) || /\.csv$/i.test(file.originalname);
+            const ok = [
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel",
+                "text/csv",
+            ].includes(file.mimetype) ||
+                /\.xlsx?$/i.test(file.originalname) ||
+                /\.csv$/i.test(file.originalname);
             if (!ok)
-                return cb(new common_1.BadRequestException('Only .xlsx/.xls/.csv allowed'), false);
+                return cb(new common_1.BadRequestException("Only .xlsx/.xls/.csv allowed"), false);
             cb(null, true);
-        }
+        },
     })),
     __param(0, (0, common_1.UploadedFile)()),
     __param(1, (0, common_1.Body)()),
+    __param(2, (0, common_1.Req)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object, dto_1.UploadWatchlistDto]),
+    __metadata("design:paramtypes", [Object, dto_1.UploadWatchlistDto, Object]),
     __metadata("design:returntype", Promise)
 ], WatchlistController.prototype, "upload", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('BranchAdmin', 'ComplianceReviewer', 'ComplianceLead', 'Auditor'),
-    (0, common_1.Post)('screen/person'),
-    __param(0, (0, common_1.Body)()),
+    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Get)("history"),
+    __param(0, (0, common_1.Query)("limit")),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object]),
+    __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
-], WatchlistController.prototype, "screen", null);
+], WatchlistController.prototype, "history", null);
 exports.WatchlistController = WatchlistController = __decorate([
-    (0, common_1.Controller)('watchlist'),
+    (0, common_1.Controller)("watchlist"),
     (0, common_1.UseGuards)(jwt_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
     __metadata("design:paramtypes", [watchlist_service_1.WatchlistService])
 ], WatchlistController);

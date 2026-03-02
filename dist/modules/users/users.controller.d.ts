@@ -6,4 +6,7 @@ export declare class UsersController {
     listAdmins(): Promise<any[]>;
     createAdmin(req: any, dto: CreateAdminUserDto): Promise<any>;
     updateAdmin(req: any, id: number, dto: UpdateAdminUserDto): Promise<any>;
+    getUser(applicationId: number): Promise<any>;
+    /** List semua user individu (pagination opsional) */
+    listIndividuals(limit?: string, offset?: string): Promise<any[]>;
 }

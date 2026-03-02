@@ -8,6 +8,7 @@ import {
   Post,
   Req,
   UseGuards,
+  Query
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt.guard';
 import { RolesGuard } from '../auth/roles.guard';
@@ -44,4 +45,21 @@ export class UsersController {
   ) {
     return this.usersService.updateAdmin(id, dto, req.user.id);
   }
+
+  @Get(':applicationId')
+async getUser(@Param('applicationId') applicationId: number) {
+  return this.usersService.getUserByApplicationId(applicationId);
+}
+
+  /** List semua user individu (pagination opsional) */
+  @Get()
+  async listIndividuals(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    const l = limit ? parseInt(limit) : 50;
+    const o = offset ? parseInt(offset) : 0;
+    return this.usersService.listIndividuals(l, o);
+  }
+
 }

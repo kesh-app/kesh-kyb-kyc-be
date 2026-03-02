@@ -23,25 +23,33 @@ let TransfersController = class TransfersController {
     constructor(svc) {
         this.svc = svc;
     }
-    create(req, dto) {
+    // CREATE TRANSFER → sekarang termasuk sender_application_id
+    async create(req, dto) {
+        // req.user → FinanceStaff atau FinanceManager yang membuat transfer
         return this.svc.create(req.user, dto, req.ip);
     }
-    updateDraft(req, id, dto) {
+    // UPDATE DRAFT
+    async updateDraft(req, id, dto) {
         return this.svc.updateDraft(id, req.user, dto, req.ip);
     }
-    submit(req, id) {
+    // SUBMIT
+    async submit(req, id) {
         return this.svc.submit(id, req.user, req.ip);
     }
-    decide(req, id, dto) {
+    // DECIDE (APPROVE / REJECT)
+    async decide(req, id, dto) {
         return this.svc.decide(id, req.user, dto, req.ip);
     }
-    setResult(req, id, dto) {
+    // SET RESULT (SUCCESS / FAILED)
+    async setResult(req, id, dto) {
         return this.svc.setResult(id, req.user, dto, req.ip);
     }
-    list(req, status) {
+    // LIST TRANSFERS
+    async list(req, status) {
         return this.svc.list(req.user, status);
     }
-    getById(req, id) {
+    // GET TRANSFER DETAIL
+    async getById(req, id) {
         return this.svc.getById(id, req.user);
     }
 };
@@ -53,7 +61,7 @@ __decorate([
     __param(1, (0, common_1.Body)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, dto_1.CreateTransferDto]),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "create", null);
 __decorate([
     (0, common_1.Patch)(":id"),
@@ -63,7 +71,7 @@ __decorate([
     __param(2, (0, common_1.Body)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, Number, dto_1.UpdateTransferDto]),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "updateDraft", null);
 __decorate([
     (0, common_1.Post)(":id/submit"),
@@ -72,7 +80,7 @@ __decorate([
     __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, Number]),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "submit", null);
 __decorate([
     (0, common_1.Post)(":id/decision"),
@@ -82,7 +90,7 @@ __decorate([
     __param(2, (0, common_1.Body)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, Number, dto_1.DecideTransferDto]),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "decide", null);
 __decorate([
     (0, common_1.Post)(":id/result"),
@@ -92,7 +100,7 @@ __decorate([
     __param(2, (0, common_1.Body)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, Number, dto_1.SetTransferResultDto]),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "setResult", null);
 __decorate([
     (0, common_1.Get)(),
@@ -101,7 +109,7 @@ __decorate([
     __param(1, (0, common_1.Query)("status")),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, String]),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "list", null);
 __decorate([
     (0, common_1.Get)(":id"),
@@ -110,7 +118,7 @@ __decorate([
     __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object, Number]),
-    __metadata("design:returntype", void 0)
+    __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "getById", null);
 exports.TransfersController = TransfersController = __decorate([
     (0, common_1.Controller)("transfers"),

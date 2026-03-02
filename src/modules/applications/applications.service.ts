@@ -38,7 +38,7 @@ export class ApplicationsService {
        AND review_status = 'CONFIRMED'
        AND list_type IN ('DTTOT','PPPSPM')
      LIMIT 1`,
-      [appId]
+      [appId],
     );
 
     if (hits.length) {
@@ -64,7 +64,7 @@ export class ApplicationsService {
          override_at = CASE
            WHEN application_risk.override_reason IS NULL OR application_risk.override_reason LIKE 'AUTO_BUMP:%'
            THEN now() ELSE application_risk.override_at END`,
-        [appId, reason, reviewerId || null]
+        [appId, reason, reviewerId || null],
       );
       return;
     }
@@ -78,7 +78,7 @@ export class ApplicationsService {
          override_at = NULL
      WHERE application_id=$1
        AND override_reason LIKE 'AUTO_BUMP:%'`,
-      [appId]
+      [appId],
     );
   }
 
@@ -96,7 +96,7 @@ export class ApplicationsService {
       let personId: number | null = null;
       const { rows: found } = await client.query(
         `SELECT id FROM persons WHERE identity_type = $1 AND identity_number = $2 LIMIT 1`,
-        [dto.identity_type, dto.identity_number]
+        [dto.identity_type, dto.identity_number],
       );
       if (found[0]) personId = found[0].id;
 
@@ -121,28 +121,64 @@ export class ApplicationsService {
             dto.gender,
             dto.email || null,
             dto.signature_uri || null,
-          ]
+          ],
         );
         personId = ins.rows[0].id;
       }
 
-      // 3) buat application
+      // 3) buat application dengan status DRAFT
       const appRes = await client.query(
         `INSERT INTO applications (type, status, branch_id, created_by, person_id)
        VALUES ('INDIVIDUAL','DRAFT',$1,$2,$3)
        RETURNING id, status`,
-        [branchId || null, userId, personId]
+        [branchId || null, userId, personId],
       );
 
+      const app = appRes.rows[0];
+
+      // --- Auto-approve ---
+      const nameNorm = (dto.full_name || "").trim().toUpperCase();
+      const aliasNorms = (dto.aliases || []).map((a: string) =>
+        a.trim().toUpperCase(),
+      );
+      const identityNumber = dto.identity_number;
+
+      const watchlistCheck = await client.query(
+        `SELECT id FROM watchlist_entries
+       WHERE name_norm = $1
+          OR $2::text[] && aliases
+          OR national_id_number = $3
+       LIMIT 1`,
+        [nameNorm, aliasNorms, identityNumber],
+      );
+
+      if (watchlistCheck.rowCount === 0) {
+        // Tidak ada di watchlist → auto approve
+        await client.query(
+          `UPDATE applications SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`,
+          [app.id],
+        );
+        app.status = "APPROVED";
+        app.approved_at = new Date();
+      } else {
+        // Ada di watchlist → tetap SUBMITTED untuk review manual
+        await client.query(
+          `UPDATE applications SET status='SUBMITTED', updated_at=now() WHERE id=$1`,
+          [app.id],
+        );
+        app.status = "SUBMITTED";
+      }
+
       await client.query("COMMIT");
-      return appRes.rows[0];
+      return app;
     } catch (e: any) {
       await client.query("ROLLBACK");
+
       // race condition fallback: jika bentrok unik, ambil person existing lalu lanjut bikin app
       if (e?.code === "23505") {
         const { rows } = await this.pool.query(
           `SELECT id FROM persons WHERE identity_type=$1 AND identity_number=$2 LIMIT 1`,
-          [dto.identity_type, dto.identity_number]
+          [dto.identity_type, dto.identity_number],
         );
         const personId = rows[0]?.id;
         if (personId) {
@@ -150,15 +186,70 @@ export class ApplicationsService {
             `INSERT INTO applications (type, status, branch_id, created_by, person_id)
            VALUES ('INDIVIDUAL','DRAFT',$1,$2,$3)
            RETURNING id, status`,
-            [branchId || null, userId, personId]
+            [branchId || null, userId, personId],
           );
-          return appRes.rows[0];
+
+          const app = appRes.rows[0];
+
+          // repeat auto-approve check
+          const nameNorm = (dto.full_name || "").trim().toUpperCase();
+          const aliasNorms = (dto.aliases || []).map((a: string) =>
+            a.trim().toUpperCase(),
+          );
+          const identityNumber = dto.identity_number;
+
+          const watchlistCheck = await this.pool.query(
+            `SELECT id FROM watchlist_entries
+           WHERE name_norm = $1
+              OR $2::text[] && aliases
+              OR national_id_number = $3
+           LIMIT 1`,
+            [nameNorm, aliasNorms, identityNumber],
+          );
+
+          if (watchlistCheck.rowCount === 0) {
+            await this.pool.query(
+              `UPDATE applications SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`,
+              [app.id],
+            );
+            app.status = "APPROVED";
+            app.approved_at = new Date();
+          } else {
+            await this.pool.query(
+              `UPDATE applications SET status='SUBMITTED', updated_at=now() WHERE id=$1`,
+              [app.id],
+            );
+            app.status = "SUBMITTED";
+          }
+
+          return app;
         }
       }
+
       throw e;
     } finally {
       client.release();
     }
+  }
+
+  async isOnWatchlist(
+    fullName: string,
+    aliases: string[],
+    identityNumber: string,
+  ) {
+    const nameNorm = fullName.trim().toUpperCase();
+    const aliasNorms = (aliases || []).map((a) => a.trim().toUpperCase());
+
+    const q = await this.pool.query(
+      `SELECT id FROM watchlist_entries
+     WHERE name_norm = $1
+        OR $2::text[] && aliases
+        OR national_id_number = $3
+     LIMIT 1`,
+      [nameNorm, aliasNorms, identityNumber],
+    );
+
+    return (q.rowCount ?? 0) > 0; // true kalau ada di watchlist
   }
 
   async createBusiness(dto: any, userId: number, branchId?: number) {
@@ -182,7 +273,7 @@ export class ApplicationsService {
         dto.business_activity,
         dto.industry_code || null,
         dto.phone,
-      ]
+      ],
     );
     const businessId = q.rows[0].id;
 
@@ -190,18 +281,18 @@ export class ApplicationsService {
       `INSERT INTO applications (type, status, branch_id, created_by, business_id)
        VALUES ('BUSINESS','DRAFT',$1,$2,$3)
        RETURNING id, status`,
-      [branchId || null, userId, businessId]
+      [branchId || null, userId, businessId],
     );
     return appRes.rows[0];
   }
 
   async addDocument(
     appId: number,
-    dto: { doc_type: string; file_uri: string; extracted_json?: any }
+    dto: { doc_type: string; file_uri: string; extracted_json?: any },
   ) {
     const { rows: apps } = await this.pool.query(
       `SELECT id FROM applications WHERE id=$1`,
-      [appId]
+      [appId],
     );
     if (!apps[0]) throw new NotFoundException("Application not found");
 
@@ -209,7 +300,7 @@ export class ApplicationsService {
       `INSERT INTO documents (application_id, doc_type, file_uri, status, extracted_json)
        VALUES ($1,$2,$3,'PENDING',$4)
        RETURNING id, application_id, doc_type, file_uri, status, extracted_json, created_at`,
-      [appId, dto.doc_type, dto.file_uri, dto.extracted_json || null]
+      [appId, dto.doc_type, dto.file_uri, dto.extracted_json || null],
     );
     return res.rows[0];
   }
@@ -222,7 +313,7 @@ export class ApplicationsService {
        LEFT JOIN persons p ON p.id = a.person_id
        LEFT JOIN business_entities b ON b.id = a.business_id
        WHERE a.id=$1`,
-      [appId]
+      [appId],
     );
     const app = apps[0];
     if (!app) throw new NotFoundException("Application not found");
@@ -230,7 +321,7 @@ export class ApplicationsService {
     const { rows: docs } = await this.pool.query(
       `SELECT id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents WHERE application_id=$1 ORDER BY created_at DESC`,
-      [appId]
+      [appId],
     );
 
     let parties: any[] = [];
@@ -241,7 +332,7 @@ export class ApplicationsService {
          JOIN persons p ON p.id = bp.person_id
          WHERE bp.business_id = $1
          ORDER BY bp.created_at DESC`,
-        [app.business_id]
+        [app.business_id],
       );
       parties = q.rows;
     }
@@ -252,7 +343,7 @@ export class ApplicationsService {
   async validateBeforeSubmit(appId: number) {
     const { rows } = await this.pool.query(
       `SELECT id, type, person_id, business_id FROM applications WHERE id=$1`,
-      [appId]
+      [appId],
     );
     const app = rows[0];
     if (!app) throw new NotFoundException("Application not found");
@@ -260,14 +351,14 @@ export class ApplicationsService {
     // ambil dokumen
     const { rows: docs } = await this.pool.query(
       `SELECT doc_type FROM documents WHERE application_id=$1`,
-      [appId]
+      [appId],
     );
     const docSet = new Set(docs.map((d) => d.doc_type));
 
     if (app.type === "INDIVIDUAL") {
       const { rows: pr } = await this.pool.query(
         `SELECT signature_uri FROM persons WHERE id=$1`,
-        [app.person_id]
+        [app.person_id],
       );
       const person = pr[0];
 
@@ -294,7 +385,7 @@ export class ApplicationsService {
       // parties wajib
       const { rows: parties } = await this.pool.query(
         `SELECT role FROM business_parties WHERE business_id=$1 AND is_active = TRUE`,
-        [app.business_id]
+        [app.business_id],
       );
       const roles = new Set(parties.map((p) => p.role));
       const hasPengurus = roles.has("DIRECTOR") || roles.has("COMMISSIONER");
@@ -308,7 +399,7 @@ export class ApplicationsService {
         missing.push(`dokumen korporasi: ${missingDocs.join(", ")}`);
       if (!hasAnyRequiredParty)
         missing.push(
-          "minimal 1 party: (DIRECTOR/COMMISSIONER) atau BO atau AUTHORIZED_REP"
+          "minimal 1 party: (DIRECTOR/COMMISSIONER) atau BO atau AUTHORIZED_REP",
         );
 
       if (missing.length) {
@@ -329,7 +420,7 @@ export class ApplicationsService {
     // ambil aplikasi
     const { rows: apps } = await this.pool.query(
       `SELECT id, type, person_id, business_id FROM applications WHERE id=$1`,
-      [appId]
+      [appId],
     );
     const app = apps[0];
     if (!app) throw new NotFoundException("Application not found");
@@ -348,7 +439,7 @@ export class ApplicationsService {
     if (app.type === "INDIVIDUAL") {
       const { rows: p } = await this.pool.query(
         `SELECT id, full_name AS name, dob::text AS dob, nationality FROM persons WHERE id=$1`,
-        [app.person_id]
+        [app.person_id],
       );
       if (p[0])
         subjects.push({
@@ -361,7 +452,7 @@ export class ApplicationsService {
     } else if (app.type === "BUSINESS") {
       const { rows: b } = await this.pool.query(
         `SELECT id, legal_name AS name, country AS nationality FROM business_entities WHERE id=$1`,
-        [app.business_id]
+        [app.business_id],
       );
       if (b[0])
         subjects.push({
@@ -378,7 +469,7 @@ export class ApplicationsService {
        FROM business_parties bp
        JOIN persons p ON p.id = bp.person_id
        WHERE bp.business_id=$1 AND bp.is_active = TRUE`,
-        [app.business_id]
+        [app.business_id],
       );
       for (const r of parties) {
         subjects.push({
@@ -395,7 +486,7 @@ export class ApplicationsService {
     // bersihkan hasil screening lama (agar idempotent)
     await this.pool.query(
       `DELETE FROM screening_results WHERE application_id=$1`,
-      [appId]
+      [appId],
     );
 
     // jalankan screening per subject terhadap watchlist_entries
@@ -415,7 +506,7 @@ export class ApplicationsService {
       ORDER BY score DESC
       LIMIT 30
       `,
-        [s.name, s.dob || null, s.nationality || null]
+        [s.name, s.dob || null, s.nationality || null],
       );
 
       for (const c of candidates) {
@@ -434,7 +525,7 @@ export class ApplicationsService {
             c.date_of_birth || null,
             c.nationality || null,
             c.score,
-          ]
+          ],
         );
 
         if (c.list_type === "PEP") pepHits++;
@@ -478,7 +569,7 @@ export class ApplicationsService {
        risk_level=EXCLUDED.risk_level,
        factors=EXCLUDED.factors,
        created_at=now()`,
-      [appId, score, risk_level, JSON.stringify(factors)]
+      [appId, score, risk_level, JSON.stringify(factors)],
     );
 
     return { risk_score: score, risk_level, factors };
@@ -489,13 +580,13 @@ export class ApplicationsService {
     // pastikan application-nya BUSINESS
     const { rows: appRows } = await this.pool.query(
       `SELECT id, business_id, type FROM applications WHERE id=$1`,
-      [appId]
+      [appId],
     );
     const app = appRows[0];
     if (!app) throw new NotFoundException("Application not found");
     if (app.type !== "BUSINESS" || !app.business_id)
       throw new BadRequestException(
-        "Parties only apply to BUSINESS applications"
+        "Parties only apply to BUSINESS applications",
       );
 
     const { rows } = await this.pool.query(
@@ -505,7 +596,7 @@ export class ApplicationsService {
      JOIN persons p ON p.id = bp.person_id
      WHERE bp.business_id = $1
      ORDER BY bp.created_at DESC`,
-      [app.business_id]
+      [app.business_id],
     );
     return rows;
   }
@@ -514,19 +605,19 @@ export class ApplicationsService {
   async addParty(appId: number, dto: any) {
     const { rows: appRows } = await this.pool.query(
       `SELECT id, business_id, type FROM applications WHERE id=$1`,
-      [appId]
+      [appId],
     );
     const app = appRows[0];
     if (!app) throw new NotFoundException("Application not found");
     if (app.type !== "BUSINESS" || !app.business_id)
       throw new BadRequestException(
-        "Parties only apply to BUSINESS applications"
+        "Parties only apply to BUSINESS applications",
       );
 
     // cari existing person by (identity_type, identity_number)
     const { rows: existing } = await this.pool.query(
       `SELECT id FROM persons WHERE identity_type=$1 AND identity_number=$2 LIMIT 1`,
-      [dto.identity_type, dto.identity_number]
+      [dto.identity_type, dto.identity_number],
     );
 
     let personId: number;
@@ -548,7 +639,7 @@ export class ApplicationsService {
           dto.phone || null,
           dto.email || null,
           personId,
-        ]
+        ],
       );
     } else {
       const ins = await this.pool.query(
@@ -562,7 +653,7 @@ export class ApplicationsService {
           dto.nationality || null,
           dto.phone || null,
           dto.email || null,
-        ]
+        ],
       );
       personId = ins.rows[0].id;
     }
@@ -573,7 +664,7 @@ export class ApplicationsService {
      VALUES ($1,$2,$3,TRUE)
      ON CONFLICT (business_id, person_id, role) DO UPDATE SET is_active=TRUE
      RETURNING id, business_id, person_id, role, is_active, created_at`,
-      [app.business_id, personId, dto.role]
+      [app.business_id, personId, dto.role],
     );
 
     return party.rows[0];
@@ -582,18 +673,18 @@ export class ApplicationsService {
   async deleteParty(appId: number, partyId: number) {
     const { rows: appRows } = await this.pool.query(
       `SELECT id, business_id, type FROM applications WHERE id=$1`,
-      [appId]
+      [appId],
     );
     const app = appRows[0];
     if (!app) throw new NotFoundException("Application not found");
     if (app.type !== "BUSINESS" || !app.business_id)
       throw new BadRequestException(
-        "Parties only apply to BUSINESS applications"
+        "Parties only apply to BUSINESS applications",
       );
 
     const { rows } = await this.pool.query(
       `DELETE FROM business_parties WHERE id=$1 AND business_id=$2 RETURNING id`,
-      [partyId, app.business_id]
+      [partyId, app.business_id],
     );
     if (!rows[0]) throw new NotFoundException("Party not found");
     return { ok: true };
@@ -607,7 +698,7 @@ export class ApplicationsService {
      SET status='SUBMITTED', submitted_at=now(), reviewer_id=$2
      WHERE id=$1
      RETURNING id`,
-      [appId, reviewerId]
+      [appId, reviewerId],
     );
     if (!res.rows[0]) throw new NotFoundException("Application not found");
 
@@ -626,7 +717,7 @@ export class ApplicationsService {
        LEFT JOIN business_entities b ON b.id = a.business_id
        ORDER BY a.created_at DESC
        LIMIT $1 OFFSET $2`,
-      [limit, offset]
+      [limit, offset],
     );
     return rows;
   }
@@ -634,7 +725,7 @@ export class ApplicationsService {
   async listDocuments(appId: number) {
     const { rows: apps } = await this.pool.query(
       `SELECT id FROM applications WHERE id=$1`,
-      [appId]
+      [appId],
     );
     if (!apps[0]) throw new NotFoundException("Application not found");
 
@@ -643,7 +734,7 @@ export class ApplicationsService {
        FROM documents
        WHERE application_id=$1
        ORDER BY created_at DESC`,
-      [appId]
+      [appId],
     );
     return rows;
   }
@@ -655,13 +746,13 @@ export class ApplicationsService {
      FROM screening_results
      WHERE application_id=$1
      ORDER BY score DESC, created_at DESC`,
-      [appId]
+      [appId],
     );
     const { rows: risk } = await this.pool.query(
       `SELECT application_id, risk_score, risk_level, factors,
             override_level, override_reason, override_by, override_at, created_at
      FROM application_risk WHERE application_id=$1`,
-      [appId]
+      [appId],
     );
     return { results, risk: risk[0] || null };
   }
@@ -671,14 +762,14 @@ export class ApplicationsService {
     resultId: number,
     status: "CONFIRMED" | "FALSE_POSITIVE" | "DISMISSED",
     notes: string | null,
-    reviewerId: number
+    reviewerId: number,
   ) {
     const { rows } = await this.pool.query(
       `UPDATE screening_results
      SET review_status=$1, review_notes=$2, reviewed_by=$3, reviewed_at=now()
      WHERE id=$4 AND application_id=$5
      RETURNING id`,
-      [status, notes || null, reviewerId, resultId, appId]
+      [status, notes || null, reviewerId, resultId, appId],
     );
     if (!rows[0]) throw new NotFoundException("Screening result not found");
 
@@ -692,14 +783,14 @@ export class ApplicationsService {
     appId: number,
     level: "LOW" | "MEDIUM" | "HIGH",
     reason: string,
-    reviewerId: number
+    reviewerId: number,
   ) {
     const { rows } = await this.pool.query(
       `UPDATE application_risk
      SET override_level=$2, override_reason=$3, override_by=$4, override_at=now()
      WHERE application_id=$1
      RETURNING application_id`,
-      [appId, level, reason, reviewerId]
+      [appId, level, reason, reviewerId],
     );
     if (!rows[0]) {
       // kalau belum ada row risk (harusnya ada setelah submit), buat baru minimal
@@ -707,7 +798,7 @@ export class ApplicationsService {
         `INSERT INTO application_risk (application_id, risk_score, risk_level, factors,
                                      override_level, override_reason, override_by, override_at, created_at)
        VALUES ($1, 0, 'LOW', '{}', $2, $3, $4, now(), now())`,
-        [appId, level, reason, reviewerId]
+        [appId, level, reason, reviewerId],
       );
     }
     return { ok: true };
@@ -723,7 +814,7 @@ export class ApplicationsService {
      LEFT JOIN application_risk ar ON ar.application_id = a.id
      ORDER BY a.created_at DESC
      LIMIT $1 OFFSET $2`,
-      [limit, offset]
+      [limit, offset],
     );
     return rows;
   }
@@ -733,13 +824,13 @@ export class ApplicationsService {
       `SELECT id, application_id, doc_type, file_uri, status, extracted_json
        FROM documents
        WHERE id=$1`,
-      [docId]
+      [docId],
     );
     const doc = rows[0];
     if (!doc) throw new NotFoundException("Document not found");
     if (doc.application_id !== appId)
       throw new ForbiddenException(
-        "Document does not belong to this application"
+        "Document does not belong to this application",
       );
     return doc;
   }

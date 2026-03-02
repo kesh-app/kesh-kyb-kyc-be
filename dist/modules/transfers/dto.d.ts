@@ -2,6 +2,7 @@ export declare class CreateTransferDto {
     amount: number;
     beneficiaryBankName: string;
     beneficiaryBankCode?: string;
+    sender_application_id: number;
     beneficiaryAccountNumber: string;
     beneficiaryAccountName: string;
     description?: string;

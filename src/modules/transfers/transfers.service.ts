@@ -25,12 +25,12 @@ export class TransfersService {
     objectId: string,
     before: any,
     after: any,
-    ip?: string
+    ip?: string,
   ) {
     await this.pool.query(
       `INSERT INTO audit_logs(actor_id, action, object_type, object_id, before_json, after_json, ip)
        VALUES ($1,$2,'TRANSFER',$3,$4,$5,$6)`,
-      [actorId, action, objectId, before ?? null, after ?? null, ip ?? null]
+      [actorId, action, objectId, before ?? null, after ?? null, ip ?? null],
     );
   }
 
@@ -45,6 +45,26 @@ export class TransfersService {
       throw new ForbiddenException("Not allowed");
     }
 
+    // ✅ validasi sender_application_id
+    const { rows: senderRows } = await this.pool.query(
+      `SELECT person_id, status 
+     FROM applications 
+     WHERE id = $1`,
+      [dto.sender_application_id],
+    );
+
+    if (!senderRows[0]) {
+      throw new BadRequestException("Sender application not found");
+    }
+
+    const senderApp = senderRows[0];
+    if (senderApp.status !== "APPROVED") {
+      throw new BadRequestException("Sender is not KYC/KYB approved");
+    }
+
+    const senderId = senderApp.person_id;
+
+    // ✅ insert transfer
     const q = await this.pool.query(
       `INSERT INTO transfers(
       branch_id,
@@ -56,12 +76,13 @@ export class TransfersService {
       description,
       requested_transfer_at,
       created_by,
+      sender_id,
       updated_at
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
     RETURNING *`,
       [
-        null, // ✅ selalu NULL, kita tidak pakai branch dulu
+        null, // selalu NULL, karena branch belum dipakai
         dto.amount,
         dto.beneficiaryBankName,
         dto.beneficiaryBankCode ?? null,
@@ -70,7 +91,8 @@ export class TransfersService {
         dto.description ?? null,
         dto.requestedTransferAt ?? null,
         user.id,
-      ]
+        senderId,
+      ],
     );
 
     const row = q.rows[0];
@@ -86,7 +108,7 @@ export class TransfersService {
     id: number,
     user: AuthedUser,
     dto: UpdateTransferDto,
-    ip?: string
+    ip?: string,
   ) {
     const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [
       id,
@@ -122,7 +144,7 @@ export class TransfersService {
         dto.beneficiaryAccountName,
         dto.description ?? null,
         dto.requestedTransferAt ?? null,
-      ]
+      ],
     );
 
     await this.audit(
@@ -131,7 +153,7 @@ export class TransfersService {
       String(id),
       row,
       next.rows[0],
-      ip
+      ip,
     );
     return next.rows[0];
   }
@@ -140,39 +162,38 @@ export class TransfersService {
   // SUBMIT (FinanceStaff)
   // ---------------------------------------------------------------------------
   async submit(id: number, user: AuthedUser, ip?: string) {
-  const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [
-    id,
-  ]);
-  const rowCount = prev.rowCount ?? 0;
-  if (rowCount === 0) throw new NotFoundException('Transfer not found');
-  const row = prev.rows[0];
+    const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [
+      id,
+    ]);
+    const rowCount = prev.rowCount ?? 0;
+    if (rowCount === 0) throw new NotFoundException("Transfer not found");
+    const row = prev.rows[0];
 
-  // ✅ Hanya cek status, tidak cek created_by lagi
-  if (row.status !== 'DRAFT') {
-    throw new BadRequestException('Only DRAFT can be submitted');
-  }
+    // ✅ Hanya cek status, tidak cek created_by lagi
+    if (row.status !== "DRAFT") {
+      throw new BadRequestException("Only DRAFT can be submitted");
+    }
 
-  const next = await this.pool.query(
-    `UPDATE transfers SET
+    const next = await this.pool.query(
+      `UPDATE transfers SET
        status = 'SUBMITTED',
        submitted_at = now(),
        updated_at = now()
      WHERE id = $1
      RETURNING *`,
-    [id],
-  );
+      [id],
+    );
 
-  await this.audit(
-    user.id,
-    'TRANSFER_SUBMIT',
-    String(id),
-    row,
-    next.rows[0],
-    ip,
-  );
-  return next.rows[0];
-}
-
+    await this.audit(
+      user.id,
+      "TRANSFER_SUBMIT",
+      String(id),
+      row,
+      next.rows[0],
+      ip,
+    );
+    return next.rows[0];
+  }
 
   // ---------------------------------------------------------------------------
   // DECIDE (APPROVE / REJECT) – FinanceManager
@@ -181,7 +202,7 @@ export class TransfersService {
     id: number,
     user: AuthedUser,
     dto: DecideTransferDto,
-    ip?: string
+    ip?: string,
   ) {
     const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [
       id,
@@ -204,7 +225,7 @@ export class TransfersService {
         updated_at=now()
       WHERE id=$1
       RETURNING *`,
-      [id, status, user.id]
+      [id, status, user.id],
     );
 
     await this.audit(
@@ -213,7 +234,7 @@ export class TransfersService {
       String(id),
       row,
       next.rows[0],
-      ip
+      ip,
     );
     return next.rows[0];
   }
@@ -225,7 +246,7 @@ export class TransfersService {
     id: number,
     user: AuthedUser,
     dto: SetTransferResultDto,
-    ip?: string
+    ip?: string,
   ) {
     const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [
       id,
@@ -247,7 +268,7 @@ export class TransfersService {
         updated_at=now()
       WHERE id=$1
       RETURNING *`,
-      [id, dto.result, dto.note ?? null, dto.attachmentUri ?? null]
+      [id, dto.result, dto.note ?? null, dto.attachmentUri ?? null],
     );
 
     await this.audit(
@@ -256,7 +277,7 @@ export class TransfersService {
       String(id),
       row,
       next.rows[0],
-      ip
+      ip,
     );
     return next.rows[0];
   }
@@ -290,7 +311,7 @@ export class TransfersService {
      ${where}
      ORDER BY id DESC
      LIMIT 200`,
-      params
+      params,
     );
 
     return q.rows;

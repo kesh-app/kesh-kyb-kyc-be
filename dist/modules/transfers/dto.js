@@ -29,6 +29,10 @@ __decorate([
     __metadata("design:type", String)
 ], CreateTransferDto.prototype, "beneficiaryBankCode", void 0);
 __decorate([
+    (0, class_validator_1.IsInt)(),
+    __metadata("design:type", Number)
+], CreateTransferDto.prototype, "sender_application_id", void 0);
+__decorate([
     (0, class_validator_1.IsString)(),
     __metadata("design:type", String)
 ], CreateTransferDto.prototype, "beneficiaryAccountNumber", void 0);
