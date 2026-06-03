@@ -1,7 +1,8 @@
 import { Pool } from "pg";
 import { CreateTransferDto, DecideTransferDto, SetTransferResultDto, UpdateTransferDto } from "./dto";
 type AuthedUser = {
-    id: number | string;
+    sub?: number | string;
+    id?: number | string;
     role: string;
 };
 export declare class TransfersService {

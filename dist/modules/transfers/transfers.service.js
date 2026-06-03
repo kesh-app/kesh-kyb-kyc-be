@@ -15,6 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TransfersService = void 0;
 const common_1 = require("@nestjs/common");
 const pg_1 = require("pg");
+const auth_util_1 = require("../../common/auth.util");
 let TransfersService = class TransfersService {
     constructor(pool) {
         this.pool = pool;
@@ -43,7 +44,6 @@ let TransfersService = class TransfersService {
         if (senderApp.status !== "APPROVED") {
             throw new common_1.BadRequestException("Sender is not KYC/KYB approved");
         }
-        const senderId = senderApp.person_id;
         // ✅ insert transfer
         const q = await this.pool.query(`INSERT INTO transfers(
       branch_id,
@@ -55,7 +55,7 @@ let TransfersService = class TransfersService {
       description,
       requested_transfer_at,
       created_by,
-      sender_id,
+      sender_application_id,
       updated_at
     )
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
@@ -68,11 +68,11 @@ let TransfersService = class TransfersService {
             dto.beneficiaryAccountName,
             dto.description ?? null,
             dto.requestedTransferAt ?? null,
-            user.id,
-            senderId,
+            (0, auth_util_1.resolveUserId)(user),
+            dto.sender_application_id,
         ]);
         const row = q.rows[0];
-        await this.audit(user.id, "TRANSFER_CREATE", String(row.id), null, row, ip);
+        await this.audit((0, auth_util_1.resolveUserId)(user), "TRANSFER_CREATE", String(row.id), null, row, ip);
         return row;
     }
     // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ let TransfersService = class TransfersService {
             dto.description ?? null,
             dto.requestedTransferAt ?? null,
         ]);
-        await this.audit(user.id, "TRANSFER_UPDATE_DRAFT", String(id), row, next.rows[0], ip);
+        await this.audit((0, auth_util_1.resolveUserId)(user), "TRANSFER_UPDATE_DRAFT", String(id), row, next.rows[0], ip);
         return next.rows[0];
     }
     // ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ let TransfersService = class TransfersService {
        updated_at = now()
      WHERE id = $1
      RETURNING *`, [id]);
-        await this.audit(user.id, "TRANSFER_SUBMIT", String(id), row, next.rows[0], ip);
+        await this.audit((0, auth_util_1.resolveUserId)(user), "TRANSFER_SUBMIT", String(id), row, next.rows[0], ip);
         return next.rows[0];
     }
     // ---------------------------------------------------------------------------
@@ -159,8 +159,8 @@ let TransfersService = class TransfersService {
         result_notes = COALESCE(result_notes,''),
         updated_at=now()
       WHERE id=$1
-      RETURNING *`, [id, status, user.id]);
-        await this.audit(user.id, `TRANSFER_${status}`, String(id), row, next.rows[0], ip);
+      RETURNING *`, [id, status, (0, auth_util_1.resolveUserId)(user)]);
+        await this.audit((0, auth_util_1.resolveUserId)(user), `TRANSFER_${status}`, String(id), row, next.rows[0], ip);
         return next.rows[0];
     }
     // ---------------------------------------------------------------------------
@@ -185,7 +185,7 @@ let TransfersService = class TransfersService {
         updated_at=now()
       WHERE id=$1
       RETURNING *`, [id, dto.result, dto.note ?? null, dto.attachmentUri ?? null]);
-        await this.audit(user.id, "TRANSFER_SET_RESULT", String(id), row, next.rows[0], ip);
+        await this.audit((0, auth_util_1.resolveUserId)(user), "TRANSFER_SET_RESULT", String(id), row, next.rows[0], ip);
         return next.rows[0];
     }
     // ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ let TransfersService = class TransfersService {
         if (role === "FinanceStaff") {
             // 🔹 Staff → hanya transfer yang dia buat
             // plus data lama yang belum punya created_by (NULL) supaya tetap kelihatan
-            params.push(user.id);
+            params.push((0, auth_util_1.resolveUserId)(user));
             where += ` AND (created_by = $${params.length} OR created_by IS NULL)`;
         }
         // 🔹 FinanceManager, SystemAdmin, dll → tidak ada filter khusus
@@ -231,7 +231,7 @@ let TransfersService = class TransfersService {
         // Non-manager hanya boleh lihat transfer yang dia buat
         if (!isManager) {
             const creatorId = row.created_by ?? null;
-            const userId = Number(user.id);
+            const userId = Number((0, auth_util_1.resolveUserId)(user));
             if (creatorId !== null && !Number.isNaN(userId) && creatorId !== userId) {
                 throw new common_1.ForbiddenException("Not allowed");
             }

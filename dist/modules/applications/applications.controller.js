@@ -90,6 +90,9 @@ let ApplicationsController = class ApplicationsController {
     async submit(appId, req) {
         return this.svc.submit(appId, req.user.sub);
     }
+    async decide(appId, dto, req) {
+        return this.svc.decide(appId, dto.decision, dto.reason ?? null, req.user.sub);
+    }
     async deleteDoc(appId, docId) {
         const doc = await this.svc.deleteDocument(appId, docId);
         const key = doc?.extracted_json?.object_key;
@@ -227,6 +230,16 @@ __decorate([
     __metadata("design:paramtypes", [Number, Object]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "submit", null);
+__decorate([
+    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, common_1.Patch)(":id/decision"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
+    __param(2, (0, common_1.Req)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, dto_1.DecisionDto, Object]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "decide", null);
 __decorate([
     (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
     (0, common_1.Delete)(":id/documents/:docId"),

@@ -29,11 +29,11 @@ let DashboardController = class DashboardController {
       FROM applications
       GROUP BY status
     `);
-        // bucket risk dari risk_profiles (LOW/MEDIUM/HIGH/PROHIBITED)
+        // bucket risk dari application_risk (LOW/MEDIUM/HIGH)
         const { rows: riskRows } = await this.pool.query(`
-      SELECT rp.risk_level AS level, COUNT(*)::int AS count
-      FROM risk_profiles rp
-      GROUP BY rp.risk_level
+      SELECT COALESCE(ar.override_level, ar.risk_level) AS level, COUNT(*)::int AS count
+      FROM application_risk ar
+      GROUP BY COALESCE(ar.override_level, ar.risk_level)
     `);
         // recent submissions + field tampilan (JOIN ke persons & business_entities)
         const { rows: recent } = await this.pool.query(`
@@ -43,8 +43,8 @@ let DashboardController = class DashboardController {
         a.status,
         a.created_at,
         a.submitted_at,
-        rp.risk_level,
-        rp.score_total AS risk_score,
+        COALESCE(ar.override_level, ar.risk_level) AS risk_level,
+        ar.risk_score,
         CASE WHEN a.type = 'INDIVIDUAL'
              THEN NULLIF(p.full_name,'')
              ELSE NULLIF(b.legal_name,'')
@@ -54,11 +54,11 @@ let DashboardController = class DashboardController {
              ELSE NULL
         END AS email,
         CASE WHEN a.type = 'INDIVIDUAL'
-             THEN 'KTP/PASPOR'    -- (placeholder, bisa diubah jika kamu simpan tipe identitas)
+             THEN 'KTP/PASPOR'
              ELSE 'NPWP/NIB'
         END AS id_type
       FROM applications a
-      LEFT JOIN risk_profiles      rp ON rp.application_id = a.id
+      LEFT JOIN application_risk   ar ON ar.application_id = a.id
       LEFT JOIN persons            p  ON p.id            = a.person_id
       LEFT JOIN business_entities  b  ON b.id            = a.business_id
       ORDER BY a.created_at DESC
@@ -82,8 +82,8 @@ let DashboardController = class DashboardController {
         a.status,
         a.created_at,
         a.submitted_at,
-        rp.risk_level,
-        rp.score_total AS risk_score,
+        COALESCE(ar.override_level, ar.risk_level) AS risk_level,
+        ar.risk_score,
         CASE WHEN a.type = 'INDIVIDUAL'
              THEN NULLIF(p.full_name,'')
              ELSE NULLIF(b.legal_name,'')
@@ -97,7 +97,7 @@ let DashboardController = class DashboardController {
              ELSE 'NPWP/NIB'
         END AS id_type
       FROM applications a
-      LEFT JOIN risk_profiles      rp ON rp.application_id = a.id
+      LEFT JOIN application_risk   ar ON ar.application_id = a.id
       LEFT JOIN persons            p  ON p.id            = a.person_id
       LEFT JOIN business_entities  b  ON b.id            = a.business_id
       ORDER BY a.created_at DESC

@@ -1,5 +1,5 @@
 import { ApplicationsService } from "./applications.service";
-import { CreateIndividualDto, CreateBusinessDto, AddDocumentDto, CreatePartyDto } from "./dto";
+import { CreateIndividualDto, CreateBusinessDto, AddDocumentDto, CreatePartyDto, DecisionDto } from "./dto";
 import { UploadsService } from "../uploads/uploads.service";
 export declare class ApplicationsController {
     private readonly svc;
@@ -53,6 +53,7 @@ export declare class ApplicationsController {
             };
         };
     }>;
+    decide(appId: number, dto: DecisionDto, req: any): Promise<any>;
     deleteDoc(appId: number, docId: number): Promise<{
         ok: boolean;
         deleted_id: number;

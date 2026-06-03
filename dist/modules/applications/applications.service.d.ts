@@ -82,4 +82,5 @@ export declare class ApplicationsService {
     listWithRisk(limit?: number, offset?: number): Promise<any[]>;
     getDocument(appId: number, docId: number): Promise<any>;
     deleteDocument(appId: number, docId: number): Promise<any>;
+    decide(appId: number, decision: "APPROVED" | "REJECTED", reason: string | null, reviewerId: number): Promise<any>;
 }

@@ -1,0 +1,93 @@
+{
+  "id": "kyc-kyb-local-env",
+  "name": "KYC/KYB Local",
+  "_postman_variable_scope": "environment",
+  "values": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:4000/api",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "secret",
+      "enabled": true,
+      "description": "JWT Bearer token — diisi otomatis setelah POST /auth/login"
+    },
+    {
+      "key": "compliance_email",
+      "value": "admin@example.com",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "compliance_password",
+      "value": "Admin123!",
+      "type": "secret",
+      "enabled": true
+    },
+    {
+      "key": "sysadmin_email",
+      "value": "sysadmin@kesh.local",
+      "type": "default",
+      "enabled": true
+    },
+    {
+      "key": "sysadmin_password",
+      "value": "SystemAdmin@123",
+      "type": "secret",
+      "enabled": true
+    },
+    {
+      "key": "application_id",
+      "value": "",
+      "type": "default",
+      "enabled": true,
+      "description": "ID aplikasi INDIVIDUAL — diisi manual setelah POST /applications/individual"
+    },
+    {
+      "key": "business_application_id",
+      "value": "",
+      "type": "default",
+      "enabled": true,
+      "description": "ID aplikasi BUSINESS — diisi manual setelah POST /applications/business"
+    },
+    {
+      "key": "business_id",
+      "value": "",
+      "type": "default",
+      "enabled": true,
+      "description": "business_entity id — dari field business_id di application detail"
+    },
+    {
+      "key": "person_id",
+      "value": "",
+      "type": "default",
+      "enabled": true,
+      "description": "person id — dari field person_id di application detail"
+    },
+    {
+      "key": "transfer_id",
+      "value": "",
+      "type": "default",
+      "enabled": true,
+      "description": "ID transfer — diisi manual setelah POST /transfers"
+    },
+    {
+      "key": "finance_staff_token",
+      "value": "",
+      "type": "secret",
+      "enabled": true,
+      "description": "JWT token untuk role FinanceStaff"
+    },
+    {
+      "key": "finance_manager_token",
+      "value": "",
+      "type": "secret",
+      "enabled": true,
+      "description": "JWT token untuk role FinanceManager"
+    }
+  ]
+}

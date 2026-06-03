@@ -136,39 +136,6 @@ export class ApplicationsService {
 
       const app = appRes.rows[0];
 
-      // --- Auto-approve ---
-      const nameNorm = (dto.full_name || "").trim().toUpperCase();
-      const aliasNorms = (dto.aliases || []).map((a: string) =>
-        a.trim().toUpperCase(),
-      );
-      const identityNumber = dto.identity_number;
-
-      const watchlistCheck = await client.query(
-        `SELECT id FROM watchlist_entries
-       WHERE name_norm = $1
-          OR $2::text[] && aliases
-          OR national_id_number = $3
-       LIMIT 1`,
-        [nameNorm, aliasNorms, identityNumber],
-      );
-
-      if (watchlistCheck.rowCount === 0) {
-        // Tidak ada di watchlist → auto approve
-        await client.query(
-          `UPDATE applications SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`,
-          [app.id],
-        );
-        app.status = "APPROVED";
-        app.approved_at = new Date();
-      } else {
-        // Ada di watchlist → tetap SUBMITTED untuk review manual
-        await client.query(
-          `UPDATE applications SET status='SUBMITTED', updated_at=now() WHERE id=$1`,
-          [app.id],
-        );
-        app.status = "SUBMITTED";
-      }
-
       await client.query("COMMIT");
       return app;
     } catch (e: any) {
@@ -189,40 +156,7 @@ export class ApplicationsService {
             [branchId || null, userId, personId],
           );
 
-          const app = appRes.rows[0];
-
-          // repeat auto-approve check
-          const nameNorm = (dto.full_name || "").trim().toUpperCase();
-          const aliasNorms = (dto.aliases || []).map((a: string) =>
-            a.trim().toUpperCase(),
-          );
-          const identityNumber = dto.identity_number;
-
-          const watchlistCheck = await this.pool.query(
-            `SELECT id FROM watchlist_entries
-           WHERE name_norm = $1
-              OR $2::text[] && aliases
-              OR national_id_number = $3
-           LIMIT 1`,
-            [nameNorm, aliasNorms, identityNumber],
-          );
-
-          if (watchlistCheck.rowCount === 0) {
-            await this.pool.query(
-              `UPDATE applications SET status='APPROVED', approved_at=now(), updated_at=now() WHERE id=$1`,
-              [app.id],
-            );
-            app.status = "APPROVED";
-            app.approved_at = new Date();
-          } else {
-            await this.pool.query(
-              `UPDATE applications SET status='SUBMITTED', updated_at=now() WHERE id=$1`,
-              [app.id],
-            );
-            app.status = "SUBMITTED";
-          }
-
-          return app;
+          return appRes.rows[0];
         }
       }
 
@@ -253,37 +187,49 @@ export class ApplicationsService {
   }
 
   async createBusiness(dto: any, userId: number, branchId?: number) {
-    const q = await this.pool.query(
-      `INSERT INTO business_entities (legal_name, legal_form, incorporation_place, incorporation_date,
-        business_license_number, nib, npwp, address_line, city, province, postal_code, business_activity, industry_code, phone)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-       RETURNING id`,
-      [
-        dto.legal_name,
-        dto.legal_form,
-        dto.incorporation_place,
-        dto.incorporation_date,
-        dto.business_license_number,
-        dto.nib,
-        dto.npwp,
-        dto.address_line,
-        dto.city,
-        dto.province,
-        dto.postal_code,
-        dto.business_activity,
-        dto.industry_code || null,
-        dto.phone,
-      ],
-    );
-    const businessId = q.rows[0].id;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
 
-    const appRes = await this.pool.query(
-      `INSERT INTO applications (type, status, branch_id, created_by, business_id)
-       VALUES ('BUSINESS','DRAFT',$1,$2,$3)
-       RETURNING id, status`,
-      [branchId || null, userId, businessId],
-    );
-    return appRes.rows[0];
+      const q = await client.query(
+        `INSERT INTO business_entities (legal_name, legal_form, incorporation_place, incorporation_date,
+          business_license_number, nib, npwp, address_line, city, province, postal_code, business_activity, industry_code, phone)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         RETURNING id`,
+        [
+          dto.legal_name,
+          dto.legal_form,
+          dto.incorporation_place,
+          dto.incorporation_date,
+          dto.business_license_number,
+          dto.nib,
+          dto.npwp,
+          dto.address_line,
+          dto.city,
+          dto.province,
+          dto.postal_code,
+          dto.business_activity,
+          dto.industry_code || null,
+          dto.phone,
+        ],
+      );
+      const businessId = q.rows[0].id;
+
+      const appRes = await client.query(
+        `INSERT INTO applications (type, status, branch_id, created_by, business_id)
+         VALUES ('BUSINESS','DRAFT',$1,$2,$3)
+         RETURNING id, status`,
+        [branchId || null, userId, businessId],
+      );
+
+      await client.query("COMMIT");
+      return appRes.rows[0];
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   async addDocument(
@@ -495,18 +441,18 @@ export class ApplicationsService {
       pppspmHits = 0;
 
     for (const s of subjects) {
+      const nameNormExpr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
       const { rows: candidates } = await this.pool.query(
         `
       SELECT id, list_type, name, date_of_birth, nationality,
-             similarity(name_norm, upper(regexp_replace($1, '\s+', ' ', 'g'))) AS score
+             similarity(name_norm, ${nameNormExpr}) AS score
       FROM watchlist_entries
-      WHERE name_norm % upper(regexp_replace($1, '\s+', ' ', 'g'))
-        AND ($2::date IS NULL OR date_of_birth = $2::date)
-        AND ($3::text IS NULL OR upper(nationality) = upper($3))
+      WHERE name_norm % ${nameNormExpr}
+         OR (aliases_concat IS NOT NULL AND aliases_concat % ${nameNormExpr})
       ORDER BY score DESC
       LIMIT 30
       `,
-        [s.name, s.dob || null, s.nationality || null],
+        [s.name],
       );
 
       for (const c of candidates) {
@@ -839,5 +785,61 @@ export class ApplicationsService {
     const doc = await this.getDocument(appId, docId);
     await this.pool.query(`DELETE FROM documents WHERE id=$1`, [docId]);
     return doc;
+  }
+
+  async decide(
+    appId: number,
+    decision: "APPROVED" | "REJECTED",
+    reason: string | null,
+    reviewerId: number,
+  ) {
+    const { rows } = await this.pool.query(
+      `SELECT id, status FROM applications WHERE id=$1`,
+      [appId],
+    );
+    const app = rows[0];
+    if (!app) throw new NotFoundException("Application not found");
+
+    if (!["SUBMITTED", "IN_REVIEW"].includes(app.status)) {
+      throw new BadRequestException(
+        `Tidak bisa membuat keputusan untuk status ${app.status}. Harus SUBMITTED atau IN_REVIEW.`,
+      );
+    }
+
+    if (decision === "APPROVED") {
+      // Blokir jika ada CONFIRMED DTTOT/PPPSPM
+      const { rows: blockers } = await this.pool.query(
+        `SELECT id, list_type FROM screening_results
+         WHERE application_id = $1
+           AND review_status = 'CONFIRMED'
+           AND list_type IN ('DTTOT','PPPSPM')
+         LIMIT 1`,
+        [appId],
+      );
+      if (blockers.length) {
+        throw new BadRequestException(
+          `Tidak dapat approve: terdapat CONFIRMED ${blockers[0].list_type} hit. Lakukan review manual terlebih dahulu.`,
+        );
+      }
+
+      // Pastikan risk sudah pernah dihitung; kalau belum, hitung sekarang
+      const { rows: riskRows } = await this.pool.query(
+        `SELECT application_id FROM application_risk WHERE application_id=$1`,
+        [appId],
+      );
+      if (!riskRows.length) {
+        await this.screenAndComputeRisk(appId);
+      }
+    }
+
+    const res = await this.pool.query(
+      `UPDATE applications
+       SET status=$2, decision_by=$3, decision_reason=$4, decision_at=now(), updated_at=now()
+       WHERE id=$1
+       RETURNING id, status, decision_reason, decision_at`,
+      [appId, decision, reviewerId, reason || null],
+    );
+
+    return res.rows[0];
   }
 }

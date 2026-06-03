@@ -10,6 +10,9 @@ export declare class WatchlistController {
         total: number;
         success: number;
         errors: string | null;
+        log: {
+            uploaded_by: any;
+        };
     }>;
     history(limit?: string): Promise<any[]>;
 }

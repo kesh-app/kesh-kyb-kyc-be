@@ -19,6 +19,7 @@ const roles_guard_1 = require("../auth/roles.guard");
 const roles_decorator_1 = require("../auth/roles.decorator");
 const users_service_1 = require("./users.service");
 const admin_dto_1 = require("./admin.dto"); // kalau DTO-nya kamu pisah file, ganti import
+const auth_util_1 = require("../../common/auth.util");
 let UsersController = class UsersController {
     constructor(usersService) {
         this.usersService = usersService;
@@ -29,11 +30,11 @@ let UsersController = class UsersController {
     }
     // 👉 Buat admin baru
     async createAdmin(req, dto) {
-        return this.usersService.createAdmin(dto, req.user.id);
+        return this.usersService.createAdmin(dto, (0, auth_util_1.resolveUserId)(req.user));
     }
     // 👉 Update role / is_active / branch
     async updateAdmin(req, id, dto) {
-        return this.usersService.updateAdmin(id, dto, req.user.id);
+        return this.usersService.updateAdmin(id, dto, (0, auth_util_1.resolveUserId)(req.user));
     }
     async getUser(applicationId) {
         return this.usersService.getUserByApplicationId(applicationId);

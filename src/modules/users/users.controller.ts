@@ -15,6 +15,7 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { UsersService } from './users.service';
 import { CreateAdminUserDto, UpdateAdminUserDto } from './admin.dto';// kalau DTO-nya kamu pisah file, ganti import
+import { resolveUserId } from '../../common/auth.util';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -32,7 +33,7 @@ export class UsersController {
   @Post('admins')
   @Roles('SystemAdmin')
   async createAdmin(@Req() req: any, @Body() dto: CreateAdminUserDto) {
-    return this.usersService.createAdmin(dto, req.user.id);
+    return this.usersService.createAdmin(dto, resolveUserId(req.user) as number);
   }
 
   // 👉 Update role / is_active / branch
@@ -43,7 +44,7 @@ export class UsersController {
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateAdminUserDto,
   ) {
-    return this.usersService.updateAdmin(id, dto, req.user.id);
+    return this.usersService.updateAdmin(id, dto, resolveUserId(req.user) as number);
   }
 
   @Get(':applicationId')

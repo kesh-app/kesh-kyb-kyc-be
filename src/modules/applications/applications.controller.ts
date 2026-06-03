@@ -22,6 +22,7 @@ import {
   CreateBusinessDto,
   AddDocumentDto,
   CreatePartyDto,
+  DecisionDto,
 } from "./dto";
 import { JwtAuthGuard } from "../auth/jwt.guard";
 import { Roles } from "../auth/roles.decorator";
@@ -182,6 +183,16 @@ export class ApplicationsController {
   @Patch(":id/submit")
   async submit(@Param("id", ParseIntPipe) appId: number, @Req() req: any) {
     return this.svc.submit(appId, req.user.sub);
+  }
+
+  @Roles("ComplianceReviewer", "ComplianceLead")
+  @Patch(":id/decision")
+  async decide(
+    @Param("id", ParseIntPipe) appId: number,
+    @Body(new ValidationPipe({ whitelist: true })) dto: DecisionDto,
+    @Req() req: any,
+  ) {
+    return this.svc.decide(appId, dto.decision, dto.reason ?? null, req.user.sub);
   }
 
   @Roles("ComplianceReviewer", "ComplianceLead")

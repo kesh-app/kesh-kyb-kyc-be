@@ -48,6 +48,9 @@ export declare class WatchlistService {
         total: number;
         success: number;
         errors: string | null;
+        log: {
+            uploaded_by: any;
+        };
     }>;
     listIngestHistory(limit?: number): Promise<any[]>;
 }

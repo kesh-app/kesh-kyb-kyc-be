@@ -112,6 +112,14 @@ export class AddDocumentDto {
   file_uri!: string;
 }
 
+export class DecisionDto {
+  @IsIn(['APPROVED', 'REJECTED'])
+  decision!: 'APPROVED' | 'REJECTED';
+
+  @IsOptional() @IsString()
+  reason?: string;
+}
+
 export class CreatePartyDto {
   @IsIn(['DIRECTOR','COMMISSIONER','MANAGER','BO','AUTHORIZED_REP'])
   role!: 'DIRECTOR'|'COMMISSIONER'|'MANAGER'|'BO'|'AUTHORIZED_REP';

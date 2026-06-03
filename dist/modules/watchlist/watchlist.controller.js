@@ -20,6 +20,7 @@ const jwt_guard_1 = require("../auth/jwt.guard");
 const roles_guard_1 = require("../auth/roles.guard");
 const roles_decorator_1 = require("../auth/roles.decorator");
 const dto_1 = require("./dto");
+const auth_util_1 = require("../../common/auth.util");
 let WatchlistController = class WatchlistController {
     constructor(svc) {
         this.svc = svc;
@@ -27,7 +28,7 @@ let WatchlistController = class WatchlistController {
     async upload(file, body, req) {
         if (!file)
             throw new common_1.BadRequestException("No file uploaded");
-        return this.svc.ingestBuffer(file.buffer, body.list_type, body.list_source, req.user?.id, file.originalname);
+        return this.svc.ingestBuffer(file.buffer, body.list_type, body.list_source, Number((0, auth_util_1.resolveUserId)(req.user)), file.originalname);
     }
     async history(limit) {
         const n = Math.min(Number(limit) || 20, 100);

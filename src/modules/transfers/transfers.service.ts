@@ -12,8 +12,9 @@ import {
   SetTransferResultDto,
   UpdateTransferDto,
 } from "./dto";
+import { resolveUserId } from "../../common/auth.util";
 
-type AuthedUser = { id: number | string; role: string };
+type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
 @Injectable()
 export class TransfersService {
@@ -62,8 +63,6 @@ export class TransfersService {
       throw new BadRequestException("Sender is not KYC/KYB approved");
     }
 
-    const senderId = senderApp.person_id;
-
     // ✅ insert transfer
     const q = await this.pool.query(
       `INSERT INTO transfers(
@@ -76,7 +75,7 @@ export class TransfersService {
       description,
       requested_transfer_at,
       created_by,
-      sender_id,
+      sender_application_id,
       updated_at
     )
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
@@ -90,14 +89,14 @@ export class TransfersService {
         dto.beneficiaryAccountName,
         dto.description ?? null,
         dto.requestedTransferAt ?? null,
-        user.id,
-        senderId,
+        resolveUserId(user),
+        dto.sender_application_id,
       ],
     );
 
     const row = q.rows[0];
 
-    await this.audit(user.id, "TRANSFER_CREATE", String(row.id), null, row, ip);
+    await this.audit(resolveUserId(user), "TRANSFER_CREATE", String(row.id), null, row, ip);
     return row;
   }
 
@@ -148,7 +147,7 @@ export class TransfersService {
     );
 
     await this.audit(
-      user.id,
+      resolveUserId(user),
       "TRANSFER_UPDATE_DRAFT",
       String(id),
       row,
@@ -185,7 +184,7 @@ export class TransfersService {
     );
 
     await this.audit(
-      user.id,
+      resolveUserId(user),
       "TRANSFER_SUBMIT",
       String(id),
       row,
@@ -225,11 +224,11 @@ export class TransfersService {
         updated_at=now()
       WHERE id=$1
       RETURNING *`,
-      [id, status, user.id],
+      [id, status, resolveUserId(user)],
     );
 
     await this.audit(
-      user.id,
+      resolveUserId(user),
       `TRANSFER_${status}`,
       String(id),
       row,
@@ -272,7 +271,7 @@ export class TransfersService {
     );
 
     await this.audit(
-      user.id,
+      resolveUserId(user),
       "TRANSFER_SET_RESULT",
       String(id),
       row,
@@ -293,7 +292,7 @@ export class TransfersService {
     if (role === "FinanceStaff") {
       // 🔹 Staff → hanya transfer yang dia buat
       // plus data lama yang belum punya created_by (NULL) supaya tetap kelihatan
-      params.push(user.id);
+      params.push(resolveUserId(user));
       where += ` AND (created_by = $${params.length} OR created_by IS NULL)`;
     }
     // 🔹 FinanceManager, SystemAdmin, dll → tidak ada filter khusus
@@ -336,7 +335,7 @@ export class TransfersService {
     // Non-manager hanya boleh lihat transfer yang dia buat
     if (!isManager) {
       const creatorId: number | null = row.created_by ?? null;
-      const userId = Number(user.id);
+      const userId = Number(resolveUserId(user));
 
       if (creatorId !== null && !Number.isNaN(userId) && creatorId !== userId) {
         throw new ForbiddenException("Not allowed");

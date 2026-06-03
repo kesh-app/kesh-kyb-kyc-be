@@ -61,8 +61,8 @@ let RegistrantsController = class RegistrantsController {
         a.type,
         a.status,
         a.created_at,
-        rp.risk_level,
-        rp.score_total AS risk_score,
+        COALESCE(ar.override_level, ar.risk_level) AS risk_level,
+        ar.risk_score,
         ${isInd
             ? `p.full_name          AS display_name,
              p.email              AS email,
@@ -76,7 +76,7 @@ let RegistrantsController = class RegistrantsController {
              b.npwp               AS npwp`},
         COUNT(*) OVER()::int AS total_rows
       FROM applications a
-      LEFT JOIN risk_profiles rp ON rp.application_id = a.id
+      LEFT JOIN application_risk ar ON ar.application_id = a.id
       ${isInd ? 'LEFT JOIN persons p ON p.id = a.person_id'
             : 'LEFT JOIN business_entities b ON b.id = a.business_id'}
       ${whereSql}

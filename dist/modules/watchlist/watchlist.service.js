@@ -133,94 +133,96 @@ let WatchlistService = class WatchlistService {
         const aliases = r.alias_name || null;
         const aliases_concat = aliases ? aliases.join(" ") : null;
         const natural_key = this.buildNaturalKey(r);
-        const text = `
-      INSERT INTO watchlist_entries
-      (list_type, list_source, unique_id, natural_key,
-       name, name_norm, aliases, aliases_concat, gender, date_of_birth, place_of_birth, nationality,
-       national_id_number, tax_identification_number, position_title, institution_name, pep_type, status,
-       address, city, country, entity_name, registration_number, legal_form, country_of_registration,
-       associated_individuals, associated_entities, relationship_type, sanction_number, inclusion_date,
-       removal_date, list_updated_date, source_url, remarks, updated_at)
-      VALUES
-      ($1,$2,$3,$4,
-       $5,$6,$7,$8,$9,$10,$11,$12,
-       $13,$14,$15,$16,$17,$18,
-       $19,$20,$21,$22,$23,$24,$25,
-       $26,$27,$28,$29,$30,
-       $31,$32,$33,$34, now())
-      ON CONFLICT (unique_id) WHERE $3 IS NOT NULL DO UPDATE SET
-        list_type = EXCLUDED.list_type,
-        list_source = EXCLUDED.list_source,
-        name = EXCLUDED.name,
-        name_norm = EXCLUDED.name_norm,
-        aliases = EXCLUDED.aliases,
-        aliases_concat = EXCLUDED.aliases_concat,
-        gender = EXCLUDED.gender,
-        date_of_birth = EXCLUDED.date_of_birth,
-        place_of_birth = EXCLUDED.place_of_birth,
-        nationality = EXCLUDED.nationality,
-        national_id_number = EXCLUDED.national_id_number,
-        tax_identification_number = EXCLUDED.tax_identification_number,
-        position_title = EXCLUDED.position_title,
-        institution_name = EXCLUDED.institution_name,
-        pep_type = EXCLUDED.pep_type,
-        status = EXCLUDED.status,
-        address = EXCLUDED.address,
-        city = EXCLUDED.city,
-        country = EXCLUDED.country,
-        entity_name = EXCLUDED.entity_name,
-        registration_number = EXCLUDED.registration_number,
-        legal_form = EXCLUDED.legal_form,
-        country_of_registration = EXCLUDED.country_of_registration,
-        associated_individuals = EXCLUDED.associated_individuals,
-        associated_entities = EXCLUDED.associated_entities,
-        relationship_type = EXCLUDED.relationship_type,
-        sanction_number = EXCLUDED.sanction_number,
-        inclusion_date = EXCLUDED.inclusion_date,
-        removal_date = EXCLUDED.removal_date,
-        list_updated_date = EXCLUDED.list_updated_date,
-        source_url = EXCLUDED.source_url,
-        remarks = EXCLUDED.remarks,
-        updated_at = now()
-      RETURNING id;
-    `;
-        const values = [
-            r.list_type,
-            r.list_source,
-            r.unique_id || null,
-            natural_key,
-            r.full_name || r.entity_name || null,
-            name_norm,
-            aliases,
-            aliases_concat,
-            r.gender,
-            r.date_of_birth,
-            r.place_of_birth,
-            r.nationality,
-            r.national_id_number,
-            r.tax_identification_number,
-            r.position_title,
-            r.institution_name,
-            r.pep_type,
-            r.status,
-            r.address,
-            r.city,
-            r.country,
-            r.entity_name,
-            r.registration_number,
-            r.legal_form,
-            r.country_of_registration,
-            r.associated_individuals,
-            r.associated_entities,
-            r.relationship_type,
-            r.sanction_number,
-            r.inclusion_date,
-            r.removal_date,
-            r.list_updated_date,
-            r.source_url,
-            r.remarks,
+        const uid = r.unique_id?.trim() || null;
+        // Kolom values (34 params), dipakai bersama untuk INSERT dan UPDATE
+        const vals = [
+            r.list_type, // $1
+            r.list_source, // $2
+            uid, // $3
+            natural_key, // $4
+            r.full_name || r.entity_name || null, // $5
+            name_norm, // $6
+            aliases, // $7
+            aliases_concat, // $8
+            r.gender, // $9
+            r.date_of_birth, // $10
+            r.place_of_birth, // $11
+            r.nationality, // $12
+            r.national_id_number, // $13
+            r.tax_identification_number, // $14
+            r.position_title, // $15
+            r.institution_name, // $16
+            r.pep_type, // $17
+            r.status, // $18
+            r.address, // $19
+            r.city, // $20
+            r.country, // $21
+            r.entity_name, // $22
+            r.registration_number, // $23
+            r.legal_form, // $24
+            r.country_of_registration, // $25
+            r.associated_individuals, // $26
+            r.associated_entities, // $27
+            r.relationship_type, // $28
+            r.sanction_number, // $29
+            r.inclusion_date, // $30
+            r.removal_date, // $31
+            r.list_updated_date, // $32
+            r.source_url, // $33
+            r.remarks, // $34
         ];
-        await this.pool.query(text, values);
+        const client = await this.pool.connect();
+        try {
+            await client.query("BEGIN");
+            // Cari existing: coba via upper(unique_id) dulu, fallback ke natural_key
+            let existingId = null;
+            if (uid) {
+                const { rows } = await client.query(`SELECT id FROM watchlist_entries WHERE upper(unique_id) = upper($1) LIMIT 1`, [uid]);
+                if (rows[0])
+                    existingId = rows[0].id;
+            }
+            if (!existingId) {
+                const { rows } = await client.query(`SELECT id FROM watchlist_entries WHERE natural_key = $1 LIMIT 1`, [natural_key]);
+                if (rows[0])
+                    existingId = rows[0].id;
+            }
+            if (existingId) {
+                await client.query(`UPDATE watchlist_entries SET
+            list_type=$1, list_source=$2,
+            unique_id=COALESCE($3, unique_id), natural_key=$4,
+            name=$5, name_norm=$6, aliases=$7, aliases_concat=$8,
+            gender=$9, date_of_birth=$10, place_of_birth=$11, nationality=$12,
+            national_id_number=$13, tax_identification_number=$14,
+            position_title=$15, institution_name=$16, pep_type=$17, status=$18,
+            address=$19, city=$20, country=$21, entity_name=$22,
+            registration_number=$23, legal_form=$24, country_of_registration=$25,
+            associated_individuals=$26, associated_entities=$27,
+            relationship_type=$28, sanction_number=$29, inclusion_date=$30,
+            removal_date=$31, list_updated_date=$32, source_url=$33, remarks=$34,
+            updated_at=now()
+           WHERE id=$35`, [...vals, existingId]);
+            }
+            else {
+                await client.query(`INSERT INTO watchlist_entries
+            (list_type, list_source, unique_id, natural_key,
+             name, name_norm, aliases, aliases_concat, gender, date_of_birth, place_of_birth, nationality,
+             national_id_number, tax_identification_number, position_title, institution_name, pep_type, status,
+             address, city, country, entity_name, registration_number, legal_form, country_of_registration,
+             associated_individuals, associated_entities, relationship_type, sanction_number, inclusion_date,
+             removal_date, list_updated_date, source_url, remarks, updated_at)
+           VALUES
+            ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+             $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34, now())`, vals);
+            }
+            await client.query("COMMIT");
+        }
+        catch (e) {
+            await client.query("ROLLBACK");
+            throw e;
+        }
+        finally {
+            client.release();
+        }
     }
     async ingestBuffer(buf, list_type, list_source, userId, originalFilename) {
         const rows = this.parseWorkbook(buf, list_type, list_source);
@@ -240,8 +242,9 @@ let WatchlistService = class WatchlistService {
             }
         }
         // insert ke log
-        await this.pool.query(`INSERT INTO watchlist_ingest_logs(actor_id, list_type, list_source, original_filename, total_rows, success_rows, error_message)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`, [
+        const logRes = await this.pool.query(`INSERT INTO watchlist_ingest_logs(actor_id, list_type, list_source, original_filename, total_rows, success_rows, error_message)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING actor_id AS uploaded_by`, [
             userId,
             list_type,
             list_source,
@@ -255,6 +258,7 @@ let WatchlistService = class WatchlistService {
             total: rows.length,
             success: successRows,
             errors: errorMessage,
+            log: { uploaded_by: logRes.rows[0]?.uploaded_by ?? null },
         };
     }
     async listIngestHistory(limit = 20) {

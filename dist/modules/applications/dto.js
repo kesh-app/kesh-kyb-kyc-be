@@ -9,7 +9,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CreatePartyDto = exports.AddDocumentDto = exports.CreateBusinessDto = exports.CreateIndividualDto = void 0;
+exports.CreatePartyDto = exports.DecisionDto = exports.AddDocumentDto = exports.CreateBusinessDto = exports.CreateIndividualDto = void 0;
 const class_validator_1 = require("class-validator");
 /**
  * INDIVIDUAL (KYC)
@@ -170,6 +170,18 @@ __decorate([
     (0, class_validator_1.IsNotEmpty)(),
     __metadata("design:type", String)
 ], AddDocumentDto.prototype, "file_uri", void 0);
+class DecisionDto {
+}
+exports.DecisionDto = DecisionDto;
+__decorate([
+    (0, class_validator_1.IsIn)(['APPROVED', 'REJECTED']),
+    __metadata("design:type", String)
+], DecisionDto.prototype, "decision", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], DecisionDto.prototype, "reason", void 0);
 class CreatePartyDto {
 }
 exports.CreatePartyDto = CreatePartyDto;

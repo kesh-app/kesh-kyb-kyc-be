@@ -16,6 +16,7 @@ import { JwtAuthGuard } from "../auth/jwt.guard";
 import { RolesGuard } from "../auth/roles.guard";
 import { Roles } from "../auth/roles.decorator";
 import { UploadWatchlistDto } from "./dto";
+import { resolveUserId } from "../../common/auth.util";
 
 @Controller("watchlist")
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -57,7 +58,7 @@ export class WatchlistController {
       file.buffer,
       body.list_type,
       body.list_source,
-      req.user?.id,
+      Number(resolveUserId(req.user)),
       file.originalname,
     );
   }
