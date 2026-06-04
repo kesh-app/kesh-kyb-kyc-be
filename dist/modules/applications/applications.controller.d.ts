@@ -8,8 +8,11 @@ export declare class ApplicationsController {
     list(limit?: number, offset?: number): Promise<any[]>;
     detail(appId: number): Promise<{
         application: any;
+        person: any;
+        business: any;
         documents: any[];
         parties: any[];
+        risk: any;
     }>;
     /** (Opsional) quick pre-check tanpa submit */
     precheck(appId: number): Promise<{
@@ -37,20 +40,15 @@ export declare class ApplicationsController {
             risk_score: number;
             risk_level: string;
             factors: {
-                hits: {
-                    pep: number;
-                    dttot: number;
-                    pppspm: number;
-                };
-                docPenalty: number;
+                version: string;
+                hits: any;
+                score_breakdown: {
+                    code: string;
+                    score: number;
+                }[];
                 threshold: number;
-                weights: {
-                    PEP: number;
-                    DTTOT: number;
-                    PPPSPM: number;
-                    DOC_MISSING: number;
-                };
             };
+            risk_factors: import("./applications.service").RiskFactor[];
         };
     }>;
     decide(appId: number, dto: DecisionDto, req: any): Promise<any>;

@@ -7,20 +7,64 @@ import {
 } from "@nestjs/common";
 import { Pool } from "pg";
 
-/** Ambang & bobot scoring (bisa kamu pindah ke ENV nanti) */
-const SIMILARITY_THRESHOLD = 0.35; // minimal dianggap hit
-const WEIGHT = {
-  PEP: 30, // per hit
-  DTTOT: 70, // per hit (sangat tinggi)
-  PPPSPM: 50, // per hit
-  DOC_MISSING: 10, // penalty per dokumen wajib yang hilang (fallback)
+// ─── Internal Preliminary Risk Scoring — RBA v2 ────────────────────────────
+// Bukan formula resmi BI. Dipakai sebagai dasar review compliance internal.
+
+const SIMILARITY_THRESHOLD = 0.35;
+
+// Bobot per faktor (satuan poin, cap total 100)
+const W = {
+  DTTOT_CONFIRMED:   100,
+  PPPSPM_CONFIRMED:  100,
+  PEP_CONFIRMED:      40,
+  PEP_CANDIDATE:      20,
+  DTTOT_CANDIDATE:    50,
+  PPPSPM_CANDIDATE:   50,
+  DOC_MISSING:        10,
+  DOC_REJECTED:       15,
+  HIGH_RISK_OCCUPATION: 15,
+  PEP_SELF_DECLARED:  40,
+  HIGH_RISK_ACTIVITY: 20,
+  HIGH_RISK_LEGAL_FORM: 10,
+  BO_MISSING:         30,
+  GEOGRAPHY:          15,
 };
 
-/** Ubah angka 0..100 ke level */
+// Kata kunci pekerjaan berisiko tinggi (individual)
+const HIGH_RISK_OCCUPATIONS = [
+  'money changer', 'remittance', 'crypto', 'casino', 'gambling',
+  'precious metal', 'arms', 'nonprofit', 'charity', 'politician', 'public official',
+  'pejabat', 'politisi', 'kasino', 'judi', 'logam mulia', 'senjata', 'tukar valas',
+];
+
+// Kata kunci kegiatan usaha berisiko tinggi (bisnis)
+const HIGH_RISK_ACTIVITIES = [
+  'money changer', 'remittance', 'crypto', 'virtual asset', 'casino', 'gambling',
+  'precious metal', 'arms', 'weapon', 'nonprofit', 'charity', 'foundation',
+  'yayasan', 'donation', 'cash intensive', 'judi', 'kasino', 'logam mulia',
+  'senjata', 'donasi', 'amal', 'tukar valas',
+];
+
+// Bentuk hukum berisiko tinggi
+const HIGH_RISK_LEGAL_FORMS = ['YAYASAN', 'FOUNDATION', 'NONPROFIT', 'KOPERASI'];
+
+// Placeholder daftar negara berisiko tinggi — dipelihara oleh compliance (FATF/BI)
+const HIGH_RISK_COUNTRIES: string[] = [];
+
+/** Ubah angka 0..100 ke level (threshold dipertahankan dari v1) */
 function levelOf(score: number) {
   if (score >= 70) return "HIGH";
   if (score >= 40) return "MEDIUM";
   return "LOW";
+}
+
+export interface RiskFactor {
+  code: string;
+  label: string;
+  score: number;
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
+  source: string;
+  details?: string;
 }
 
 @Injectable()
@@ -253,37 +297,73 @@ export class ApplicationsService {
 
   async getDetail(appId: number) {
     const { rows: apps } = await this.pool.query(
-      `SELECT a.*, p.full_name, p.identity_type, p.identity_number, p.signature_uri,
-              b.legal_name, b.nib, b.npwp
-       FROM applications a
-       LEFT JOIN persons p ON p.id = a.person_id
-       LEFT JOIN business_entities b ON b.id = a.business_id
-       WHERE a.id=$1`,
+      `SELECT * FROM applications WHERE id=$1`,
       [appId],
     );
     const app = apps[0];
     if (!app) throw new NotFoundException("Application not found");
 
+    // person — semua field yang dibutuhkan FE
+    let person: any = null;
+    if (app.person_id) {
+      const { rows: pr } = await this.pool.query(
+        `SELECT id, full_name, identity_type, identity_number,
+                pob, dob, nationality, phone, email, gender,
+                occupation, address_identity, address_residential, signature_uri,
+                pep_self_declared
+         FROM persons WHERE id=$1`,
+        [app.person_id],
+      );
+      person = pr[0] ?? null;
+    }
+
+    // business — semua field yang dibutuhkan FE
+    let business: any = null;
+    if (app.business_id) {
+      const { rows: biz } = await this.pool.query(
+        `SELECT id, legal_name, trade_name, legal_form,
+                incorporation_place, incorporation_date,
+                nib, npwp, address_line, city, province, postal_code,
+                phone, industry_code, business_activity
+         FROM business_entities WHERE id=$1`,
+        [app.business_id],
+      );
+      business = biz[0] ?? null;
+    }
+
+    // documents
     const { rows: docs } = await this.pool.query(
       `SELECT id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents WHERE application_id=$1 ORDER BY created_at DESC`,
       [appId],
     );
 
+    // parties (BUSINESS only)
     let parties: any[] = [];
     if (app.business_id) {
-      const q = await this.pool.query(
-        `SELECT bp.id, bp.role, bp.is_active, p.id as person_id, p.full_name, p.identity_type, p.identity_number
+      const { rows } = await this.pool.query(
+        `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
+                p.id as person_id, p.full_name, p.identity_type, p.identity_number
          FROM business_parties bp
          JOIN persons p ON p.id = bp.person_id
          WHERE bp.business_id = $1
          ORDER BY bp.created_at DESC`,
         [app.business_id],
       );
-      parties = q.rows;
+      parties = rows;
     }
 
-    return { application: app, documents: docs, parties };
+    // risk (null kalau belum di-submit)
+    const { rows: riskRows } = await this.pool.query(
+      `SELECT application_id, risk_score::float AS risk_score, risk_level,
+              factors, risk_factors,
+              override_level, override_reason, override_by, override_at, created_at
+       FROM application_risk WHERE application_id=$1`,
+      [appId],
+    );
+    const risk = riskRows[0] ?? null;
+
+    return { application: app, person, business, documents: docs, parties, risk };
   }
 
   async validateBeforeSubmit(appId: number) {
@@ -309,7 +389,9 @@ export class ApplicationsService {
       const person = pr[0];
 
       const missing: string[] = [];
-      if (!person?.signature_uri) missing.push("signature_uri (tanda tangan)");
+      // signature valid jika persons.signature_uri terisi ATAU ada dokumen SIGNATURE
+      const hasSignature = !!person?.signature_uri || docSet.has("SIGNATURE");
+      if (!hasSignature) missing.push("signature_uri (tanda tangan)");
       if (!(docSet.has("KTP") || docSet.has("SIM") || docSet.has("PASPOR"))) {
         missing.push("dokumen identitas (KTP/SIM/PASPOR)");
       }
@@ -361,9 +443,12 @@ export class ApplicationsService {
     return { ok: true };
   }
 
-  /** Jalankan screening terhadap subject aplikasi + compute risk, simpan ke screening_results & application_risk */
+  /**
+   * Internal Preliminary Risk Scoring — RBA v2.
+   * Bukan formula resmi BI. Digunakan sebagai dasar review compliance internal.
+   */
   async screenAndComputeRisk(appId: number) {
-    // ambil aplikasi
+    // ── 1. Ambil aplikasi ──
     const { rows: apps } = await this.pool.query(
       `SELECT id, type, person_id, business_id FROM applications WHERE id=$1`,
       [appId],
@@ -371,14 +456,13 @@ export class ApplicationsService {
     const app = apps[0];
     if (!app) throw new NotFoundException("Application not found");
 
-    // kumpulkan subjek yang akan di-screen:
+    // ── 2. Bangun daftar subjek untuk di-screen ──
     type Subject = {
       subject_type: "INDIVIDUAL" | "BUSINESS" | "PARTY";
       name: string;
       dob?: string | null;
       nationality?: string | null;
       ref?: number | null;
-      extra?: any;
     };
     const subjects: Subject[] = [];
 
@@ -387,138 +471,224 @@ export class ApplicationsService {
         `SELECT id, full_name AS name, dob::text AS dob, nationality FROM persons WHERE id=$1`,
         [app.person_id],
       );
-      if (p[0])
-        subjects.push({
-          subject_type: "INDIVIDUAL",
-          name: p[0].name,
-          dob: p[0].dob,
-          nationality: p[0].nationality,
-          ref: p[0].id,
-        });
+      if (p[0]) subjects.push({ subject_type: "INDIVIDUAL", name: p[0].name, dob: p[0].dob, nationality: p[0].nationality, ref: p[0].id });
     } else if (app.type === "BUSINESS") {
       const { rows: b } = await this.pool.query(
         `SELECT id, legal_name AS name, country AS nationality FROM business_entities WHERE id=$1`,
         [app.business_id],
       );
-      if (b[0])
-        subjects.push({
-          subject_type: "BUSINESS",
-          name: b[0].name,
-          nationality: b[0].nationality || null,
-          ref: b[0].id,
-        });
+      if (b[0]) subjects.push({ subject_type: "BUSINESS", name: b[0].name, nationality: b[0].nationality || null, ref: b[0].id });
 
-      // parties (DIRECTOR/COMMISSIONER/MANAGER/BO/AUTHORIZED_REP)
       const { rows: parties } = await this.pool.query(
-        `SELECT bp.id as party_id, bp.role,
-              p.id as person_id, p.full_name as name, p.dob::text as dob, p.nationality
-       FROM business_parties bp
-       JOIN persons p ON p.id = bp.person_id
-       WHERE bp.business_id=$1 AND bp.is_active = TRUE`,
+        `SELECT bp.id as party_id, p.full_name as name, p.dob::text as dob, p.nationality
+         FROM business_parties bp
+         JOIN persons p ON p.id = bp.person_id
+         WHERE bp.business_id=$1 AND bp.is_active = TRUE`,
         [app.business_id],
       );
-      for (const r of parties) {
-        subjects.push({
-          subject_type: "PARTY",
-          name: r.name,
-          dob: r.dob,
-          nationality: r.nationality,
-          ref: r.party_id,
-          extra: { role: r.role, person_id: r.person_id },
-        });
+      for (const r of parties) subjects.push({ subject_type: "PARTY", name: r.name, dob: r.dob, nationality: r.nationality, ref: r.party_id });
+    }
+
+    // ── 3. Bersihkan screening lama & jalankan screening baru ──
+    await this.pool.query(`DELETE FROM screening_results WHERE application_id=$1`, [appId]);
+
+    for (const s of subjects) {
+      const expr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
+      const { rows: candidates } = await this.pool.query(
+        `SELECT id, list_type, name, date_of_birth, nationality,
+                similarity(name_norm, ${expr}) AS score
+         FROM watchlist_entries
+         WHERE name_norm % ${expr}
+            OR (aliases_concat IS NOT NULL AND aliases_concat % ${expr})
+         ORDER BY score DESC LIMIT 30`,
+        [s.name],
+      );
+      for (const c of candidates) {
+        if (Number(c.score) < SIMILARITY_THRESHOLD) continue;
+        await this.pool.query(
+          `INSERT INTO screening_results
+             (application_id, subject_type, subject_ref, list_type, watchlist_id,
+              matched_name, matched_dob, matched_nationality, score)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [appId, s.subject_type, s.ref || null, c.list_type, c.id,
+           c.name, c.date_of_birth || null, c.nationality || null, c.score],
+        );
       }
     }
 
-    // bersihkan hasil screening lama (agar idempotent)
-    await this.pool.query(
-      `DELETE FROM screening_results WHERE application_id=$1`,
+    // ── 4. Baca kembali hasil screening dikelompokkan ──
+    const { rows: hitRows } = await this.pool.query(
+      `SELECT list_type,
+              COALESCE(review_status::text, 'UNREVIEWED') AS review_status,
+              COUNT(*)::int                               AS cnt,
+              MAX(score::float)                           AS top_score,
+              MAX(matched_name)                           AS top_name
+       FROM screening_results
+       WHERE application_id=$1
+       GROUP BY list_type, COALESCE(review_status::text, 'UNREVIEWED')`,
       [appId],
     );
 
-    // jalankan screening per subject terhadap watchlist_entries
-    let pepHits = 0,
-      dttotHits = 0,
-      pppspmHits = 0;
+    // ── 5. Faktor: watchlist / sanctions ──
+    const riskFactors: RiskFactor[] = [];
+    let score = 0;
 
-    for (const s of subjects) {
-      const nameNormExpr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
-      const { rows: candidates } = await this.pool.query(
-        `
-      SELECT id, list_type, name, date_of_birth, nationality,
-             similarity(name_norm, ${nameNormExpr}) AS score
-      FROM watchlist_entries
-      WHERE name_norm % ${nameNormExpr}
-         OR (aliases_concat IS NOT NULL AND aliases_concat % ${nameNormExpr})
-      ORDER BY score DESC
-      LIMIT 30
-      `,
-        [s.name],
-      );
+    for (const h of hitRows) {
+      if (["FALSE_POSITIVE", "DISMISSED"].includes(h.review_status)) continue;
+      const confirmed = h.review_status === "CONFIRMED";
+      const topPct = `${((h.top_score ?? 0) * 100).toFixed(0)}%`;
 
-      for (const c of candidates) {
-        if (Number(c.score) < SIMILARITY_THRESHOLD) continue;
-
-        await this.pool.query(
-          `INSERT INTO screening_results (application_id, subject_type, subject_ref, list_type, watchlist_id, matched_name, matched_dob, matched_nationality, score)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [
-            appId,
-            s.subject_type,
-            s.ref || null,
-            c.list_type,
-            c.id,
-            c.name,
-            c.date_of_birth || null,
-            c.nationality || null,
-            c.score,
-          ],
-        );
-
-        if (c.list_type === "PEP") pepHits++;
-        if (c.list_type === "DTTOT") dttotHits++;
-        if (c.list_type === "PPPSPM") pppspmHits++;
+      if (h.list_type === "DTTOT") {
+        const pts = confirmed ? W.DTTOT_CONFIRMED : W.DTTOT_CANDIDATE;
+        score += pts;
+        riskFactors.push({ code: confirmed ? "WATCHLIST_DTTOT_CONFIRMED" : "WATCHLIST_DTTOT_CANDIDATE", label: confirmed ? "DTTOT confirmed match" : "DTTOT candidate match (belum direview)", score: pts, severity: confirmed ? "CRITICAL" : "HIGH", source: "screening", details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}` });
+      } else if (h.list_type === "PPPSPM") {
+        const pts = confirmed ? W.PPPSPM_CONFIRMED : W.PPPSPM_CANDIDATE;
+        score += pts;
+        riskFactors.push({ code: confirmed ? "WATCHLIST_PPPSPM_CONFIRMED" : "WATCHLIST_PPPSPM_CANDIDATE", label: confirmed ? "PPPSPM confirmed match" : "PPPSPM candidate match (belum direview)", score: pts, severity: confirmed ? "CRITICAL" : "HIGH", source: "screening", details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}` });
+      } else if (h.list_type === "PEP") {
+        const pts = confirmed ? W.PEP_CONFIRMED : W.PEP_CANDIDATE;
+        score += pts;
+        riskFactors.push({ code: confirmed ? "WATCHLIST_PEP_CONFIRMED" : "WATCHLIST_PEP_CANDIDATE", label: confirmed ? "PEP confirmed match" : "PEP candidate match (belum direview)", score: pts, severity: confirmed ? "HIGH" : "MEDIUM", source: "screening", details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}` });
       }
     }
 
-    // ambil faktor dokumen hilang (fallback) dari precheck untuk penalti ringan
-    let docPenalty = 0;
-    try {
-      await this.validateBeforeSubmit(appId);
-    } catch (e: any) {
-      const missing: string[] = e?.response?.missing || [];
-      docPenalty = missing.length * WEIGHT.DOC_MISSING;
+    // ── 6. Faktor: profil individu ──
+    if (app.type === "INDIVIDUAL") {
+      const { rows: pr } = await this.pool.query(
+        `SELECT occupation, pep_self_declared, nationality FROM persons WHERE id=$1`,
+        [app.person_id],
+      );
+      const p = pr[0] ?? {};
+
+      if (p.pep_self_declared) {
+        score += W.PEP_SELF_DECLARED;
+        riskFactors.push({ code: "INDIVIDUAL_PEP_SELF_DECLARED", label: "PEP self-declared oleh pemohon", score: W.PEP_SELF_DECLARED, severity: "HIGH", source: "profile" });
+      }
+
+      const occ = (p.occupation || "").toLowerCase();
+      const matchedOcc = HIGH_RISK_OCCUPATIONS.find((k) => occ.includes(k));
+      if (matchedOcc) {
+        score += W.HIGH_RISK_OCCUPATION;
+        riskFactors.push({ code: "INDIVIDUAL_HIGH_RISK_OCCUPATION", label: "Pekerjaan berisiko tinggi", score: W.HIGH_RISK_OCCUPATION, severity: "MEDIUM", source: "profile", details: `Pekerjaan: ${p.occupation}` });
+      }
+
+      const nat = (p.nationality || "").toUpperCase();
+      if (HIGH_RISK_COUNTRIES.length && HIGH_RISK_COUNTRIES.includes(nat)) {
+        score += W.GEOGRAPHY;
+        riskFactors.push({ code: "GEOGRAPHY_HIGH_RISK_NATIONALITY", label: "Kewarganegaraan negara berisiko tinggi", score: W.GEOGRAPHY, severity: "MEDIUM", source: "geography", details: `Nationality: ${nat}` });
+      }
     }
 
-    // hitung risk dasar
-    let score = 0;
-    score += pepHits * WEIGHT.PEP;
-    score += dttotHits * WEIGHT.DTTOT;
-    score += pppspmHits * WEIGHT.PPPSPM;
-    score += docPenalty;
+    // ── 7. Faktor: profil bisnis ──
+    if (app.type === "BUSINESS") {
+      const { rows: bizRows } = await this.pool.query(
+        `SELECT business_activity, legal_form, country FROM business_entities WHERE id=$1`,
+        [app.business_id],
+      );
+      const biz = bizRows[0] ?? {};
 
-    // clamp 0..100
+      const activity = (biz.business_activity || "").toLowerCase();
+      const matchedAct = HIGH_RISK_ACTIVITIES.find((k) => activity.includes(k));
+      if (matchedAct) {
+        score += W.HIGH_RISK_ACTIVITY;
+        riskFactors.push({ code: "BUSINESS_HIGH_RISK_ACTIVITY", label: "Kegiatan usaha berisiko tinggi", score: W.HIGH_RISK_ACTIVITY, severity: "MEDIUM", source: "profile", details: `Kegiatan: ${biz.business_activity}` });
+      }
+
+      const lf = (biz.legal_form || "").toUpperCase();
+      if (HIGH_RISK_LEGAL_FORMS.some((f) => lf.includes(f))) {
+        score += W.HIGH_RISK_LEGAL_FORM;
+        riskFactors.push({ code: "BUSINESS_HIGH_RISK_LEGAL_FORM", label: "Bentuk hukum berisiko tinggi", score: W.HIGH_RISK_LEGAL_FORM, severity: "LOW", source: "profile", details: `Bentuk hukum: ${biz.legal_form}` });
+      }
+
+      const { rows: boRows } = await this.pool.query(
+        `SELECT 1 FROM business_parties WHERE business_id=$1 AND role='BO' AND is_active=TRUE LIMIT 1`,
+        [app.business_id],
+      );
+      if (!boRows.length) {
+        score += W.BO_MISSING;
+        riskFactors.push({ code: "BUSINESS_BO_MISSING", label: "Beneficial Owner (BO) belum terdaftar", score: W.BO_MISSING, severity: "HIGH", source: "profile" });
+      }
+
+      const country = (biz.country || "").toUpperCase();
+      if (HIGH_RISK_COUNTRIES.length && HIGH_RISK_COUNTRIES.includes(country)) {
+        score += W.GEOGRAPHY;
+        riskFactors.push({ code: "GEOGRAPHY_HIGH_RISK_COUNTRY", label: "Negara asal/domisili bisnis berisiko tinggi", score: W.GEOGRAPHY, severity: "MEDIUM", source: "geography", details: `Country: ${country}` });
+      }
+    }
+
+    // ── 8. Faktor: dokumen ──
+    const { rows: docRows } = await this.pool.query(
+      `SELECT doc_type, status FROM documents WHERE application_id=$1`,
+      [appId],
+    );
+    const docTypes = new Set(docRows.map((d: any) => d.doc_type as string));
+
+    if (app.type === "INDIVIDUAL") {
+      if (!["KTP", "SIM", "PASPOR"].some((d) => docTypes.has(d))) {
+        score += W.DOC_MISSING;
+        riskFactors.push({ code: "DOC_IDENTITY_MISSING", label: "Dokumen identitas belum diunggah (KTP/SIM/PASPOR)", score: W.DOC_MISSING, severity: "MEDIUM", source: "document" });
+      }
+    } else {
+      for (const req of ["AKTA_PENDIRIAN", "NIB_SIUP", "NPWP_BADAN"]) {
+        if (!docTypes.has(req)) {
+          score += W.DOC_MISSING;
+          riskFactors.push({ code: `DOC_${req}_MISSING`, label: `Dokumen wajib belum ada: ${req}`, score: W.DOC_MISSING, severity: "MEDIUM", source: "document" });
+        }
+      }
+    }
+
+    for (const doc of docRows.filter((d: any) => d.status === "REJECTED")) {
+      score += W.DOC_REJECTED;
+      riskFactors.push({ code: "DOC_REJECTED", label: "Dokumen ditolak", score: W.DOC_REJECTED, severity: "MEDIUM", source: "document", details: `Tipe: ${doc.doc_type}` });
+    }
+
+    // ── 9. Faktor netral: channel onboarding ──
+    riskFactors.push({
+      code: "ONBOARDING_OFFLINE_DIRECT",
+      label: "Channel onboarding: offline/tatap muka (default)",
+      score: 0,
+      severity: "INFO",
+      source: "channel",
+      details: "Diasumsikan offline direct; kolom onboarding_channel belum ada di schema",
+    });
+
+    // ── 10. Cap 0..100, tentukan level ──
     score = Math.max(0, Math.min(100, score));
     const risk_level = levelOf(score);
 
+    // ── 11. Legacy factors (backward compat untuk kolom factors) ──
+    const hitSummary = hitRows
+      .filter((h: any) => !["FALSE_POSITIVE", "DISMISSED"].includes(h.review_status))
+      .reduce((acc: any, h: any) => {
+        if (h.list_type === "PEP") acc.pep += h.cnt;
+        if (h.list_type === "DTTOT") acc.dttot += h.cnt;
+        if (h.list_type === "PPPSPM") acc.pppspm += h.cnt;
+        return acc;
+      }, { pep: 0, dttot: 0, pppspm: 0 });
+
     const factors = {
-      hits: { pep: pepHits, dttot: dttotHits, pppspm: pppspmHits },
-      docPenalty,
+      version: "rba_v2",
+      hits: hitSummary,
+      score_breakdown: riskFactors.filter((f) => f.score > 0).map((f) => ({ code: f.code, score: f.score })),
       threshold: SIMILARITY_THRESHOLD,
-      weights: WEIGHT,
     };
 
+    // ── 12. Simpan ke DB ──
     await this.pool.query(
-      `INSERT INTO application_risk (application_id, risk_score, risk_level, factors, created_at)
-     VALUES ($1,$2,$3,$4, now())
-     ON CONFLICT (application_id) DO UPDATE SET
-       risk_score=EXCLUDED.risk_score,
-       risk_level=EXCLUDED.risk_level,
-       factors=EXCLUDED.factors,
-       created_at=now()`,
-      [appId, score, risk_level, JSON.stringify(factors)],
+      `INSERT INTO application_risk
+         (application_id, risk_score, risk_level, factors, risk_factors, created_at)
+       VALUES ($1,$2,$3,$4,$5,now())
+       ON CONFLICT (application_id) DO UPDATE SET
+         risk_score    = EXCLUDED.risk_score,
+         risk_level    = EXCLUDED.risk_level,
+         factors       = EXCLUDED.factors,
+         risk_factors  = EXCLUDED.risk_factors,
+         created_at    = now()`,
+      [appId, score, risk_level, JSON.stringify(factors), JSON.stringify(riskFactors)],
     );
 
-    return { risk_score: score, risk_level, factors };
+    return { risk_score: score, risk_level, factors, risk_factors: riskFactors };
   }
 
   // List parties for a BUSINESS application

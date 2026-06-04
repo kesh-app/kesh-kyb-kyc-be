@@ -61,7 +61,7 @@ let ApplicationsController = class ApplicationsController {
     async screening(appId) {
         const { rows: results } = await this.svc["pool"].query(`SELECT subject_type, subject_ref, list_type, watchlist_id, matched_name, matched_dob, matched_nationality, score, created_at
      FROM screening_results WHERE application_id=$1 ORDER BY score DESC, created_at DESC`, [appId]);
-        const { rows: risk } = await this.svc["pool"].query(`SELECT application_id, risk_score, risk_level, factors, created_at FROM application_risk WHERE application_id=$1`, [appId]);
+        const { rows: risk } = await this.svc["pool"].query(`SELECT application_id, risk_score::float AS risk_score, risk_level, factors, risk_factors, created_at FROM application_risk WHERE application_id=$1`, [appId]);
         return { results, risk: risk[0] || null };
     }
     async listDocs(appId) {
@@ -152,7 +152,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "addDoc", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead", "SystemAdmin"),
     (0, common_1.Get)(":id/parties"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
@@ -272,6 +272,8 @@ function inferDocType(name) {
         return "PASPOR";
     if (n.includes("SIM"))
         return "SIM";
+    if (n.includes("SIGNATURE") || n.includes("TTD") || n.includes("TANDA_TANGAN"))
+        return "SIGNATURE";
     if (n.includes("AKTA"))
         return "AKTA_PENDIRIAN";
     if (n.includes("NIB") || n.includes("SIUP"))

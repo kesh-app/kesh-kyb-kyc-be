@@ -219,7 +219,7 @@ let TransfersService = class TransfersService {
     // DETAIL
     // ---------------------------------------------------------------------------
     async getById(id, user) {
-        const isManager = user.role === "FinanceManager";
+        const isManager = user.role === "FinanceManager" || user.role === "SystemAdmin";
         const q = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [
             id,
         ]);

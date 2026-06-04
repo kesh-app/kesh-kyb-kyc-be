@@ -104,7 +104,7 @@ __decorate([
 ], TransfersController.prototype, "setResult", null);
 __decorate([
     (0, common_1.Get)(),
-    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Query)("status")),
     __metadata("design:type", Function),
@@ -113,7 +113,7 @@ __decorate([
 ], TransfersController.prototype, "list", null);
 __decorate([
     (0, common_1.Get)(":id"),
-    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),

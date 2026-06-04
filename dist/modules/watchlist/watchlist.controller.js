@@ -64,7 +64,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], WatchlistController.prototype, "upload", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead", "SystemAdmin"),
     (0, common_1.Get)("history"),
     __param(0, (0, common_1.Query)("limit")),
     __metadata("design:type", Function),

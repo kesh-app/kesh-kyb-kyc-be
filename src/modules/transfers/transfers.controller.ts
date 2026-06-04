@@ -76,14 +76,14 @@ export class TransfersController {
 
   // LIST TRANSFERS
   @Get()
-  @Roles("FinanceStaff", "FinanceManager")
+  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")
   async list(@Req() req: any, @Query("status") status?: string) {
     return this.svc.list(req.user, status);
   }
 
   // GET TRANSFER DETAIL
   @Get(":id")
-  @Roles("FinanceStaff", "FinanceManager")
+  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")
   async getById(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getById(id, req.user);
   }

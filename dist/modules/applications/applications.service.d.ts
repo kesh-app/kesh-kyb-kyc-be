@@ -1,4 +1,12 @@
 import { Pool } from "pg";
+export interface RiskFactor {
+    code: string;
+    label: string;
+    score: number;
+    severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
+    source: string;
+    details?: string;
+}
 export declare class ApplicationsService {
     private readonly pool;
     constructor(pool: Pool);
@@ -13,31 +21,32 @@ export declare class ApplicationsService {
     }): Promise<any>;
     getDetail(appId: number): Promise<{
         application: any;
+        person: any;
+        business: any;
         documents: any[];
         parties: any[];
+        risk: any;
     }>;
     validateBeforeSubmit(appId: number): Promise<{
         ok: boolean;
     }>;
-    /** Jalankan screening terhadap subject aplikasi + compute risk, simpan ke screening_results & application_risk */
+    /**
+     * Internal Preliminary Risk Scoring — RBA v2.
+     * Bukan formula resmi BI. Digunakan sebagai dasar review compliance internal.
+     */
     screenAndComputeRisk(appId: number): Promise<{
         risk_score: number;
         risk_level: string;
         factors: {
-            hits: {
-                pep: number;
-                dttot: number;
-                pppspm: number;
-            };
-            docPenalty: number;
+            version: string;
+            hits: any;
+            score_breakdown: {
+                code: string;
+                score: number;
+            }[];
             threshold: number;
-            weights: {
-                PEP: number;
-                DTTOT: number;
-                PPPSPM: number;
-                DOC_MISSING: number;
-            };
         };
+        risk_factors: RiskFactor[];
     }>;
     listParties(appId: number): Promise<any[]>;
     addParty(appId: number, dto: any): Promise<any>;
@@ -51,20 +60,15 @@ export declare class ApplicationsService {
             risk_score: number;
             risk_level: string;
             factors: {
-                hits: {
-                    pep: number;
-                    dttot: number;
-                    pppspm: number;
-                };
-                docPenalty: number;
+                version: string;
+                hits: any;
+                score_breakdown: {
+                    code: string;
+                    score: number;
+                }[];
                 threshold: number;
-                weights: {
-                    PEP: number;
-                    DTTOT: number;
-                    PPPSPM: number;
-                    DOC_MISSING: number;
-                };
             };
+            risk_factors: RiskFactor[];
         };
     }>;
     list(limit?: number, offset?: number): Promise<any[]>;

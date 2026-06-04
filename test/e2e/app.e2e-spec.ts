@@ -38,6 +38,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   let indivAppIdMissing: string;
   let indivAppIdOk: string;
   let bizAppId: string;
+  let transferId: string;
 
   // ──────────────────────────────────────────────────────────
   // SETUP: bootstrap app + login + buat user Finance test
@@ -178,16 +179,37 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       indivAppIdMissing = String(res.body.id);
     });
 
-    it('B-02: GET /applications/:id → 200, detail dengan documents + parties', async () => {
+    it('B-02: GET /applications/:id → 200, structured response dengan person + documents + parties + risk', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/applications/${indivAppIdMissing}`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
+      // application row
       expect(res.body.application.status).toBe('DRAFT');
       expect(res.body.application.type).toBe('INDIVIDUAL');
+
+      // person object
+      expect(res.body.person).not.toBeNull();
+      expect(res.body.person.full_name).toBeDefined();
+      expect(res.body.person.identity_type).toBeDefined();
+      expect(res.body.person.identity_number).toBeDefined();
+      expect(res.body.person.pob).toBeDefined();
+      expect(res.body.person.dob).toBeDefined();
+      expect(res.body.person.nationality).toBeDefined();
+      expect(res.body.person.phone).toBeDefined();
+      expect(res.body.person.gender).toBeDefined();
+      expect(res.body.person.occupation).toBeDefined();
+      expect(res.body.person.address_identity).toBeDefined();
+
+      // business null untuk INDIVIDUAL
+      expect(res.body.business).toBeNull();
+
       expect(Array.isArray(res.body.documents)).toBe(true);
       expect(Array.isArray(res.body.parties)).toBe(true);
+
+      // risk null sebelum submit
+      expect(res.body.risk).toBeNull();
     });
 
     it('B-03: GET /applications → 200, list berisi item', async () => {
@@ -411,6 +433,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       // Pastikan audit trail terisi — bug: user.id tidak ada di JWT payload (pakai sub)
       expect(res.body.created_by).not.toBeNull();
       expect(String(res.body.created_by)).toMatch(/^\d+$/);
+      transferId = String(res.body.id);
     });
 
     it('F-03: POST /transfers dengan role ComplianceLead → 403', async () => {
@@ -653,6 +676,471 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.log).toBeDefined();
       expect(res.body.log.uploaded_by).not.toBeNull();
       expect(String(res.body.log.uploaded_by)).toMatch(/^\d+$/);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // J. SYSTEMADMIN RBAC — tidak boleh 403 pada semua read endpoint
+  // ══════════════════════════════════════════════════════════
+  describe('J. SystemAdmin RBAC — akses semua read endpoint', () => {
+    it('J-01: GET /kyc/dashboard-summary dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/kyc/dashboard-summary`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(res.body.totals).toBeDefined();
+      expect(Array.isArray(res.body.recent)).toBe(true);
+    });
+
+    it('J-02: GET /kyc/submissions dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/kyc/submissions`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('J-03: GET /kyc/registrants dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/kyc/registrants?type=INDIVIDUAL`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(typeof res.body.total).toBe('number');
+      expect(Array.isArray(res.body.items)).toBe(true);
+    });
+
+    it('J-04: GET /applications dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('J-05: GET /applications/:id dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(res.body.application).toBeDefined();
+    });
+
+    it('J-06: GET /applications/:id/screening dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}/screening`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.results)).toBe(true);
+    });
+
+    it('J-07: GET /applications/:id/parties dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${bizAppId}/parties`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('J-08: GET /watchlist/history dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('J-09: GET /users/admins dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/users/admins`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('J-10: GET /transfers dengan SystemAdmin → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('J-11: GET /transfers/:id dengan SystemAdmin → 200 (bukan miliknya pun boleh lihat)', async () => {
+      // transferId dibuat oleh FinanceStaff di F-02, bukan oleh SystemAdmin
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${transferId}`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(String(res.body.id)).toBe(transferId);
+    });
+
+    it('J-12: POST /transfers dengan SystemAdmin → 403 (read-only)', async () => {
+      // SystemAdmin tidak boleh membuat transfer — hanya FinanceStaff yang boleh
+      return request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .send({
+          amount: 100000,
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '111',
+          beneficiaryAccountName: 'Test',
+        })
+        .expect(403);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // K. INDIVIDUAL SIGNATURE VIA DOCUMENT UPLOAD (tanpa signature_uri)
+  //    Reproduksi bug: user upload file SIGNATURE via /documents,
+  //    tapi precheck/submit tetap 400 karena cek hanya ke persons.signature_uri
+  // ══════════════════════════════════════════════════════════
+  describe('K. Individual — signature via document upload (tanpa signature_uri di create)', () => {
+    let sigAppId: string;
+
+    it('K-01: POST /applications/individual tanpa signature_uri → 201 DRAFT', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Individu Sig Doc ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `317800${SUFFIX}`,
+          address_identity: 'Jl. Signature No. 1, Surabaya',
+          pob: 'Surabaya',
+          dob: '1992-04-10',
+          nationality: 'ID',
+          phone: `0817${SUFFIX}`,
+          occupation: 'Wirausaha',
+          gender: 'M',
+          // sengaja TIDAK kirim signature_uri
+        })
+        .expect(201);
+
+      expect(res.body.status).toBe('DRAFT');
+      sigAppId = String(res.body.id);
+    });
+
+    it('K-02: GET /precheck tanpa KTP dan tanpa SIGNATURE doc → 400, keduanya missing', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${sigAppId}/precheck`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('signature_uri'))).toBe(true);
+      expect(missing.some((m) => m.includes('dokumen identitas'))).toBe(true);
+    });
+
+    it('K-03: POST /documents KTP → 201', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${sigAppId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          doc_type: 'KTP',
+          file_uri: 'https://storage.test/docs/ktp_sig.jpg',
+        })
+        .expect(201);
+
+      expect(res.body.doc_type).toBe('KTP');
+    });
+
+    it('K-04: GET /precheck setelah KTP tapi belum ada SIGNATURE → 400, signature missing', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${sigAppId}/precheck`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('signature_uri'))).toBe(true);
+      // dokumen identitas sudah ada, tidak boleh muncul lagi
+      expect(missing.some((m) => m.includes('dokumen identitas'))).toBe(false);
+    });
+
+    it('K-05: POST /documents SIGNATURE → 201', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${sigAppId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          doc_type: 'SIGNATURE',
+          file_uri: 'https://storage.test/signatures/ttd.png',
+        })
+        .expect(201);
+
+      expect(res.body.doc_type).toBe('SIGNATURE');
+    });
+
+    it('K-06: GET /precheck setelah KTP + SIGNATURE doc → 200 ok', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${sigAppId}/precheck`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.ok).toBe(true);
+    });
+
+    it('K-07: PATCH /submit dengan KTP + SIGNATURE doc → 200 SUBMITTED', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${sigAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.status).toBe('SUBMITTED');
+      expect(res.body.risk).toBeDefined();
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // L. APPLICATION DETAIL — full structured response
+  //    Verifikasi shape { application, person, business, documents, parties, risk }
+  // ══════════════════════════════════════════════════════════
+  describe('L. Application detail — full structured response', () => {
+    it('L-01: GET /applications/:id (INDIVIDUAL submitted) → risk terisi + risk_factors array', async () => {
+      // indivAppIdOk sudah APPROVED — risk harus ada
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.application.type).toBe('INDIVIDUAL');
+      expect(res.body.risk).not.toBeNull();
+      expect(typeof res.body.risk.risk_score).toBe('number');
+      expect(['LOW', 'MEDIUM', 'HIGH']).toContain(res.body.risk.risk_level);
+      // RBA v2: risk_factors harus array
+      expect(Array.isArray(res.body.risk.risk_factors)).toBe(true);
+    });
+
+    it('L-02: GET /applications/:id (INDIVIDUAL) → person semua field lengkap', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const p = res.body.person;
+      expect(p).not.toBeNull();
+      // required person fields
+      for (const field of [
+        'full_name', 'identity_type', 'identity_number',
+        'pob', 'dob', 'nationality', 'phone',
+        'gender', 'occupation', 'address_identity',
+      ]) {
+        expect(p[field]).toBeDefined();
+      }
+      // signature_uri key harus ada (boleh null kalau tidak di-set saat create)
+      expect(Object.prototype.hasOwnProperty.call(p, 'signature_uri')).toBe(true);
+      // business harus null untuk INDIVIDUAL
+      expect(res.body.business).toBeNull();
+    });
+
+    it('L-02b: risk_factors includes ONBOARDING_OFFLINE_DIRECT (score 0) untuk clean individual', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const factors: any[] = res.body.risk.risk_factors;
+      const channel = factors.find((f: any) => f.code === 'ONBOARDING_OFFLINE_DIRECT');
+      expect(channel).toBeDefined();
+      expect(channel.score).toBe(0);
+      expect(channel.severity).toBe('INFO');
+    });
+
+    it('L-03: GET /applications/:id (BUSINESS) → business semua field lengkap + parties', async () => {
+      // bizAppId sudah APPROVED
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${bizAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.application.type).toBe('BUSINESS');
+
+      // person harus null untuk BUSINESS
+      expect(res.body.person).toBeNull();
+
+      const b = res.body.business;
+      expect(b).not.toBeNull();
+      for (const field of [
+        'legal_name', 'legal_form', 'incorporation_place', 'incorporation_date',
+        'nib', 'npwp', 'address_line', 'city', 'province', 'postal_code',
+        'phone', 'business_activity',
+      ]) {
+        expect(b[field]).toBeDefined();
+      }
+      // field opsional — key harus ada
+      expect(Object.prototype.hasOwnProperty.call(b, 'trade_name')).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(b, 'industry_code')).toBe(true);
+
+      // parties
+      expect(Array.isArray(res.body.parties)).toBe(true);
+      expect(res.body.parties.length).toBeGreaterThan(0);
+      expect(res.body.parties[0].role).toBeDefined();
+
+      // risk terisi setelah submit/approve
+      expect(res.body.risk).not.toBeNull();
+      expect(Array.isArray(res.body.risk.risk_factors)).toBe(true);
+      // bizAppId punya DIRECTOR tapi tidak punya BO → harus ada BUSINESS_BO_MISSING
+      const bizCodes: string[] = res.body.risk.risk_factors.map((f: any) => f.code);
+      expect(bizCodes).toContain('BUSINESS_BO_MISSING');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // M. RISK BASED APPROACH v2 — scoring granular
+  // ══════════════════════════════════════════════════════════
+  describe('M. Risk Based Approach v2 — scoring granular', () => {
+    let rbaIndivId: string;
+    let rbaBizId: string;
+
+    it('M-01: Individual high-risk occupation (casino) → INDIVIDUAL_HIGH_RISK_OCCUPATION factor + score >= 15', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `RBA Casino Test ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `317950${SUFFIX}`,
+          address_identity: 'Jl. RBA No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0819${SUFFIX}`,
+          occupation: 'casino dealer',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig_rba.png',
+        })
+        .expect(201);
+      rbaIndivId = String(createRes.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${rbaIndivId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/ktp_rba.jpg' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${rbaIndivId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.risk.risk_factors)).toBe(true);
+      const codes: string[] = res.body.risk.risk_factors.map((f: any) => f.code);
+      expect(codes).toContain('INDIVIDUAL_HIGH_RISK_OCCUPATION');
+      expect(codes).toContain('ONBOARDING_OFFLINE_DIRECT');
+      expect(res.body.risk.risk_score).toBeGreaterThanOrEqual(15);
+      // 15 < 40 → LOW
+      expect(res.body.risk.risk_level).toBe('LOW');
+
+      const occFactor = res.body.risk.risk_factors.find((f: any) => f.code === 'INDIVIDUAL_HIGH_RISK_OCCUPATION');
+      expect(occFactor.score).toBe(15);
+      expect(occFactor.severity).toBe('MEDIUM');
+      expect(occFactor.details).toContain('casino dealer');
+    });
+
+    it('M-02: risk_factors tersimpan di GET /applications/:id setelah submit', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${rbaIndivId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.risk.risk_factors)).toBe(true);
+      const codes: string[] = res.body.risk.risk_factors.map((f: any) => f.code);
+      expect(codes).toContain('INDIVIDUAL_HIGH_RISK_OCCUPATION');
+    });
+
+    it('M-03: Business YAYASAN + crypto activity + no BO → HIGH_RISK_ACTIVITY + HIGH_RISK_LEGAL_FORM + BO_MISSING, risk_level MEDIUM', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: `Yayasan Kripto ${SUFFIX}`,
+          legal_form: 'YAYASAN',
+          incorporation_place: 'Jakarta',
+          incorporation_date: '2021-01-01',
+          business_license_number: `BL_YK_${SUFFIX}`,
+          nib: `NIB_YK_${SUFFIX}`,
+          npwp: `NPWP_YK_${SUFFIX}`,
+          address_line: 'Jl. Yayasan No. 1',
+          city: 'Jakarta',
+          province: 'DKI Jakarta',
+          postal_code: '10110',
+          business_activity: 'crypto exchange dan virtual asset',
+          phone: `0220${SUFFIX}`,
+        })
+        .expect(201);
+      rbaBizId = String(createRes.body.id);
+
+      for (const dt of ['AKTA_PENDIRIAN', 'NIB_SIUP', 'NPWP_BADAN']) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${rbaBizId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: dt, file_uri: `https://storage.test/${dt}_yk.pdf` })
+          .expect(201);
+      }
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${rbaBizId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'DIRECTOR',
+          full_name: `Direktur Yayasan ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `327750${SUFFIX}`,
+          dob: '1975-01-01',
+          nationality: 'ID',
+          phone: `0811${SUFFIX}`,
+        })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${rbaBizId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.risk).toBeDefined();
+      const codes: string[] = res.body.risk.risk_factors.map((f: any) => f.code);
+      expect(codes).toContain('BUSINESS_HIGH_RISK_ACTIVITY');
+      expect(codes).toContain('BUSINESS_HIGH_RISK_LEGAL_FORM');
+      expect(codes).toContain('BUSINESS_BO_MISSING');
+      expect(codes).toContain('ONBOARDING_OFFLINE_DIRECT');
+
+      // score = 20 + 10 + 30 = 60 → MEDIUM
+      expect(res.body.risk.risk_score).toBe(60);
+      expect(res.body.risk.risk_level).toBe('MEDIUM');
+
+      const actFactor = res.body.risk.risk_factors.find((f: any) => f.code === 'BUSINESS_HIGH_RISK_ACTIVITY');
+      expect(actFactor.score).toBe(20);
+      const lfFactor = res.body.risk.risk_factors.find((f: any) => f.code === 'BUSINESS_HIGH_RISK_LEGAL_FORM');
+      expect(lfFactor.score).toBe(10);
+      const boFactor = res.body.risk.risk_factors.find((f: any) => f.code === 'BUSINESS_BO_MISSING');
+      expect(boFactor.score).toBe(30);
+      expect(boFactor.severity).toBe('HIGH');
+    });
+
+    it('M-04: Clean individual (non-high-risk) → score 0, risk_level LOW, no critical factors', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      // indivAppIdOk: occupation 'Karyawan Swasta', no watchlist hits → score 0
+      expect(res.body.risk.risk_score).toBe(0);
+      expect(res.body.risk.risk_level).toBe('LOW');
+
+      const criticals = res.body.risk.risk_factors.filter(
+        (f: any) => ['CRITICAL', 'HIGH'].includes(f.severity) && f.score > 0,
+      );
+      expect(criticals.length).toBe(0);
     });
   });
 });

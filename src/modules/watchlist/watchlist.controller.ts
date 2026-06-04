@@ -63,7 +63,7 @@ export class WatchlistController {
     );
   }
 
-  @Roles("ComplianceReviewer", "ComplianceLead")
+  @Roles("ComplianceReviewer", "ComplianceLead", "SystemAdmin")
   @Get("history")
   async history(@Query("limit") limit?: string) {
     const n = Math.min(Number(limit) || 20, 100);

@@ -83,7 +83,7 @@ export class ApplicationsController {
     });
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead", "SystemAdmin")
   @Get(":id/parties")
   async listParties(@Param("id", ParseIntPipe) appId: number) {
     return this.svc.listParties(appId);
@@ -116,7 +116,7 @@ export class ApplicationsController {
       [appId]
     );
     const { rows: risk } = await this.svc["pool"].query(
-      `SELECT application_id, risk_score, risk_level, factors, created_at FROM application_risk WHERE application_id=$1`,
+      `SELECT application_id, risk_score::float AS risk_score, risk_level, factors, risk_factors, created_at FROM application_risk WHERE application_id=$1`,
       [appId]
     );
     return { results, risk: risk[0] || null };
@@ -219,6 +219,7 @@ function inferDocType(name?: string) {
   if (n.includes("KTP")) return "KTP";
   if (n.includes("PASPOR")) return "PASPOR";
   if (n.includes("SIM")) return "SIM";
+  if (n.includes("SIGNATURE") || n.includes("TTD") || n.includes("TANDA_TANGAN")) return "SIGNATURE";
   if (n.includes("AKTA")) return "AKTA_PENDIRIAN";
   if (n.includes("NIB") || n.includes("SIUP")) return "NIB_SIUP";
   if (n.includes("NPWP")) return "NPWP_BADAN";
