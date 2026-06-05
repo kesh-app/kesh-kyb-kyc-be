@@ -5,10 +5,14 @@
   "scripts": {
     "start": "nest start",
     "start:dev": "nest start --watch",
+    "start:prod": "node dist/main.js",
     "build": "nest build",
     "db:migrate": "node scripts/run-sql.cjs",
     "db:seed": "node scripts/seed.cjs",
-    "test:e2e": "jest --config test/e2e/jest-e2e.json --forceExit --detectOpenHandles"
+    "test:e2e": "jest --config test/e2e/jest-e2e.json --forceExit --detectOpenHandles",
+    "pm2:start": "pm2 start ecosystem.config.cjs --env development",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs --env development",
+    "pm2:logs": "pm2 logs kesh-kyb-kyc-be-dev"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.10",
