@@ -11,8 +11,8 @@
 | `sysadmin@kesh.local` | `SystemAdmin@123` | SystemAdmin |
 
 **Roles yang bisa akses:**
-- `BranchAdmin`, `ComplianceReviewer`, `ComplianceLead` → operations aplikasi
-- `ComplianceReviewer`, `ComplianceLead` → submit, decision, watchlist upload
+- `BranchAdmin`, `FrontDesk`, `ComplianceLead` → operations aplikasi
+- `FrontDesk`, `ComplianceLead` → submit, decision, watchlist upload
 - `FinanceStaff` → buat & submit transfer
 - `FinanceManager` → approve/reject transfer, set result
 - `SystemAdmin` → user management (selalu diizinkan semua endpoint)
@@ -258,7 +258,7 @@
 | Field | Value |
 |-------|-------|
 | **Tujuan** | Upload file watchlist PEP |
-| **Precondition** | Token ComplianceReviewer/ComplianceLead, file PEP.xlsx dengan header yang benar |
+| **Precondition** | Token FrontDesk/ComplianceLead, file PEP.xlsx dengan header yang benar |
 | **Method** | `POST` |
 | **Endpoint** | `/watchlist/upload` |
 | **Body** | `multipart/form-data`: `file=@PEP.xlsx`, `list_type=PEP`, `list_source=PPATK` |

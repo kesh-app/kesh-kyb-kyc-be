@@ -1143,4 +1143,297 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(criticals.length).toBe(0);
     });
   });
+
+  // ══════════════════════════════════════════════════════════
+  // N. TRANSFER RECORDING v2 — SNAP-ready / audit trail
+  //    indivAppIdOk sudah APPROVED (lihat E-02) → dipakai sebagai sender.
+  // ══════════════════════════════════════════════════════════
+  describe('N. Transfer Recording v2 — SNAP-ready', () => {
+    const MANUAL_REF = `KESH-MANUAL-${SUFFIX}`;
+
+    let txAutoRef: string; // created tanpa partner_reference_no → di-generate
+    let txSnap: string; // created dengan SNAP fields + manual ref
+    let txReject: string; // untuk uji reject
+    let txFail: string; // untuk uji result FAILED
+
+    // Helper: create → submit → approve, return id
+    async function createSubmitApprove(extra: Record<string, any> = {}) {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          amount: 750000,
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank Mandiri',
+          beneficiaryBankCode: '008',
+          beneficiaryAccountNumber: '1112223334',
+          beneficiaryAccountName: 'PT Penerima',
+          ...extra,
+        })
+        .expect(201);
+      const id = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE', decision_notes: 'ok' })
+        .expect(201);
+
+      return id;
+    }
+
+    it('N-01: create tanpa partner_reference_no → server generate KESH-TRF-...', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          amount: 1000000,
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank BCA',
+          beneficiaryAccountNumber: '5556667778',
+          beneficiaryAccountName: 'PT Auto Ref',
+        })
+        .expect(201);
+
+      expect(res.body.status).toBe('DRAFT');
+      expect(res.body.partner_reference_no).toMatch(/^KESH-TRF-\d{8}-[0-9A-F]{16}$/);
+      expect(res.body.partner_reference_no.length).toBeLessThanOrEqual(64);
+      // amount derivation
+      expect(res.body.amount_value).toBe('1000000.00');
+      expect(res.body.amount_currency).toBe('IDR');
+      // operational defaults
+      expect(res.body.transfer_method).toBe('BANK_TRANSFER');
+      expect(res.body.transfer_channel).toBe('MANUAL');
+      txAutoRef = String(res.body.id);
+    });
+
+    it('N-02: create dengan SNAP-ready optional fields → persisted', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          amount: 2500000,
+          currency: 'idr',
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank BRI',
+          beneficiaryBankCode: '002',
+          beneficiaryAccountNumber: '9990001112',
+          beneficiaryAccountName: 'PT SNAP Ready',
+          partner_reference_no: MANUAL_REF,
+          source_account_no: '1234567890',
+          source_account_name: 'KESH Operasional',
+          source_bank_code: '014',
+          source_bank_name: 'Bank BCA',
+          beneficiary_address: 'Jl. SNAP No. 1, Jakarta',
+          beneficiary_email: 'beneficiary@example.com',
+          beneficiary_customer_residence: 'ID',
+          beneficiary_customer_type: '02',
+          transfer_method: 'BANK_TRANSFER',
+          transfer_channel: 'MANUAL',
+          additional_info: { purpose: 'vendor payment', batch: 'B1' },
+        })
+        .expect(201);
+
+      expect(res.body.partner_reference_no).toBe(MANUAL_REF);
+      expect(res.body.source_account_no).toBe('1234567890');
+      expect(res.body.source_bank_code).toBe('014');
+      expect(res.body.beneficiary_address).toBe('Jl. SNAP No. 1, Jakarta');
+      expect(res.body.beneficiary_email).toBe('beneficiary@example.com');
+      expect(res.body.beneficiary_customer_residence).toBe('ID');
+      expect(res.body.beneficiary_customer_type).toBe('02');
+      expect(res.body.amount_value).toBe('2500000.00');
+      expect(res.body.amount_currency).toBe('IDR'); // uppercased
+      expect(res.body.additional_info).toEqual({ purpose: 'vendor payment', batch: 'B1' });
+      txSnap = String(res.body.id);
+    });
+
+    it('N-03: duplicate partner_reference_no → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          amount: 100000,
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank BRI',
+          beneficiaryAccountNumber: '9990001112',
+          beneficiaryAccountName: 'PT Dup',
+          partner_reference_no: MANUAL_REF,
+        })
+        .expect(400);
+
+      expect(res.body.message).toContain('already exists');
+    });
+
+    it('N-04: submit → status SUBMITTED + submitted_by/submitted_at terisi', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txAutoRef}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+
+      expect(res.body.status).toBe('SUBMITTED');
+      expect(res.body.submitted_by).not.toBeNull();
+      expect(String(res.body.submitted_by)).toMatch(/^\d+$/);
+      expect(res.body.submitted_at).not.toBeNull();
+    });
+
+    it('N-05: approve → APPROVED + approved_by/approved_at/decision_notes', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txAutoRef}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE', decision_notes: 'Approved by manager' })
+        .expect(201);
+
+      expect(res.body.status).toBe('APPROVED');
+      expect(res.body.approved_by).not.toBeNull();
+      expect(String(res.body.approved_by)).toMatch(/^\d+$/);
+      expect(res.body.approved_at).not.toBeNull();
+      expect(res.body.decision_notes).toBe('Approved by manager');
+    });
+
+    it('N-06: reject → REJECTED + rejected_by/rejected_at/reject_reason', async () => {
+      // transfer baru khusus reject
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          amount: 300000,
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank BNI',
+          beneficiaryAccountNumber: '4445556667',
+          beneficiaryAccountName: 'PT Ditolak',
+        })
+        .expect(201);
+      txReject = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txReject}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txReject}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'REJECT', reject_reason: 'Rekening tidak valid', decision_notes: 'cek ulang' })
+        .expect(201);
+
+      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.rejected_by).not.toBeNull();
+      expect(String(res.body.rejected_by)).toMatch(/^\d+$/);
+      expect(res.body.rejected_at).not.toBeNull();
+      expect(res.body.reject_reason).toBe('Rekening tidak valid');
+      expect(res.body.decision_notes).toBe('cek ulang');
+    });
+
+    it('N-07: result SUCCESS → completed_at/result_updated_by/result_reference_no/bank_reference_no', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txAutoRef}/result`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({
+          result: 'SUCCESS',
+          result_reference_no: `RES-${SUFFIX}`,
+          bank_reference_no: `BANK-${SUFFIX}`,
+          latest_transaction_status: '00',
+          transaction_status_desc: 'Success',
+          provider_response_code: '2000700',
+          provider_response_message: 'Successful',
+          provider_response: { responseCode: '2000700' },
+        })
+        .expect(201);
+
+      expect(res.body.status).toBe('COMPLETED');
+      expect(res.body.result).toBe('SUCCESS');
+      expect(res.body.completed_at).not.toBeNull();
+      expect(res.body.failed_at).toBeNull();
+      expect(res.body.result_updated_by).not.toBeNull();
+      expect(String(res.body.result_updated_by)).toMatch(/^\d+$/);
+      expect(res.body.result_updated_at).not.toBeNull();
+      expect(res.body.result_reference_no).toBe(`RES-${SUFFIX}`);
+      expect(res.body.bank_reference_no).toBe(`BANK-${SUFFIX}`);
+      expect(res.body.latest_transaction_status).toBe('00');
+      expect(res.body.provider_response_code).toBe('2000700');
+    });
+
+    it('N-08: result FAILED → failed_at/failed_reason', async () => {
+      txFail = await createSubmitApprove({
+        beneficiaryAccountNumber: '7778889990',
+        beneficiaryAccountName: 'PT Gagal',
+      });
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txFail}/result`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ result: 'FAILED', failed_reason: 'Saldo tidak mencukupi' })
+        .expect(201);
+
+      expect(res.body.status).toBe('COMPLETED');
+      expect(res.body.result).toBe('FAILED');
+      expect(res.body.failed_at).not.toBeNull();
+      expect(res.body.completed_at).toBeNull();
+      expect(res.body.failed_reason).toBe('Saldo tidak mencukupi');
+      expect(res.body.result_updated_by).not.toBeNull();
+    });
+
+    it('N-09: SystemAdmin read OK tapi submit/approve/result → 403', async () => {
+      // list & detail boleh
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txSnap}`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      // mutasi dilarang (read-only)
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txSnap}/submit`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(403);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txSnap}/decision`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(403);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txSnap}/result`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .send({ result: 'SUCCESS' })
+        .expect(403);
+    });
+
+    it('N-10: GET /transfers/:id/snap-preview → amount + beneficiary + source mapping', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txSnap}/snap-preview`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+
+      expect(res.body.partnerReferenceNo).toBe(MANUAL_REF);
+      expect(res.body.amount.value).toBe('2500000.00');
+      expect(res.body.amount.currency).toBe('IDR');
+      expect(res.body.beneficiaryAccountNo).toBe('9990001112');
+      expect(res.body.beneficiaryAccountName).toBe('PT SNAP Ready');
+      expect(res.body.beneficiaryBankCode).toBe('002');
+      expect(res.body.beneficiaryAddress).toBe('Jl. SNAP No. 1, Jakarta');
+      expect(res.body.beneficiaryEmail).toBe('beneficiary@example.com');
+      expect(res.body.sourceAccountNo).toBe('1234567890');
+      expect(res.body.additionalInfo).toEqual({ purpose: 'vendor payment', batch: 'B1' });
+    });
+
+    it('N-11: SystemAdmin boleh baca snap-preview', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txSnap}/snap-preview`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(res.body.partnerReferenceNo).toBe(MANUAL_REF);
+    });
+  });
 });

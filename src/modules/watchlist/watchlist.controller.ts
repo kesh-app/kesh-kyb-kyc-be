@@ -23,7 +23,7 @@ import { resolveUserId } from "../../common/auth.util";
 export class WatchlistController {
   constructor(private readonly svc: WatchlistService) {}
 
-  @Roles("ComplianceReviewer", "ComplianceLead")
+  @Roles("FrontDesk", "ComplianceLead")
   @Post("upload")
   @UseInterceptors(
     FileInterceptor("file", {
@@ -63,7 +63,7 @@ export class WatchlistController {
     );
   }
 
-  @Roles("ComplianceReviewer", "ComplianceLead", "SystemAdmin")
+  @Roles("FrontDesk", "ComplianceLead", "SystemAdmin")
   @Get("history")
   async history(@Query("limit") limit?: string) {
     const n = Math.min(Number(limit) || 20, 100);

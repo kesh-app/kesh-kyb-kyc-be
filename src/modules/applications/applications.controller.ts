@@ -53,7 +53,7 @@ export class ApplicationsController {
     return this.svc.validateBeforeSubmit(appId);
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
   @Post("individual")
   async createInd(
     @Req() req: any,
@@ -62,7 +62,7 @@ export class ApplicationsController {
     return this.svc.createIndividual(dto, req.user.sub, 1);
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
   @Post("business")
   async createBiz(
     @Req() req: any,
@@ -71,7 +71,7 @@ export class ApplicationsController {
     return this.svc.createBusiness(dto, req.user.sub, 1);
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
   @Post(":id/documents")
   async addDoc(
     @Param("id", ParseIntPipe) appId: number,
@@ -83,13 +83,13 @@ export class ApplicationsController {
     });
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead", "SystemAdmin")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead", "SystemAdmin")
   @Get(":id/parties")
   async listParties(@Param("id", ParseIntPipe) appId: number) {
     return this.svc.listParties(appId);
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
   @Post(":id/parties")
   async addParty(
     @Param("id", ParseIntPipe) appId: number,
@@ -98,7 +98,7 @@ export class ApplicationsController {
     return this.svc.addParty(appId, dto);
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
   @Delete(":id/parties/:partyId")
   async removeParty(
     @Param("id", ParseIntPipe) appId: number,
@@ -135,7 +135,7 @@ export class ApplicationsController {
     return this.svc.getDocument(appId, docId);
   }
 
-  @Roles("BranchAdmin", "ComplianceReviewer", "ComplianceLead")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
   @Post(":id/documents/upload")
   @UseInterceptors(
     FileInterceptor("file", {
@@ -179,13 +179,13 @@ export class ApplicationsController {
     return { ...saved, file_url: url };
   }
 
-  @Roles("ComplianceReviewer", "ComplianceLead")
+  @Roles("FrontDesk", "ComplianceLead")
   @Patch(":id/submit")
   async submit(@Param("id", ParseIntPipe) appId: number, @Req() req: any) {
     return this.svc.submit(appId, req.user.sub);
   }
 
-  @Roles("ComplianceReviewer", "ComplianceLead")
+  @Roles("FrontDesk", "ComplianceLead")
   @Patch(":id/decision")
   async decide(
     @Param("id", ParseIntPipe) appId: number,
@@ -195,7 +195,7 @@ export class ApplicationsController {
     return this.svc.decide(appId, dto.decision, dto.reason ?? null, req.user.sub);
   }
 
-  @Roles("ComplianceReviewer", "ComplianceLead")
+  @Roles("FrontDesk", "ComplianceLead")
   @Delete(":id/documents/:docId")
   async deleteDoc(
     @Param("id", ParseIntPipe) appId: number,

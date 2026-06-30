@@ -37,7 +37,7 @@ let WatchlistController = class WatchlistController {
 };
 exports.WatchlistController = WatchlistController;
 __decorate([
-    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead"),
     (0, common_1.Post)("upload"),
     (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)("file", {
         limits: {
@@ -64,7 +64,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], WatchlistController.prototype, "upload", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead", "SystemAdmin"),
     (0, common_1.Get)("history"),
     __param(0, (0, common_1.Query)("limit")),
     __metadata("design:type", Function),

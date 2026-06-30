@@ -50,6 +50,93 @@ __decorate([
     (0, class_validator_1.IsDateString)(),
     __metadata("design:type", String)
 ], CreateTransferDto.prototype, "requestedTransferAt", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(64),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "partner_reference_no", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(34),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "source_account_no", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(100),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "source_account_name", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(8),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "source_bank_code", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(100),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "source_bank_name", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(255),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "beneficiary_address", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsEmail)(),
+    (0, class_validator_1.MaxLength)(100),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "beneficiary_email", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.Length)(2, 2),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "beneficiary_customer_residence", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.Length)(2, 2),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "beneficiary_customer_type", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(3),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "currency", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(32),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "transfer_method", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(32),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "transfer_channel", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsDateString)(),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "transaction_date", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsDateString)(),
+    __metadata("design:type", String)
+], CreateTransferDto.prototype, "requested_execution_date", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsObject)(),
+    __metadata("design:type", Object)
+], CreateTransferDto.prototype, "additional_info", void 0);
 class UpdateTransferDto extends CreateTransferDto {
 }
 exports.UpdateTransferDto = UpdateTransferDto;
@@ -65,6 +152,16 @@ __decorate([
     (0, class_validator_1.IsString)(),
     __metadata("design:type", String)
 ], DecideTransferDto.prototype, "note", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], DecideTransferDto.prototype, "decision_notes", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], DecideTransferDto.prototype, "reject_reason", void 0);
 class SetTransferResultDto {
 }
 exports.SetTransferResultDto = SetTransferResultDto;
@@ -82,4 +179,72 @@ __decorate([
     (0, class_validator_1.IsString)(),
     __metadata("design:type", String)
 ], SetTransferResultDto.prototype, "attachmentUri", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "result_notes", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(64),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "result_reference_no", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "result_attachment_uri", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(64),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "bank_reference_no", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(64),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "external_reference_no", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(64),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "provider_reference_no", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(16),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "latest_transaction_status", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(150),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "transaction_status_desc", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(16),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "provider_response_code", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    (0, class_validator_1.MaxLength)(255),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "provider_response_message", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsObject)(),
+    __metadata("design:type", Object)
+], SetTransferResultDto.prototype, "provider_response", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], SetTransferResultDto.prototype, "failed_reason", void 0);
 //# sourceMappingURL=dto.js.map

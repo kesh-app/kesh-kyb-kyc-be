@@ -48,6 +48,10 @@ let TransfersController = class TransfersController {
     async list(req, status) {
         return this.svc.list(req.user, status);
     }
+    // SNAP PREVIEW — pure mapping of stored data, NO external bank/API call
+    async snapPreview(req, id) {
+        return this.svc.snapPreview(id, req.user);
+    }
     // GET TRANSFER DETAIL
     async getById(req, id) {
         return this.svc.getById(id, req.user);
@@ -111,6 +115,15 @@ __decorate([
     __metadata("design:paramtypes", [Object, String]),
     __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "list", null);
+__decorate([
+    (0, common_1.Get)(":id/snap-preview"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),
+    __param(0, (0, common_1.Req)()),
+    __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Number]),
+    __metadata("design:returntype", Promise)
+], TransfersController.prototype, "snapPreview", null);
 __decorate([
     (0, common_1.Get)(":id"),
     (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),

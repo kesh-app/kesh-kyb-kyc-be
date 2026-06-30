@@ -17,7 +17,7 @@ export class BusinessController {
   }
 
   // CREATE person + link as a party
-  @Roles('BranchAdmin','ComplianceReviewer','ComplianceLead')
+  @Roles('BranchAdmin','FrontDesk','ComplianceLead')
   @Post(':id/parties')
   async createWithPerson(
     @Param('id', ParseIntPipe) businessId: number,
@@ -27,7 +27,7 @@ export class BusinessController {
   }
 
   // LINK existing person as a party
-  @Roles('BranchAdmin','ComplianceReviewer','ComplianceLead')
+  @Roles('BranchAdmin','FrontDesk','ComplianceLead')
   @Post(':id/parties/link')
   async linkExisting(
     @Param('id', ParseIntPipe) businessId: number,
@@ -37,7 +37,7 @@ export class BusinessController {
   }
 
   // DELETE party
-  @Roles('ComplianceReviewer','ComplianceLead')
+  @Roles('FrontDesk','ComplianceLead')
   @Delete(':id/parties/:partyId')
   async remove(
     @Param('id', ParseIntPipe) businessId: number,

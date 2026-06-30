@@ -15,7 +15,7 @@ const class_validator_1 = require("class-validator");
 exports.INTERNAL_ROLES = [
     'SystemAdmin',
     'BranchAdmin',
-    'ComplianceReviewer',
+    'FrontDesk',
     'ComplianceLead',
     'Auditor',
     'FinanceStaff',

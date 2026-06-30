@@ -13,6 +13,12 @@ import {
   UpdateTransferDto,
 } from "./dto";
 import { resolveUserId } from "../../common/auth.util";
+import {
+  buildSnapTransferPayload,
+  formatAmountValue,
+  generatePartnerReferenceNo,
+  normalizeCurrency,
+} from "./snap.util";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
@@ -35,6 +41,40 @@ export class TransfersService {
     );
   }
 
+  /**
+   * Pastikan partner_reference_no unik. Jika user mengirim sendiri → validasi
+   * tidak duplikat. Jika kosong → generate server-side dengan retry anti-tabrakan.
+   */
+  private async resolvePartnerReferenceNo(provided?: string): Promise<string> {
+    if (provided && provided.trim().length > 0) {
+      const ref = provided.trim();
+      if (ref.length > 64) {
+        throw new BadRequestException("partner_reference_no max 64 chars");
+      }
+      const dup = await this.pool.query(
+        `SELECT 1 FROM transfers WHERE partner_reference_no = $1 LIMIT 1`,
+        [ref],
+      );
+      if ((dup.rowCount ?? 0) > 0) {
+        throw new BadRequestException("partner_reference_no already exists");
+      }
+      return ref;
+    }
+
+    // Generate dengan retry — entropy tinggi, tabrakan sangat jarang.
+    for (let i = 0; i < 5; i++) {
+      const candidate = generatePartnerReferenceNo();
+      const dup = await this.pool.query(
+        `SELECT 1 FROM transfers WHERE partner_reference_no = $1 LIMIT 1`,
+        [candidate],
+      );
+      if ((dup.rowCount ?? 0) === 0) return candidate;
+    }
+    throw new BadRequestException(
+      "Failed to generate unique partner_reference_no, please retry",
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // CREATE DRAFT
   // ---------------------------------------------------------------------------
@@ -46,10 +86,10 @@ export class TransfersService {
       throw new ForbiddenException("Not allowed");
     }
 
-    // ✅ validasi sender_application_id
+    // ✅ validasi sender_application_id — harus ada & KYC/KYB APPROVED
     const { rows: senderRows } = await this.pool.query(
-      `SELECT person_id, status 
-     FROM applications 
+      `SELECT person_id, status
+     FROM applications
      WHERE id = $1`,
       [dto.sender_application_id],
     );
@@ -63,26 +103,57 @@ export class TransfersService {
       throw new BadRequestException("Sender is not KYC/KYB approved");
     }
 
+    // ── SNAP-ready derivations ──────────────────────────────────────────
+    const partnerRef = await this.resolvePartnerReferenceNo(
+      dto.partner_reference_no,
+    );
+    const amountCurrency = normalizeCurrency(dto.currency);
+    const amountValue = formatAmountValue(dto.amount);
+    const transferMethod = dto.transfer_method ?? "BANK_TRANSFER";
+    const transferChannel = dto.transfer_channel ?? "MANUAL";
+    const additionalInfo = dto.additional_info ?? {};
+
     // ✅ insert transfer
     const q = await this.pool.query(
       `INSERT INTO transfers(
-      branch_id,
-      amount,
-      beneficiary_bank_name,
-      beneficiary_bank_code,
-      beneficiary_account_number,
-      beneficiary_account_name,
-      description,
-      requested_transfer_at,
-      created_by,
-      sender_application_id,
-      updated_at
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
-    RETURNING *`,
+        branch_id,
+        amount,
+        currency,
+        beneficiary_bank_name,
+        beneficiary_bank_code,
+        beneficiary_account_number,
+        beneficiary_account_name,
+        description,
+        requested_transfer_at,
+        created_by,
+        sender_application_id,
+        partner_reference_no,
+        amount_value,
+        amount_currency,
+        source_account_no,
+        source_account_name,
+        source_bank_code,
+        source_bank_name,
+        beneficiary_address,
+        beneficiary_email,
+        beneficiary_customer_residence,
+        beneficiary_customer_type,
+        transfer_method,
+        transfer_channel,
+        transaction_date,
+        requested_execution_date,
+        additional_info,
+        updated_at
+      )
+      VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+        $19,$20,$21,$22,$23,$24,$25,$26,$27, now()
+      )
+      RETURNING *`,
       [
-        null, // selalu NULL, karena branch belum dipakai
+        null, // branch belum dipakai
         dto.amount,
+        amountCurrency,
         dto.beneficiaryBankName,
         dto.beneficiaryBankCode ?? null,
         dto.beneficiaryAccountNumber,
@@ -91,6 +162,22 @@ export class TransfersService {
         dto.requestedTransferAt ?? null,
         resolveUserId(user),
         dto.sender_application_id,
+        partnerRef,
+        amountValue,
+        amountCurrency,
+        dto.source_account_no ?? null,
+        dto.source_account_name ?? null,
+        dto.source_bank_code ?? null,
+        dto.source_bank_name ?? null,
+        dto.beneficiary_address ?? null,
+        dto.beneficiary_email ?? null,
+        dto.beneficiary_customer_residence ?? null,
+        dto.beneficiary_customer_type ?? null,
+        transferMethod,
+        transferChannel,
+        dto.transaction_date ?? null,
+        dto.requested_execution_date ?? null,
+        JSON.stringify(additionalInfo),
       ],
     );
 
@@ -120,29 +207,63 @@ export class TransfersService {
       throw new BadRequestException("Only DRAFT can be updated");
     }
 
-    // hanya creator yang boleh update
+    // partner_reference_no tidak pernah di-regenerate setelah create.
+    const amountCurrency = normalizeCurrency(dto.currency ?? row.amount_currency);
+    const amountValue = formatAmountValue(dto.amount);
 
     const next = await this.pool.query(
       `UPDATE transfers SET
         amount=$2,
-        beneficiary_bank_name=$3,
-        beneficiary_bank_code=$4,
-        beneficiary_account_number=$5,
-        beneficiary_account_name=$6,
-        description=$7,
-        requested_transfer_at=$8,
+        currency=$3,
+        amount_value=$4,
+        amount_currency=$5,
+        beneficiary_bank_name=$6,
+        beneficiary_bank_code=$7,
+        beneficiary_account_number=$8,
+        beneficiary_account_name=$9,
+        description=$10,
+        requested_transfer_at=$11,
+        source_account_no=COALESCE($12, source_account_no),
+        source_account_name=COALESCE($13, source_account_name),
+        source_bank_code=COALESCE($14, source_bank_code),
+        source_bank_name=COALESCE($15, source_bank_name),
+        beneficiary_address=COALESCE($16, beneficiary_address),
+        beneficiary_email=COALESCE($17, beneficiary_email),
+        beneficiary_customer_residence=COALESCE($18, beneficiary_customer_residence),
+        beneficiary_customer_type=COALESCE($19, beneficiary_customer_type),
+        transfer_method=COALESCE($20, transfer_method),
+        transfer_channel=COALESCE($21, transfer_channel),
+        transaction_date=COALESCE($22, transaction_date),
+        requested_execution_date=COALESCE($23, requested_execution_date),
+        additional_info=COALESCE($24, additional_info),
         updated_at=now()
       WHERE id=$1
       RETURNING *`,
       [
         id,
         dto.amount,
+        amountCurrency,
+        amountValue,
+        amountCurrency,
         dto.beneficiaryBankName,
         dto.beneficiaryBankCode ?? null,
         dto.beneficiaryAccountNumber,
         dto.beneficiaryAccountName,
         dto.description ?? null,
         dto.requestedTransferAt ?? null,
+        dto.source_account_no ?? null,
+        dto.source_account_name ?? null,
+        dto.source_bank_code ?? null,
+        dto.source_bank_name ?? null,
+        dto.beneficiary_address ?? null,
+        dto.beneficiary_email ?? null,
+        dto.beneficiary_customer_residence ?? null,
+        dto.beneficiary_customer_type ?? null,
+        dto.transfer_method ?? null,
+        dto.transfer_channel ?? null,
+        dto.transaction_date ?? null,
+        dto.requested_execution_date ?? null,
+        dto.additional_info ? JSON.stringify(dto.additional_info) : null,
       ],
     );
 
@@ -168,19 +289,36 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
-    // ✅ Hanya cek status, tidak cek created_by lagi
+    // Hanya FinanceStaff yang boleh submit (SystemAdmin read-only).
+    if (user.role !== "FinanceStaff") {
+      throw new ForbiddenException("Only FinanceStaff can submit");
+    }
+
     if (row.status !== "DRAFT") {
       throw new BadRequestException("Only DRAFT can be submitted");
+    }
+
+    // Jangan izinkan submit jika field transfer wajib belum lengkap.
+    const missing: string[] = [];
+    if (!row.beneficiary_account_number) missing.push("beneficiary_account_number");
+    if (!row.beneficiary_account_name) missing.push("beneficiary_account_name");
+    if (!row.beneficiary_bank_name) missing.push("beneficiary_bank_name");
+    if (!(Number(row.amount) > 0)) missing.push("amount");
+    if (missing.length > 0) {
+      throw new BadRequestException(
+        `Cannot submit, missing mandatory fields: ${missing.join(", ")}`,
+      );
     }
 
     const next = await this.pool.query(
       `UPDATE transfers SET
        status = 'SUBMITTED',
+       submitted_by = $2,
        submitted_at = now(),
        updated_at = now()
      WHERE id = $1
      RETURNING *`,
-      [id],
+      [id, resolveUserId(user)],
     );
 
     await this.audit(
@@ -210,26 +348,51 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
+    // Hanya FinanceManager yang boleh decide (SystemAdmin read-only).
+    if (user.role !== "FinanceManager") {
+      throw new ForbiddenException("Only FinanceManager can approve/reject");
+    }
+
     if (row.status !== "SUBMITTED") {
       throw new BadRequestException("Only SUBMITTED can be approved/rejected");
     }
 
-    const status = dto.decision === "APPROVE" ? "APPROVED" : "REJECTED";
-    const next = await this.pool.query(
-      `UPDATE transfers SET
-        status=$2,
-        approved_by=$3,
-        approved_at=now(),
-        result_notes = COALESCE(result_notes,''),
-        updated_at=now()
-      WHERE id=$1
-      RETURNING *`,
-      [id, status, resolveUserId(user)],
-    );
+    const decisionNotes = dto.decision_notes ?? dto.note ?? null;
+    const actorId = resolveUserId(user);
+
+    let next;
+    if (dto.decision === "APPROVE") {
+      next = await this.pool.query(
+        `UPDATE transfers SET
+          status='APPROVED',
+          approved_by=$2,
+          approved_at=now(),
+          decision_notes=$3,
+          updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+        [id, actorId, decisionNotes],
+      );
+    } else if (dto.decision === "REJECT") {
+      next = await this.pool.query(
+        `UPDATE transfers SET
+          status='REJECTED',
+          rejected_by=$2,
+          rejected_at=now(),
+          reject_reason=$3,
+          decision_notes=$4,
+          updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+        [id, actorId, dto.reject_reason ?? null, decisionNotes],
+      );
+    } else {
+      throw new BadRequestException("decision must be APPROVE or REJECT");
+    }
 
     await this.audit(
-      resolveUserId(user),
-      `TRANSFER_${status}`,
+      actorId,
+      `TRANSFER_${next.rows[0].status}`,
       String(id),
       row,
       next.rows[0],
@@ -254,9 +417,22 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
+    // Hanya FinanceManager yang boleh set result (SystemAdmin read-only).
+    if (user.role !== "FinanceManager") {
+      throw new ForbiddenException("Only FinanceManager can set result");
+    }
+
     if (row.status !== "APPROVED") {
       throw new BadRequestException("Only APPROVED can be completed");
     }
+
+    if (dto.result !== "SUCCESS" && dto.result !== "FAILED") {
+      throw new BadRequestException("result must be SUCCESS or FAILED");
+    }
+
+    const actorId = resolveUserId(user);
+    const resultNotes = dto.result_notes ?? dto.note ?? null;
+    const isSuccess = dto.result === "SUCCESS";
 
     const next = await this.pool.query(
       `UPDATE transfers SET
@@ -264,14 +440,48 @@ export class TransfersService {
         result=$2,
         result_notes=$3,
         attachment_uri = COALESCE($4, attachment_uri),
+        result_attachment_uri = COALESCE($5, result_attachment_uri),
+        result_reference_no = COALESCE($6, result_reference_no),
+        bank_reference_no = COALESCE($7, bank_reference_no),
+        external_reference_no = COALESCE($8, external_reference_no),
+        provider_reference_no = COALESCE($9, provider_reference_no),
+        latest_transaction_status = COALESCE($10, latest_transaction_status),
+        transaction_status_desc = COALESCE($11, transaction_status_desc),
+        provider_response_code = COALESCE($12, provider_response_code),
+        provider_response_message = COALESCE($13, provider_response_message),
+        provider_response = COALESCE($14, provider_response),
+        failed_reason = $15,
+        completed_at = $16,
+        failed_at = $17,
+        result_updated_by = $18,
+        result_updated_at = now(),
         updated_at=now()
       WHERE id=$1
       RETURNING *`,
-      [id, dto.result, dto.note ?? null, dto.attachmentUri ?? null],
+      [
+        id,
+        dto.result,
+        resultNotes,
+        dto.attachmentUri ?? null,
+        dto.result_attachment_uri ?? null,
+        dto.result_reference_no ?? null,
+        dto.bank_reference_no ?? null,
+        dto.external_reference_no ?? null,
+        dto.provider_reference_no ?? null,
+        dto.latest_transaction_status ?? null,
+        dto.transaction_status_desc ?? null,
+        dto.provider_response_code ?? null,
+        dto.provider_response_message ?? null,
+        dto.provider_response ? JSON.stringify(dto.provider_response) : null,
+        isSuccess ? null : dto.failed_reason ?? null,
+        isSuccess ? new Date() : null,
+        isSuccess ? null : new Date(),
+        actorId,
+      ],
     );
 
     await this.audit(
-      resolveUserId(user),
+      actorId,
       "TRANSFER_SET_RESULT",
       String(id),
       row,
@@ -282,7 +492,7 @@ export class TransfersService {
   }
 
   // ---------------------------------------------------------------------------
-  // LIST – FinanceStaff: hanya miliknya; FinanceManager: per branch
+  // LIST – FinanceStaff: hanya miliknya; FinanceManager/SystemAdmin: semua
   // ---------------------------------------------------------------------------
   async list(user: AuthedUser, status?: string) {
     const role = user.role;
@@ -296,7 +506,6 @@ export class TransfersService {
       where += ` AND (created_by = $${params.length} OR created_by IS NULL)`;
     }
     // 🔹 FinanceManager, SystemAdmin, dll → tidak ada filter khusus
-    // cukup "WHERE 1=1", lihat semua transfer
 
     const normStatus = status?.toUpperCase();
     if (normStatus && normStatus !== "ALL") {
@@ -305,7 +514,13 @@ export class TransfersService {
     }
 
     const q = await this.pool.query(
-      `SELECT *
+      `SELECT
+         id, partner_reference_no, reference_no, sender_application_id,
+         amount, currency, amount_value, amount_currency,
+         beneficiary_account_name, beneficiary_account_number,
+         beneficiary_bank_code, beneficiary_bank_name,
+         status, result, created_at, submitted_at, approved_at,
+         completed_at, failed_at
      FROM transfers
      ${where}
      ORDER BY id DESC
@@ -332,16 +547,28 @@ export class TransfersService {
 
     const row = q.rows[0];
 
-    // Non-manager hanya boleh lihat transfer yang dia buat
+    // Non-manager hanya boleh lihat transfer yang dia buat.
+    // pg mengembalikan BIGINT sebagai string → bandingkan sebagai string.
     if (!isManager) {
-      const creatorId: number | null = row.created_by ?? null;
-      const userId = Number(resolveUserId(user));
+      const creatorId =
+        row.created_by !== null && row.created_by !== undefined
+          ? String(row.created_by)
+          : null;
+      const userId = String(resolveUserId(user));
 
-      if (creatorId !== null && !Number.isNaN(userId) && creatorId !== userId) {
+      if (creatorId !== null && creatorId !== userId) {
         throw new ForbiddenException("Not allowed");
       }
     }
 
     return row;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SNAP PREVIEW – pure mapping, NO external call
+  // ---------------------------------------------------------------------------
+  async snapPreview(id: number, user: AuthedUser) {
+    const row = await this.getById(id, user);
+    return buildSnapTransferPayload(row);
   }
 }

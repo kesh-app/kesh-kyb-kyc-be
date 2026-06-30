@@ -12,7 +12,7 @@ import {
 export const INTERNAL_ROLES = [
   'SystemAdmin',
   'BranchAdmin',
-  'ComplianceReviewer',
+  'FrontDesk',
   'ComplianceLead',
   'Auditor',
   'FinanceStaff',

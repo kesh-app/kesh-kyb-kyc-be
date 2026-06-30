@@ -26,7 +26,7 @@ function buildPgConfig() {
   // 🔹 roles idempotent – sekalian tambahin role finance & SystemAdmin
   const roles = [
     'BranchAdmin',
-    'ComplianceReviewer',
+    'FrontDesk',
     'ComplianceLead',
     'Auditor',
     'FinanceStaff',

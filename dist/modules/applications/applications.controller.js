@@ -125,7 +125,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "precheck", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "FrontDesk", "ComplianceLead"),
     (0, common_1.Post)("individual"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
@@ -134,7 +134,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "createInd", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "FrontDesk", "ComplianceLead"),
     (0, common_1.Post)("business"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
@@ -143,7 +143,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "createBiz", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "FrontDesk", "ComplianceLead"),
     (0, common_1.Post)(":id/documents"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
@@ -152,7 +152,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "addDoc", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "FrontDesk", "ComplianceLead", "SystemAdmin"),
     (0, common_1.Get)(":id/parties"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
@@ -160,7 +160,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "listParties", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "FrontDesk", "ComplianceLead"),
     (0, common_1.Post)(":id/parties"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
@@ -169,7 +169,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "addParty", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "FrontDesk", "ComplianceLead"),
     (0, common_1.Delete)(":id/parties/:partyId"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Param)("partyId", common_1.ParseIntPipe)),
@@ -200,7 +200,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "getDoc", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("BranchAdmin", "ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("BranchAdmin", "FrontDesk", "ComplianceLead"),
     (0, common_1.Post)(":id/documents/upload"),
     (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)("file", {
         limits: {
@@ -222,7 +222,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "uploadDocument", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead"),
     (0, common_1.Patch)(":id/submit"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Req)()),
@@ -231,7 +231,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "submit", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead"),
     (0, common_1.Patch)(":id/decision"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
@@ -241,7 +241,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "decide", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("ComplianceReviewer", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead"),
     (0, common_1.Delete)(":id/documents/:docId"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(1, (0, common_1.Param)("docId", common_1.ParseIntPipe)),

@@ -81,6 +81,13 @@ export class TransfersController {
     return this.svc.list(req.user, status);
   }
 
+  // SNAP PREVIEW — pure mapping of stored data, NO external bank/API call
+  @Get(":id/snap-preview")
+  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")
+  async snapPreview(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
+    return this.svc.snapPreview(id, req.user);
+  }
+
   // GET TRANSFER DETAIL
   @Get(":id")
   @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")

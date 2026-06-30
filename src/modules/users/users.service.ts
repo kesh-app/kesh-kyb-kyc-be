@@ -15,7 +15,7 @@ export type UserRow = {
   password_hash: string;
   role:
     | "BranchAdmin"
-    | "ComplianceReviewer"
+    | "FrontDesk"
     | "ComplianceLead"
     | "Auditor"
     | "FinanceStaff"

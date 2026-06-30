@@ -1,4 +1,4 @@
-export declare const INTERNAL_ROLES: readonly ["SystemAdmin", "BranchAdmin", "ComplianceReviewer", "ComplianceLead", "Auditor", "FinanceStaff", "FinanceManager"];
+export declare const INTERNAL_ROLES: readonly ["SystemAdmin", "BranchAdmin", "FrontDesk", "ComplianceLead", "Auditor", "FinanceStaff", "FinanceManager"];
 export type InternalRole = (typeof INTERNAL_ROLES)[number];
 export declare class CreateAdminUserDto {
     email: string;

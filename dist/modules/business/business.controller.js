@@ -49,7 +49,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], BusinessController.prototype, "list", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('BranchAdmin', 'ComplianceReviewer', 'ComplianceLead'),
+    (0, roles_decorator_1.Roles)('BranchAdmin', 'FrontDesk', 'ComplianceLead'),
     (0, common_1.Post)(':id/parties'),
     __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
@@ -58,7 +58,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], BusinessController.prototype, "createWithPerson", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('BranchAdmin', 'ComplianceReviewer', 'ComplianceLead'),
+    (0, roles_decorator_1.Roles)('BranchAdmin', 'FrontDesk', 'ComplianceLead'),
     (0, common_1.Post)(':id/parties/link'),
     __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
     __param(1, (0, common_1.Body)(new common_1.ValidationPipe({ whitelist: true }))),
@@ -67,7 +67,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], BusinessController.prototype, "linkExisting", null);
 __decorate([
-    (0, roles_decorator_1.Roles)('ComplianceReviewer', 'ComplianceLead'),
+    (0, roles_decorator_1.Roles)('FrontDesk', 'ComplianceLead'),
     (0, common_1.Delete)(':id/parties/:partyId'),
     __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
     __param(1, (0, common_1.Param)('partyId', common_1.ParseIntPipe)),
