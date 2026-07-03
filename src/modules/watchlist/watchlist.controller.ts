@@ -74,4 +74,30 @@ export class WatchlistController {
     const n = Math.min(Number(limit) || 20, 100);
     return this.svc.listIngestHistory(n);
   }
+
+  // Data watchlist entries yang tersimpan (untuk FE menampilkan isi list, bukan hanya riwayat).
+  // RBAC sama dengan history: ComplianceLead + SystemAdmin. FrontDesk/Auditor/Finance diblokir.
+  // Catatan: watchlist_entries TIDAK punya relasi ke ingest log, jadi cara paling aman
+  // memfilter data (termasuk existing) adalah via list_type / source_list.
+  @Roles("ComplianceLead", "SystemAdmin")
+  @Get("entries")
+  async entries(
+    @Query("page") page?: string,
+    @Query("limit") limit?: string,
+    @Query("list_type") list_type?: string,
+    @Query("source_list") source_list?: string,
+    @Query("watchlist_type") watchlist_type?: string,
+    @Query("subject_type") subject_type?: string,
+    @Query("q") q?: string,
+  ) {
+    return this.svc.listEntries({
+      page: Number(page) || 1,
+      limit: Number(limit) || 20,
+      list_type: list_type?.trim() || undefined,
+      source_list: source_list?.trim() || undefined,
+      watchlist_type: watchlist_type?.trim() || undefined,
+      subject_type: subject_type?.trim() || undefined,
+      q: q?.trim() || undefined,
+    });
+  }
 }

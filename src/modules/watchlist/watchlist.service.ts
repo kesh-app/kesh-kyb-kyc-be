@@ -35,6 +35,11 @@ type IngestRow = {
   list_updated_date?: string | null;
   source_url?: string | null;
   remarks?: string | null;
+  // Watchlist Template v3 (opsional — audit/traceability, belum dipakai matching)
+  watchlist_type?: string | null;
+  subject_type?: string | null;
+  raw_date_of_birth?: string | null;
+  description?: string | null;
 };
 
 @Injectable()
@@ -62,6 +67,67 @@ export class WatchlistService {
     return createHash("sha1").update(key).digest("hex");
   }
 
+  /**
+   * Generate deterministic unique_id ketika kolom Unique_ID kosong pada file upload.
+   * Deterministik (bukan random) agar upload ulang baris yang sama tidak membuat duplikat.
+   * Normalisasi tiap field: trim + uppercase + string kosong bila null, digabung "|".
+   * Format: KESH-WL-AUTO-<16 hex uppercase>  (contoh: KESH-WL-AUTO-8F3A91C2D4B7E102)
+   */
+  generateWatchlistUniqueId(r: IngestRow): string {
+    const normalizeForId = (v?: string | null) =>
+      (v ?? "").toString().trim().toUpperCase();
+    const source = [
+      r.full_name, // Full_Name
+      r.entity_name, // Entity_Name
+      r.date_of_birth, // Date_of_Birth
+      r.nationality, // Nationality
+      r.national_id_number, // National_ID_Number
+      r.sanction_number, // Sanction_Number
+      r.source_url, // Source_URL
+    ]
+      .map(normalizeForId)
+      .join("|");
+    const hash = createHash("sha256").update(source).digest("hex");
+    return `KESH-WL-AUTO-${hash.slice(0, 16).toUpperCase()}`;
+  }
+
+  /**
+   * Normalisasi Subject_Type → PERSON / ENTITY.
+   * Menerima input Indonesia: Orang→PERSON; Korporasi/Perusahaan/Badan→ENTITY.
+   * Kosong / tak dikenal → null (kolom audit opsional, tidak dipaksa).
+   */
+  normalizeSubjectType(v?: string | null): string | null {
+    const up = (v ?? "").toString().trim().toUpperCase();
+    if (!up) return null;
+    if (["PERSON", "ORANG"].includes(up)) return "PERSON";
+    if (["ENTITY", "KORPORASI", "PERUSAHAAN", "BADAN"].includes(up))
+      return "ENTITY";
+    return null;
+  }
+
+  /**
+   * Normalisasi Watchlist_Type → {DTTOT, PEP, PPPSPM, OTHER} (uppercase).
+   * - Diisi & valid → dipakai apa adanya.
+   * - Diisi tapi tak dikenal → OTHER.
+   * - Kosong → infer dari list_type (form) → fallback scan list_source → OTHER.
+   */
+  normalizeWatchlistType(
+    v: string | null | undefined,
+    list_type: string,
+    list_source: string,
+  ): string {
+    const allowed = ["DTTOT", "PEP", "PPPSPM", "OTHER"];
+    const up = (v ?? "").toString().trim().toUpperCase();
+    if (allowed.includes(up)) return up;
+    if (up) return "OTHER";
+    if (["DTTOT", "PEP", "PPPSPM"].includes(list_type)) return list_type;
+    const src = (list_source ?? "").toUpperCase();
+    if (src.includes("DTTOT")) return "DTTOT";
+    if (src.includes("PPPSPM")) return "PPPSPM";
+    if (src.includes("PEP")) return "PEP";
+    return "OTHER";
+  }
+
   parseAliases(v?: string | null): string[] | null {
     if (!v) return null;
     const arr = v
@@ -80,42 +146,76 @@ export class WatchlistService {
     list_type: IngestRow["list_type"],
     list_source: string,
   ): IngestRow {
+    // Header dinormalisasi supaya case/spasi/underscore-insensitive:
+    // "Watchlist_Type", "Watchlist Type", "watchlist type" → sama.
+    const normHeader = (h: string) =>
+      String(h)
+        .replace(/\uFEFF/g, "") // buang BOM/zero-width no-break space bila menempel di header
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_]+/g, " ")
+        .trim();
+    const index: Record<string, any> = {};
+    for (const k of Object.keys(raw ?? {})) index[normHeader(k)] = raw[k];
+
+    // Ambil value pertama yang tidak kosong dari daftar alias header.
+    // Mengembalikan value asli (mis. Date object dari XLSX) agar perilaku
+    // kolom lama tidak berubah.
+    const pick = (...aliases: string[]): any => {
+      for (const a of aliases) {
+        const v = index[normHeader(a)];
+        if (v !== undefined && v !== null && String(v).trim() !== "") return v;
+      }
+      return null;
+    };
+
     const r: IngestRow = {
       list_type,
       list_source,
-      unique_id: raw.Unique_ID || null,
-      full_name: raw.Full_Name || null,
-      alias_name: this.parseAliases(raw.Alias_Name || null),
-      gender: raw.Gender || null,
-      date_of_birth: raw.Date_of_Birth || null,
-      place_of_birth: raw.Place_of_Birth || null,
-      nationality: raw.Nationality || null,
-      national_id_number: raw.National_ID_Number || null,
-      tax_identification_number: raw.Tax_Identification_Number || null,
-      position_title: raw.Position_Title || null,
-      institution_name: raw.Institution_Name || null,
-      pep_type: raw.PEP_Type || null,
-      status: raw.Status || null,
-      address: raw.Address || null,
-      city: raw.City || null,
-      country: raw.Country || null,
-      entity_name: raw.Entity_Name || null,
-      registration_number: raw.Registration_Number || null,
-      legal_form: raw.Legal_Form || null,
-      country_of_registration: raw.Country_of_Registration || null,
+      // ── Kolom existing (v2) — tetap didukung ──
+      unique_id: pick("Unique_ID"),
+      full_name: pick("Full_Name"),
+      alias_name: this.parseAliases(pick("Alias_Name")),
+      gender: pick("Gender"),
+      date_of_birth: pick("Date_of_Birth"),
+      nationality: pick("Nationality"),
+      national_id_number: pick("National_ID_Number"),
+      tax_identification_number: pick("Tax_Identification_Number"),
+      pep_type: pick("PEP_Type"),
+      status: pick("Status"),
+      city: pick("City"),
+      country: pick("Country"),
+      entity_name: pick("Entity_Name"),
+      registration_number: pick("Registration_Number"),
+      legal_form: pick("Legal_Form"),
+      country_of_registration: pick("Country_of_Registration"),
       associated_individuals: this.parseAssociated(
-        raw.Associated_Individuals || null,
+        pick("Associated_Individuals"),
       ),
-      associated_entities: this.parseAssociated(
-        raw.Associated_Entities || null,
+      associated_entities: this.parseAssociated(pick("Associated_Entities")),
+      relationship_type: pick("Relationship_Type"),
+      sanction_number: pick("Sanction_Number"),
+      inclusion_date: pick("Inclusion_Date"),
+      removal_date: pick("Removal_Date"),
+      list_updated_date: pick("List_Updated_Date"),
+      source_url: pick("Source_URL"),
+      remarks: pick("Remarks"),
+      // ── Kolom dengan alias friendly/Indonesia (v3) ──
+      place_of_birth: pick("Place_of_Birth", "Tempat Lahir"),
+      position_title: pick("Position_Title", "Jabatan"),
+      institution_name: pick("Institution_Name", "Instansi"),
+      address: pick("Address", "Alamat"),
+      // ── Kolom baru v3 ──
+      raw_date_of_birth: pick("Raw_Date_of_Birth", "Tanggal Lahir Mentah"),
+      description: pick("Description", "Deskripsi"),
+      subject_type: this.normalizeSubjectType(
+        pick("Subject_Type", "Terduga", "Jenis Subjek"),
       ),
-      relationship_type: raw.Relationship_Type || null,
-      sanction_number: raw.Sanction_Number || null,
-      inclusion_date: raw.Inclusion_Date || null,
-      removal_date: raw.Removal_Date || null,
-      list_updated_date: raw.List_Updated_Date || null,
-      source_url: raw.Source_URL || null,
-      remarks: raw.Remarks || null,
+      watchlist_type: this.normalizeWatchlistType(
+        pick("Watchlist_Type", "Jenis Watchlist"),
+        list_type,
+        list_source,
+      ),
     };
     return r;
   }
@@ -125,6 +225,17 @@ export class WatchlistService {
     list_type: IngestRow["list_type"],
     list_source: string,
   ) {
+    // Buang UTF-8 BOM (EF BB BF) di awal buffer bila ada, supaya header pertama
+    // tidak terbaca sebagai "﻿Unique_ID" pada file UTF-8-SIG.
+    if (
+      buf &&
+      buf.length >= 3 &&
+      buf[0] === 0xef &&
+      buf[1] === 0xbb &&
+      buf[2] === 0xbf
+    ) {
+      buf = buf.subarray(3);
+    }
     const wb = XLSX.read(buf, { type: "buffer", cellDates: true, raw: false });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
@@ -132,13 +243,30 @@ export class WatchlistService {
   }
 
   async upsertRow(r: IngestRow) {
+    // Identity name wajib: baris tanpa Full_Name maupun Entity_Name ditolak.
+    // Baris tanpa nama tidak berguna untuk screening dan membuat auto-generate
+    // unique_id kehilangan makna (semua baris kosong akan collapse jadi satu).
+    const hasName =
+      !!(r.full_name && r.full_name.trim()) ||
+      !!(r.entity_name && r.entity_name.trim());
+    if (!hasName) {
+      throw new BadRequestException(
+        "Baris tanpa Full_Name/Entity_Name ditolak (identity name wajib)",
+      );
+    }
+
     const name_norm = this.norm(r.full_name || r.entity_name || "");
     const aliases = r.alias_name || null;
     const aliases_concat = aliases ? aliases.join(" ") : null;
     const natural_key = this.buildNaturalKey(r);
-    const uid = r.unique_id?.trim() || null;
 
-    // Kolom values (34 params), dipakai bersama untuk INSERT dan UPDATE
+    // Unique_ID opsional:
+    // - providedUid: value dari file (menang bila diisi)
+    // - uid: value yang dipakai untuk INSERT / lookup (provided, atau di-generate bila kosong)
+    const providedUid = r.unique_id?.trim() || null;
+    const uid = providedUid || this.generateWatchlistUniqueId(r);
+
+    // Kolom values (38 params), dipakai bersama untuk INSERT dan UPDATE
     const vals: any[] = [
       r.list_type,          // $1
       r.list_source,        // $2
@@ -174,6 +302,10 @@ export class WatchlistService {
       r.list_updated_date,  // $32
       r.source_url,         // $33
       r.remarks,            // $34
+      r.watchlist_type,     // $35
+      r.subject_type,       // $36
+      r.raw_date_of_birth,  // $37
+      r.description,        // $38
     ];
 
     const client = await this.pool.connect();
@@ -201,8 +333,11 @@ export class WatchlistService {
         await client.query(
           `UPDATE watchlist_entries SET
             list_type=$1, list_source=$2,
-            unique_id=COALESCE($3, unique_id), natural_key=$4,
-            name=$5, name_norm=$6, aliases=$7, aliases_concat=$8,
+            -- Prioritas: value dari file ($40) > unique_id existing > value INSERT/generated ($3).
+            -- Ini menjaga unique_id eksplisit lama tidak tertimpa oleh id auto-generate.
+            unique_id=COALESCE($40, unique_id, $3), natural_key=$4,
+            -- full_name (kolom legacy NOT NULL) di-mirror dari display name ($5)
+            full_name=$5, name=$5, name_norm=$6, aliases=$7, aliases_concat=$8,
             gender=$9, date_of_birth=$10, place_of_birth=$11, nationality=$12,
             national_id_number=$13, tax_identification_number=$14,
             position_title=$15, institution_name=$16, pep_type=$17, status=$18,
@@ -211,22 +346,26 @@ export class WatchlistService {
             associated_individuals=$26, associated_entities=$27,
             relationship_type=$28, sanction_number=$29, inclusion_date=$30,
             removal_date=$31, list_updated_date=$32, source_url=$33, remarks=$34,
+            -- Watchlist Template v3
+            watchlist_type=$35, subject_type=$36, raw_date_of_birth=$37, description=$38,
             updated_at=now()
-           WHERE id=$35`,
-          [...vals, existingId],
+           WHERE id=$39`,
+          [...vals, existingId, providedUid],
         );
       } else {
         await client.query(
           `INSERT INTO watchlist_entries
             (list_type, list_source, unique_id, natural_key,
-             name, name_norm, aliases, aliases_concat, gender, date_of_birth, place_of_birth, nationality,
+             full_name, name, name_norm, aliases, aliases_concat, gender, date_of_birth, place_of_birth, nationality,
              national_id_number, tax_identification_number, position_title, institution_name, pep_type, status,
              address, city, country, entity_name, registration_number, legal_form, country_of_registration,
              associated_individuals, associated_entities, relationship_type, sanction_number, inclusion_date,
-             removal_date, list_updated_date, source_url, remarks, updated_at)
+             removal_date, list_updated_date, source_url, remarks,
+             watchlist_type, subject_type, raw_date_of_birth, description, updated_at)
            VALUES
-            ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-             $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34, now())`,
+            ($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+             $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
+             $35,$36,$37,$38, now())`,
           vals,
         );
       }
@@ -254,17 +393,33 @@ export class WatchlistService {
       );
 
     let successRows = 0;
-    let errorMessage: string | null = null;
+    const rowErrors: { row: number; message: string }[] = [];
 
-    for (const r of rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const fileLine = i + 2; // baris 1 = header, data mulai baris 2
+
       try {
+        // Policy: Watchlist_Type per-baris harus cocok dengan Jenis List (list_type)
+        // yang dipilih saat upload. Baris blank sudah di-infer ke list_type (cocok).
+        // Mismatch = error baris yang JELAS — bukan silent skip / silent relabel.
+        if (r.watchlist_type && r.watchlist_type !== list_type) {
+          throw new BadRequestException(
+            `Watchlist_Type (${r.watchlist_type}) tidak cocok dengan Jenis List yang dipilih (${list_type}).`,
+          );
+        }
         await this.upsertRow(r);
         successRows++;
       } catch (err: any) {
-        if (!errorMessage) errorMessage = "";
-        errorMessage += `${err.message}; `;
+        rowErrors.push({ row: fileLine, message: err.message });
       }
     }
+
+    // String gabungan untuk kolom log & kompatibilitas field `errors` lama.
+    const errorMessage =
+      rowErrors.length > 0
+        ? rowErrors.map((e) => `Baris ${e.row}: ${e.message}`).join("; ")
+        : null;
 
     // insert ke log
     const logRes = await this.pool.query(
@@ -282,11 +437,25 @@ export class WatchlistService {
       ],
     );
 
+    // Status non-misleading:
+    //  - FAILED : tidak ada baris sukses (success = 0)
+    //  - PARTIAL: sebagian sukses, sebagian error
+    //  - SUCCESS: semua baris sukses
+    const status =
+      successRows === 0
+        ? "FAILED"
+        : rowErrors.length > 0
+          ? "PARTIAL"
+          : "SUCCESS";
+
     return {
-      ok: true,
+      ok: successRows > 0, // jangan tampilkan sukses bila 0 baris diproses
+      status,
       total: rows.length,
       success: successRows,
-      errors: errorMessage,
+      error_count: rowErrors.length,
+      errors: errorMessage, // string gabungan (backward-compat), null bila tak ada
+      row_errors: rowErrors, // detail per-baris: [{ row, message }]
       log: { uploaded_by: logRes.rows[0]?.uploaded_by ?? null },
     };
   }
@@ -303,6 +472,125 @@ LIMIT $1
 `,
       [limit],
     );
-    return q.rows;
+    // Petakan ke bentuk yang dipakai FE untuk kolom "Jumlah": total/success/error_count/status.
+    return q.rows.map((r: any) => {
+      const total = Number(r.total_rows ?? 0);
+      const success = Number(r.success_rows ?? 0);
+      const error_count = Math.max(0, total - success);
+      const status =
+        total === 0 || success === 0
+          ? "FAILED"
+          : error_count > 0
+            ? "PARTIAL"
+            : "SUCCESS";
+      return {
+        id: r.id,
+        list_type: r.list_type,
+        source_list: r.list_source,
+        original_filename: r.original_filename,
+        uploaded_at: r.created_at,
+        uploaded_by: r.uploaded_by,
+        total,
+        success,
+        error_count,
+        status,
+        error_message: r.error_message,
+      };
+    });
+  }
+
+  /**
+   * List watchlist entries yang sudah tersimpan (untuk FE menampilkan data, bukan hanya riwayat upload).
+   * Filter: list_type, source_list, watchlist_type, subject_type, dan search `q`.
+   * Pagination: page (default 1) + limit (default 20, max 100), plus total.
+   */
+  async listEntries(opts: {
+    page?: number;
+    limit?: number;
+    list_type?: string;
+    source_list?: string;
+    watchlist_type?: string;
+    subject_type?: string;
+    q?: string;
+  }) {
+    const page = Math.max(1, Number(opts.page) || 1);
+    const limit = Math.max(1, Math.min(100, Number(opts.limit) || 20));
+    const offset = (page - 1) * limit;
+
+    const wh: string[] = [];
+    const params: any[] = [];
+
+    if (opts.list_type)
+      wh.push(`list_type = $${params.push(opts.list_type)}`);
+    if (opts.source_list)
+      wh.push(`list_source = $${params.push(opts.source_list)}`);
+    if (opts.watchlist_type)
+      wh.push(`watchlist_type = $${params.push(opts.watchlist_type)}`);
+    if (opts.subject_type)
+      wh.push(`subject_type = $${params.push(opts.subject_type)}`);
+    if (opts.q) {
+      const p = params.push(`%${opts.q}%`);
+      wh.push(`(
+        COALESCE(unique_id,'') ILIKE $${p} OR
+        COALESCE(full_name,'') ILIKE $${p} OR
+        COALESCE(name,'') ILIKE $${p} OR
+        COALESCE(entity_name,'') ILIKE $${p} OR
+        COALESCE(aliases_concat,'') ILIKE $${p} OR
+        COALESCE(national_id_number,'') ILIKE $${p} OR
+        COALESCE(sanction_number,'') ILIKE $${p} OR
+        COALESCE(position_title,'') ILIKE $${p} OR
+        COALESCE(institution_name,'') ILIKE $${p}
+      )`);
+    }
+
+    const whereSql = wh.length ? `WHERE ${wh.join(" AND ")}` : "";
+
+    const sql = `
+      SELECT id, unique_id, list_type, list_source, watchlist_type, subject_type,
+             full_name, aliases_concat AS alias_name, entity_name,
+             date_of_birth, raw_date_of_birth, place_of_birth, nationality,
+             national_id_number, position_title, institution_name, address,
+             sanction_number, source_url, description, remarks,
+             created_at, updated_at,
+             COUNT(*) OVER()::int AS total_count
+      FROM watchlist_entries
+      ${whereSql}
+      ORDER BY updated_at DESC NULLS LAST, id DESC
+      LIMIT $${params.push(limit)} OFFSET $${params.push(offset)}
+    `;
+
+    const { rows } = await this.pool.query(sql, params);
+    const total = rows[0]?.total_count ?? 0;
+
+    return {
+      data: rows.map((r: any) => ({
+        id: r.id,
+        unique_id: r.unique_id,
+        list_type: r.list_type,
+        source_list: r.list_source,
+        watchlist_type: r.watchlist_type,
+        subject_type: r.subject_type,
+        full_name: r.full_name,
+        alias_name: r.alias_name,
+        entity_name: r.entity_name,
+        date_of_birth: r.date_of_birth,
+        raw_date_of_birth: r.raw_date_of_birth,
+        place_of_birth: r.place_of_birth,
+        nationality: r.nationality,
+        national_id_number: r.national_id_number,
+        position_title: r.position_title,
+        institution_name: r.institution_name,
+        address: r.address,
+        sanction_number: r.sanction_number,
+        source_url: r.source_url,
+        description: r.description,
+        remarks: r.remarks,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      })),
+      page,
+      limit,
+      total,
+    };
   }
 }

@@ -39,6 +39,21 @@ let WatchlistController = class WatchlistController {
         const n = Math.min(Number(limit) || 20, 100);
         return this.svc.listIngestHistory(n);
     }
+    // Data watchlist entries yang tersimpan (untuk FE menampilkan isi list, bukan hanya riwayat).
+    // RBAC sama dengan history: ComplianceLead + SystemAdmin. FrontDesk/Auditor/Finance diblokir.
+    // Catatan: watchlist_entries TIDAK punya relasi ke ingest log, jadi cara paling aman
+    // memfilter data (termasuk existing) adalah via list_type / source_list.
+    async entries(page, limit, list_type, source_list, watchlist_type, subject_type, q) {
+        return this.svc.listEntries({
+            page: Number(page) || 1,
+            limit: Number(limit) || 20,
+            list_type: list_type?.trim() || undefined,
+            source_list: source_list?.trim() || undefined,
+            watchlist_type: watchlist_type?.trim() || undefined,
+            subject_type: subject_type?.trim() || undefined,
+            q: q?.trim() || undefined,
+        });
+    }
 };
 exports.WatchlistController = WatchlistController;
 __decorate([
@@ -76,6 +91,20 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
 ], WatchlistController.prototype, "history", null);
+__decorate([
+    (0, roles_decorator_1.Roles)("ComplianceLead", "SystemAdmin"),
+    (0, common_1.Get)("entries"),
+    __param(0, (0, common_1.Query)("page")),
+    __param(1, (0, common_1.Query)("limit")),
+    __param(2, (0, common_1.Query)("list_type")),
+    __param(3, (0, common_1.Query)("source_list")),
+    __param(4, (0, common_1.Query)("watchlist_type")),
+    __param(5, (0, common_1.Query)("subject_type")),
+    __param(6, (0, common_1.Query)("q")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String, String, String, String, String, String]),
+    __metadata("design:returntype", Promise)
+], WatchlistController.prototype, "entries", null);
 exports.WatchlistController = WatchlistController = __decorate([
     (0, common_1.Controller)("watchlist"),
     (0, common_1.UseGuards)(jwt_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),

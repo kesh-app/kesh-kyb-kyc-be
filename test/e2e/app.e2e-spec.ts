@@ -26,6 +26,8 @@ const SUFFIX = Date.now().toString().slice(-7);
 
 describe('KYC/KYB E2E — Priority Tests', () => {
   let app: INestApplication;
+  // Pool untuk verifikasi langsung ke DB (mis. cek unique_id tersimpan)
+  let pgPool: any;
 
   // Tokens
   let complianceToken: string;
@@ -53,6 +55,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     app.setGlobalPrefix('api');
     await app.init();
+
+    // Ambil pool yang sama dengan aplikasi untuk verifikasi data tersimpan
+    pgPool = app.get('PG_POOL');
 
     // Login ComplianceLead (dari npm run db:seed)
     const loginComp = await request(app.getHttpServer())
@@ -718,6 +723,552 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .get(`${BASE}/watchlist/history`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .expect(403);
+    });
+
+    // ── Unique_ID optional / auto-generate ──────────────────────
+    it('I-06: upload dengan Unique_ID terisi → tersimpan apa adanya', async () => {
+      const providedUid = `WLPROV${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Date_of_Birth,Nationality',
+        `${providedUid},Provided Person ${SUFFIX},1980-05-05,ID`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_provided_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E Provided ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+
+      const { rows } = await pgPool.query(
+        `SELECT unique_id FROM watchlist_entries WHERE upper(unique_id) = upper($1) LIMIT 1`,
+        [providedUid],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].unique_id).toBe(providedUid);
+    });
+
+    it('I-07: upload dengan Unique_ID kosong → auto-generate KESH-WL-AUTO-...', async () => {
+      const fullName = `Auto Person ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Date_of_Birth,Nationality,National_ID_Number',
+        `,${fullName},1975-03-03,ID,NIK${SUFFIX}`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_auto_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E Auto ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+
+      const { rows } = await pgPool.query(
+        `SELECT unique_id FROM watchlist_entries WHERE name = $1 LIMIT 1`,
+        [fullName],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].unique_id).toMatch(/^KESH-WL-AUTO-[0-9A-F]{16}$/);
+    });
+
+    it('I-08: upload baris Unique_ID kosong yang sama dua kali → upsert, tidak duplikat', async () => {
+      const fullName = `Dup Person ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Date_of_Birth,Nationality',
+        `,${fullName},1990-09-09,ID`,
+      ].join('\n');
+      const doUpload = () =>
+        request(app.getHttpServer())
+          .post(`${BASE}/watchlist/upload`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .attach('file', Buffer.from(csv), {
+            filename: `wl_dup_${SUFFIX}.csv`,
+            contentType: 'text/csv',
+          })
+          .field('list_type', 'PEP')
+          .field('list_source', `E2E Dup ${SUFFIX}`)
+          .expect(201);
+
+      await doUpload();
+      await doUpload();
+
+      const { rows } = await pgPool.query(
+        `SELECT unique_id FROM watchlist_entries WHERE name = $1`,
+        [fullName],
+      );
+      // Hanya 1 baris meski di-upload 2x (dedup via unique_id auto-generate deterministik)
+      expect(rows.length).toBe(1);
+      expect(rows[0].unique_id).toMatch(/^KESH-WL-AUTO-[0-9A-F]{16}$/);
+    });
+
+    it('I-09: upload baris tanpa Full_Name & Entity_Name → ditolak (identity name wajib)', async () => {
+      const csv = [
+        'Unique_ID,Full_Name,Entity_Name,Date_of_Birth',
+        `,,,2000-01-01`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_noname_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E NoName ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.total).toBe(1);
+      expect(res.body.success).toBe(0);
+      expect(res.body.errors).toBeTruthy();
+    });
+
+    // ── Watchlist Template v3 (kolom opsional tambahan) ─────────
+    it('I-10: PEP row dengan Jabatan/Instansi → tersimpan (position_title, institution_name)', async () => {
+      const fullName = `PEP V3 ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Date_of_Birth,Nationality,Jabatan,Instansi',
+        `,${fullName},1972-02-02,ID,Gubernur,Bank Sentral`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_pep_v3_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E PEP v3 ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+
+      const { rows } = await pgPool.query(
+        `SELECT position_title, institution_name, watchlist_type
+           FROM watchlist_entries WHERE name = $1 LIMIT 1`,
+        [fullName],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].position_title).toBe('Gubernur');
+      expect(rows[0].institution_name).toBe('Bank Sentral');
+      expect(rows[0].watchlist_type).toBe('PEP'); // di-infer dari list_type
+    });
+
+    it('I-11: DTTOT row dengan Terduga/Tempat Lahir/Alamat/Deskripsi → tersimpan + subject_type dinormalisasi', async () => {
+      const fullName = `DTTOT V3 ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Terduga,Tempat Lahir,Alamat,Raw Date of Birth,Deskripsi',
+        `,${fullName},Orang,Surabaya,Jl. Merdeka No. 5,circa 1968,Terduga teroris`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_dttot_v3_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'DTTOT')
+        .field('list_source', `E2E DTTOT v3 ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+
+      const { rows } = await pgPool.query(
+        `SELECT subject_type, place_of_birth, address, raw_date_of_birth, description, watchlist_type
+           FROM watchlist_entries WHERE name = $1 LIMIT 1`,
+        [fullName],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].subject_type).toBe('PERSON'); // "Orang" → PERSON
+      expect(rows[0].place_of_birth).toBe('Surabaya');
+      expect(rows[0].address).toBe('Jl. Merdeka No. 5');
+      expect(rows[0].raw_date_of_birth).toBe('circa 1968');
+      expect(rows[0].description).toBe('Terduga teroris');
+      expect(rows[0].watchlist_type).toBe('DTTOT');
+    });
+
+    it('I-12: template v2 lama (tanpa kolom v3) tetap ter-upload', async () => {
+      const fullName = `Legacy V2 ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Alias_Name,Date_of_Birth,Nationality,National_ID_Number,Sanction_Number,Source_URL,Remarks',
+        `WLV2${SUFFIX},${fullName},"Ali;Aly",1965-06-06,ID,NIKV2${SUFFIX},SN-${SUFFIX},http://x,legacy row`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_v2_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'DTTOT')
+        .field('list_source', `E2E V2 ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+
+      const { rows } = await pgPool.query(
+        `SELECT unique_id, subject_type, watchlist_type
+           FROM watchlist_entries WHERE upper(unique_id) = upper($1) LIMIT 1`,
+        [`WLV2${SUFFIX}`],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].unique_id).toBe(`WLV2${SUFFIX}`); // explicit Unique_ID dipertahankan
+      expect(rows[0].subject_type).toBeNull(); // tidak diisi → null
+      expect(rows[0].watchlist_type).toBe('DTTOT'); // infer dari list_type
+    });
+
+    it('I-13: v3 row dengan Unique_ID kosong → tetap auto-generate KESH-WL-AUTO-...', async () => {
+      const fullName = `Auto V3 ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Date_of_Birth,Jabatan,Instansi',
+        `,${fullName},1988-08-08,Menteri,Kementerian`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_auto_v3_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E Auto v3 ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+
+      const { rows } = await pgPool.query(
+        `SELECT unique_id FROM watchlist_entries WHERE name = $1 LIMIT 1`,
+        [fullName],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].unique_id).toMatch(/^KESH-WL-AUTO-[0-9A-F]{16}$/);
+    });
+
+    it('I-14: upload PPPSPM row → tersimpan dengan list_type PPPSPM + auto-generate Unique_ID', async () => {
+      const fullName = `PPPSPM Subject ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Full_Name,Date_of_Birth,Nationality,Sanction_Number',
+        `,${fullName},1983-07-07,ID,PPPSPM-${SUFFIX}`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_pppspm_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PPPSPM')
+        .field('list_source', `E2E PPPSPM ${SUFFIX}`)
+        .expect(201);
+
+      // Tidak boleh silent failure: minimal 1 row sukses
+      expect(res.body.success).toBeGreaterThan(0);
+      expect(res.body.errors).toBeFalsy();
+
+      // Row benar-benar persisted dengan list_type PPPSPM
+      const { rows } = await pgPool.query(
+        `SELECT list_type, unique_id, watchlist_type
+           FROM watchlist_entries WHERE name = $1 LIMIT 1`,
+        [fullName],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].list_type).toBe('PPPSPM');
+      expect(rows[0].watchlist_type).toBe('PPPSPM'); // di-infer dari list_type
+      expect(rows[0].unique_id).toMatch(/^KESH-WL-AUTO-[0-9A-F]{16}$/); // auto-generate
+    });
+
+    // ── Mixed Watchlist_Type policy + reporting non-misleading ──
+    it('I-15: upload mixed v3 (DTTOT+PEP+PPPSPM) dengan list_type PEP → 1 success, 2 row errors, tanpa silent skip', async () => {
+      const pepName = `Mixed PEP ${SUFFIX}`;
+      const dttotEntity = `Mixed DTTOT Korp ${SUFFIX}`;
+      const pppspmName = `Mixed PPPSPM ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Watchlist_Type,Full_Name,Entity_Name,Date_of_Birth,Nationality',
+        `,DTTOT,,${dttotEntity},,ID`,
+        `,PEP,${pepName},,1970-01-01,ID`,
+        `,PPPSPM,${pppspmName},,1980-02-02,ID`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_mixed_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E Mixed ${SUFFIX}`)
+        .expect(201);
+
+      // Response tidak misleading: partial failure jelas
+      expect(res.body.total).toBe(3);
+      expect(res.body.success).toBe(1);
+      expect(res.body.error_count).toBe(2);
+      expect(res.body.status).toBe('PARTIAL');
+      expect(res.body.ok).toBe(true);
+      expect(Array.isArray(res.body.row_errors)).toBe(true);
+      expect(res.body.row_errors).toHaveLength(2);
+      for (const e of res.body.row_errors) {
+        expect(typeof e.row).toBe('number');
+        expect(e.message).toMatch(/tidak cocok dengan Jenis List/);
+      }
+
+      // Row PEP tersimpan; DTTOT & PPPSPM TIDAK tersimpan (bukan silent skip/relabel)
+      const pep = await pgPool.query(
+        `SELECT list_type FROM watchlist_entries WHERE name = $1`,
+        [pepName],
+      );
+      expect(pep.rows).toHaveLength(1);
+      expect(pep.rows[0].list_type).toBe('PEP');
+
+      const dttot = await pgPool.query(
+        `SELECT id FROM watchlist_entries WHERE entity_name = $1`,
+        [dttotEntity],
+      );
+      expect(dttot.rows).toHaveLength(0);
+
+      const pppspm = await pgPool.query(
+        `SELECT id FROM watchlist_entries WHERE name = $1`,
+        [pppspmName],
+      );
+      expect(pppspm.rows).toHaveLength(0);
+    });
+
+    it('I-16: upload PEP-only v3 dengan Unique_ID kosong → 1 success (SUCCESS, tanpa error)', async () => {
+      const fullName = `PEP Only V3 ${SUFFIX}`;
+      const csv = [
+        'Unique_ID,Watchlist_Type,Full_Name,Date_of_Birth,Jabatan,Instansi',
+        `,PEP,${fullName},1975-05-05,Direktur,Kementerian X`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `wl_pep_only_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E PEP Only ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+      expect(res.body.error_count).toBe(0);
+      expect(res.body.status).toBe('SUCCESS');
+      expect(res.body.errors).toBeFalsy();
+
+      const { rows } = await pgPool.query(
+        `SELECT unique_id FROM watchlist_entries WHERE name = $1 LIMIT 1`,
+        [fullName],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].unique_id).toMatch(/^KESH-WL-AUTO-[0-9A-F]{16}$/);
+    });
+
+    it('I-17: CSV dengan BOM UTF-8 → header Unique_ID tetap terbaca (bukan auto-generate)', async () => {
+      const providedUid = `WLBOM${SUFFIX}`;
+      const fullName = `Bom Person ${SUFFIX}`;
+      const csvBody = [
+        'Unique_ID,Full_Name,Date_of_Birth,Nationality',
+        `${providedUid},${fullName},1966-06-06,ID`,
+      ].join('\n');
+      const withBom = '\uFEFF' + csvBody; // UTF-8-SIG
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(withBom, 'utf8'), {
+          filename: `wl_bom_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E BOM ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBe(1);
+
+      // Kalau header BOM tidak dinormalisasi, Unique_ID akan null → auto-generate.
+      // Assertion: unique_id tersimpan == value provided → berarti header terbaca benar.
+      const { rows } = await pgPool.query(
+        `SELECT unique_id FROM watchlist_entries WHERE upper(unique_id) = upper($1) LIMIT 1`,
+        [providedUid],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].unique_id).toBe(providedUid);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // I2. WATCHLIST ENTRIES — GET /watchlist/entries (list data tersimpan)
+  // ══════════════════════════════════════════════════════════
+  describe('I2. Watchlist Entries', () => {
+    const entriesSource = `ENTRIESSRC ${SUFFIX}`;
+    const pepName = `Entries PEP ${SUFFIX}`;
+    const pepPosition = `Walikota ${SUFFIX}`;
+    const pepInstitution = `Pemkot ${SUFFIX}`;
+    const dttotEntity = `Entries DTTOT Korp ${SUFFIX}`;
+
+    beforeAll(async () => {
+      // Seed 1 row PEP (dengan Jabatan/Instansi) + 1 row DTTOT, source unik agar query terisolasi.
+      const pepCsv = [
+        'Unique_ID,Watchlist_Type,Full_Name,Date_of_Birth,Nationality,National_ID_Number,Jabatan,Instansi',
+        `,PEP,${pepName},1970-01-01,ID,NIKENT${SUFFIX},${pepPosition},${pepInstitution}`,
+      ].join('\n');
+      await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(pepCsv), {
+          filename: `entries_pep_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', entriesSource)
+        .expect(201);
+
+      const dttotCsv = [
+        'Unique_ID,Watchlist_Type,Entity_Name,Nationality',
+        `,DTTOT,${dttotEntity},ID`,
+      ].join('\n');
+      await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(dttotCsv), {
+          filename: `entries_dttot_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'DTTOT')
+        .field('list_source', entriesSource)
+        .expect(201);
+    }, 20000);
+
+    it('I2-01: ComplianceLead GET /watchlist/entries → 200 + shape {data,page,limit,total}', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .query({ source_list: entriesSource })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(typeof res.body.total).toBe('number');
+      expect(res.body.page).toBe(1);
+      expect(res.body.limit).toBe(20);
+      expect(res.body.total).toBe(2); // 1 PEP + 1 DTTOT di source ini
+      // field-field penting ada di item
+      const item = res.body.data[0];
+      expect(item).toHaveProperty('source_list', entriesSource);
+      expect(item).toHaveProperty('watchlist_type');
+      expect(item).toHaveProperty('position_title');
+      expect(item).toHaveProperty('unique_id');
+    });
+
+    it('I2-02: SystemAdmin GET /watchlist/entries → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .query({ source_list: entriesSource })
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    it('I2-03: FrontDesk GET /watchlist/entries → 403', async () => {
+      return request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
+    });
+
+    it('I2-04: FinanceStaff GET /watchlist/entries → 403', async () => {
+      return request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(403);
+    });
+
+    it('I2-05: filter list_type=PEP → hanya row PEP', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .query({ source_list: entriesSource, list_type: 'PEP' })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.total).toBe(1);
+      expect(res.body.data.length).toBe(1);
+      expect(res.body.data.every((r: any) => r.list_type === 'PEP')).toBe(true);
+    });
+
+    it('I2-06: search q=full_name → menemukan row', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .query({ q: pepName })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.total).toBeGreaterThanOrEqual(1);
+      expect(res.body.data.some((r: any) => r.full_name === pepName)).toBe(true);
+    });
+
+    it('I2-07: search q=position_title & q=institution_name (PEP) → menemukan row', async () => {
+      const byPos = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .query({ q: pepPosition })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(byPos.body.data.some((r: any) => r.position_title === pepPosition)).toBe(true);
+
+      const byInst = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .query({ q: pepInstitution })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(byInst.body.data.some((r: any) => r.institution_name === pepInstitution)).toBe(true);
+    });
+
+    it('I2-08: pagination limit=1 → data length 1, total tetap 2', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .query({ source_list: entriesSource, page: 1, limit: 1 })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.limit).toBe(1);
+      expect(res.body.page).toBe(1);
+      expect(res.body.data.length).toBe(1);
+      expect(res.body.total).toBe(2);
+    });
+
+    it('I2-09: GET /watchlist/history menyertakan total/success/error_count/status', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body.length).toBeGreaterThan(0);
+      const h = res.body[0];
+      expect(h).toHaveProperty('total');
+      expect(h).toHaveProperty('success');
+      expect(h).toHaveProperty('error_count');
+      expect(h).toHaveProperty('status');
+      expect(h).toHaveProperty('source_list');
+      expect(h).toHaveProperty('uploaded_at');
+      expect(typeof h.total).toBe('number');
+      expect(['SUCCESS', 'PARTIAL', 'FAILED']).toContain(h.status);
     });
   });
 
