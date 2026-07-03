@@ -25,11 +25,16 @@ let WatchlistController = class WatchlistController {
     constructor(svc) {
         this.svc = svc;
     }
+    // Upload watchlist adalah fitur Compliance — hanya ComplianceLead.
+    // FrontDesk tidak boleh upload. SystemAdmin secara teknis masih lolos
+    // via bypass global di RolesGuard, namun upload tidak diwajibkan untuk role tsb.
     async upload(file, body, req) {
         if (!file)
             throw new common_1.BadRequestException("No file uploaded");
         return this.svc.ingestBuffer(file.buffer, body.list_type, body.list_source, Number((0, auth_util_1.resolveUserId)(req.user)), file.originalname);
     }
+    // Riwayat watchlist: ComplianceLead (owner fitur) + SystemAdmin (read-only).
+    // FrontDesk & Auditor tidak diberi akses (paling aman; status quo Auditor tetap tanpa akses).
     async history(limit) {
         const n = Math.min(Number(limit) || 20, 100);
         return this.svc.listIngestHistory(n);
@@ -37,7 +42,7 @@ let WatchlistController = class WatchlistController {
 };
 exports.WatchlistController = WatchlistController;
 __decorate([
-    (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead"),
+    (0, roles_decorator_1.Roles)("ComplianceLead"),
     (0, common_1.Post)("upload"),
     (0, common_1.UseInterceptors)((0, platform_express_1.FileInterceptor)("file", {
         limits: {
@@ -64,7 +69,7 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], WatchlistController.prototype, "upload", null);
 __decorate([
-    (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("ComplianceLead", "SystemAdmin"),
     (0, common_1.Get)("history"),
     __param(0, (0, common_1.Query)("limit")),
     __metadata("design:type", Function),

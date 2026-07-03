@@ -23,7 +23,10 @@ import { resolveUserId } from "../../common/auth.util";
 export class WatchlistController {
   constructor(private readonly svc: WatchlistService) {}
 
-  @Roles("FrontDesk", "ComplianceLead")
+  // Upload watchlist adalah fitur Compliance — hanya ComplianceLead.
+  // FrontDesk tidak boleh upload. SystemAdmin secara teknis masih lolos
+  // via bypass global di RolesGuard, namun upload tidak diwajibkan untuk role tsb.
+  @Roles("ComplianceLead")
   @Post("upload")
   @UseInterceptors(
     FileInterceptor("file", {
@@ -63,7 +66,9 @@ export class WatchlistController {
     );
   }
 
-  @Roles("FrontDesk", "ComplianceLead", "SystemAdmin")
+  // Riwayat watchlist: ComplianceLead (owner fitur) + SystemAdmin (read-only).
+  // FrontDesk & Auditor tidak diberi akses (paling aman; status quo Auditor tetap tanpa akses).
+  @Roles("ComplianceLead", "SystemAdmin")
   @Get("history")
   async history(@Query("limit") limit?: string) {
     const n = Math.min(Number(limit) || 20, 100);

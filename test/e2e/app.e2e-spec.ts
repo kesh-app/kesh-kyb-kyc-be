@@ -32,6 +32,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   let sysAdminToken: string;
   let financeStaffToken: string;
   let financeManagerToken: string;
+  let frontDeskToken: string;
 
   // Application IDs yang diakumulasi lintas describe block
   // pg driver mengembalikan BIGINT sebagai string — simpan sebagai string
@@ -98,6 +99,22 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       .post(`${BASE}/auth/login`)
       .send({ email: managerEmail, password: 'Test@123456' });
     financeManagerToken = loginManager.body.access_token;
+
+    // Buat FrontDesk test user (untuk uji RBAC watchlist)
+    const frontDeskEmail = `frontdesk${SUFFIX}@test.local`;
+    await request(app.getHttpServer())
+      .post(`${BASE}/users/admins`)
+      .set('Authorization', `Bearer ${sysAdminToken}`)
+      .send({
+        email: frontDeskEmail,
+        fullName: `Test FrontDesk ${SUFFIX}`,
+        role: 'FrontDesk',
+        password: 'Test@123456',
+      });
+    const loginFrontDesk = await request(app.getHttpServer())
+      .post(`${BASE}/auth/login`)
+      .send({ email: frontDeskEmail, password: 'Test@123456' });
+    frontDeskToken = loginFrontDesk.body.access_token;
   }, 30000);
 
   afterAll(async () => {
@@ -676,6 +693,31 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.log).toBeDefined();
       expect(res.body.log.uploaded_by).not.toBeNull();
       expect(String(res.body.log.uploaded_by)).toMatch(/^\d+$/);
+    });
+
+    it('I-04: POST /watchlist/upload dengan FrontDesk → 403 (upload = fitur Compliance)', async () => {
+      const csvContent = [
+        'unique_id,name,aliases,dob,nationality,position,remarks',
+        `PEPFD${SUFFIX},Test PEP FD ${SUFFIX},,1970-01-01,ID,Direktur,Should be blocked`,
+      ].join('\n');
+
+      return request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .attach('file', Buffer.from(csvContent), {
+          filename: `blocked_fd_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E FrontDesk ${SUFFIX}`)
+        .expect(403);
+    });
+
+    it('I-05: GET /watchlist/history dengan FrontDesk → 403 (watchlist bukan lagi akses FrontDesk)', async () => {
+      return request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
     });
   });
 
