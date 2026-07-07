@@ -17,9 +17,11 @@ const common_1 = require("@nestjs/common");
 const pg_1 = require("pg");
 const auth_util_1 = require("../../common/auth.util");
 const snap_util_1 = require("./snap.util");
+const monitoring_service_1 = require("../monitoring/monitoring.service");
 let TransfersService = class TransfersService {
-    constructor(pool) {
+    constructor(pool, monitoring) {
         this.pool = pool;
+        this.monitoring = monitoring;
     }
     async audit(actorId, action, objectId, before, after, ip) {
         await this.pool.query(`INSERT INTO audit_logs(actor_id, action, object_type, object_id, before_json, after_json, ip)
@@ -143,6 +145,8 @@ let TransfersService = class TransfersService {
         ]);
         const row = q.rows[0];
         await this.audit((0, auth_util_1.resolveUserId)(user), "TRANSFER_CREATE", String(row.id), null, row, ip);
+        // Auto monitoring evaluation — tidak boleh menggagalkan transfer.
+        await this.monitoring.safeEvaluateTransfer(Number(row.id), user);
         return row;
     }
     // ---------------------------------------------------------------------------
@@ -256,6 +260,8 @@ let TransfersService = class TransfersService {
      WHERE id = $1
      RETURNING *`, [id, (0, auth_util_1.resolveUserId)(user)]);
         await this.audit((0, auth_util_1.resolveUserId)(user), "TRANSFER_SUBMIT", String(id), row, next.rows[0], ip);
+        // Auto monitoring evaluation — tidak boleh menggagalkan transfer.
+        await this.monitoring.safeEvaluateTransfer(id, user);
         return next.rows[0];
     }
     // ---------------------------------------------------------------------------
@@ -373,6 +379,10 @@ let TransfersService = class TransfersService {
             actorId,
         ]);
         await this.audit(actorId, "TRANSFER_SET_RESULT", String(id), row, next.rows[0], ip);
+        // Auto monitoring evaluation pada hasil SUCCESS — tidak boleh menggagalkan transfer.
+        if (isSuccess) {
+            await this.monitoring.safeEvaluateTransfer(id, user);
+        }
         return next.rows[0];
     }
     // ---------------------------------------------------------------------------
@@ -445,6 +455,7 @@ exports.TransfersService = TransfersService;
 exports.TransfersService = TransfersService = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, common_1.Inject)("PG_POOL")),
-    __metadata("design:paramtypes", [pg_1.Pool])
+    __metadata("design:paramtypes", [pg_1.Pool,
+        monitoring_service_1.MonitoringService])
 ], TransfersService);
 //# sourceMappingURL=transfers.service.js.map

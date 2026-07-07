@@ -11,9 +11,10 @@ import { WatchlistModule } from './modules/watchlist/watchlist.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { RegistrantsModule } from './modules/registrants/registrants.module';
 import { TransfersModule } from './modules/transfers/transfers.module';
+import { MonitoringModule } from './modules/monitoring/monitoring.module';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule, BusinessModule, WatchlistModule, DashboardModule, RegistrantsModule, TransfersModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule, BusinessModule, WatchlistModule, DashboardModule, RegistrantsModule, TransfersModule, MonitoringModule],
   controllers: [HealthController],
   providers: [],
 })

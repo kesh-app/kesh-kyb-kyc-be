@@ -34,6 +34,10 @@ const W = {
     HIGH_RISK_LEGAL_FORM: 10,
     BO_MISSING: 30,
     GEOGRAPHY: 15,
+    RBA_OCC_HIGH: 20,
+    RBA_OCC_MEDIUM: 10,
+    RBA_GEO_HIGH: 15,
+    RBA_GEO_MEDIUM: 7,
 };
 // Kata kunci pekerjaan berisiko tinggi (individual)
 const HIGH_RISK_OCCUPATIONS = [
@@ -52,6 +56,104 @@ const HIGH_RISK_ACTIVITIES = [
 const HIGH_RISK_LEGAL_FORMS = ['YAYASAN', 'FOUNDATION', 'NONPROFIT', 'KOPERASI'];
 // Placeholder daftar negara berisiko tinggi — dipelihara oleh compliance (FATF/BI)
 const HIGH_RISK_COUNTRIES = [];
+// ── RBA Occupation mapping — profil pekerjaan (RBA internal)
+const RBA_OCCUPATION_MAP = [
+    // HIGH (+20)
+    { name: 'pejabat lembaga legislatif dan pemerintah', risk: 'HIGH' },
+    { name: 'legislative and government officials', risk: 'HIGH' },
+    { name: 'government officials', risk: 'HIGH' },
+    { name: 'pegawai negeri sipil', risk: 'HIGH' },
+    { name: 'pejabat pemerintah', risk: 'HIGH' },
+    { name: 'civil servant', risk: 'HIGH' },
+    { name: 'private employees', risk: 'HIGH' },
+    { name: 'private employee', risk: 'HIGH' },
+    { name: 'self-employed', risk: 'HIGH' },
+    { name: 'self employed', risk: 'HIGH' },
+    { name: 'pegawai swasta', risk: 'HIGH' },
+    { name: 'wiraswasta', risk: 'HIGH' },
+    { name: 'pns', risk: 'HIGH' },
+    // MEDIUM (+10)
+    { name: 'political party administrators', risk: 'MEDIUM' },
+    { name: 'political party administrator', risk: 'MEDIUM' },
+    { name: 'pegawai bumn/bumd', risk: 'MEDIUM' },
+    { name: 'pengurus parpol', risk: 'MEDIUM' },
+    { name: 'pegawai bumn', risk: 'MEDIUM' },
+    { name: 'pegawai bumd', risk: 'MEDIUM' },
+    { name: 'bumn', risk: 'MEDIUM' },
+    { name: 'bumd', risk: 'MEDIUM' },
+    // LOW (+0, info)
+    { name: 'profesional dan konsultan', risk: 'LOW' },
+    { name: 'bank employees', risk: 'LOW' },
+    { name: 'bank employee', risk: 'LOW' },
+    { name: 'pegawai bank', risk: 'LOW' },
+    { name: 'profesional', risk: 'LOW' },
+    { name: 'professional', risk: 'LOW' },
+    { name: 'konsultan', risk: 'LOW' },
+    { name: 'consultant', risk: 'LOW' },
+    { name: 'polri', risk: 'LOW' },
+    { name: 'police', risk: 'LOW' },
+    { name: 'army', risk: 'LOW' },
+    { name: 'tni', risk: 'LOW' },
+].sort((a, b) => b.name.length - a.name.length);
+// ── RBA Geography mapping — area domisili individu (RBA internal)
+// Sorted longest-first untuk cegah false positive substring match (Kepulauan Riau vs Riau).
+const RBA_GEOGRAPHY_MAP = [
+    // HIGH (+15)
+    { name: 'dki jakarta', risk: 'HIGH' },
+    { name: 'sumatera utara', risk: 'HIGH' },
+    { name: 'north sumatra', risk: 'HIGH' },
+    { name: 'jawa timur', risk: 'HIGH' },
+    { name: 'jawa barat', risk: 'HIGH' },
+    { name: 'jawa tengah', risk: 'HIGH' },
+    { name: 'central java', risk: 'HIGH' },
+    { name: 'east java', risk: 'HIGH' },
+    { name: 'west java', risk: 'HIGH' },
+    { name: 'jakarta', risk: 'HIGH' },
+    { name: 'banten', risk: 'HIGH' },
+    // MEDIUM (+7)
+    { name: 'sulawesi selatan', risk: 'MEDIUM' },
+    { name: 'south sulawesi', risk: 'MEDIUM' },
+    { name: 'kepulauan riau', risk: 'MEDIUM' },
+    { name: 'riau islands', risk: 'MEDIUM' },
+    { name: 'kalimantan timur', risk: 'MEDIUM' },
+    { name: 'east kalimantan', risk: 'MEDIUM' },
+    { name: 'sumatera selatan', risk: 'MEDIUM' },
+    { name: 'south sumatra', risk: 'MEDIUM' },
+    { name: 'daerah istimewa yogyakarta', risk: 'MEDIUM' },
+    { name: 'di yogyakarta', risk: 'MEDIUM' },
+    { name: 'yogyakarta', risk: 'MEDIUM' },
+    { name: 'bengkulu', risk: 'MEDIUM' },
+    { name: 'lampung', risk: 'MEDIUM' },
+    { name: 'bali', risk: 'MEDIUM' },
+    { name: 'riau', risk: 'MEDIUM' },
+    { name: 'diy', risk: 'MEDIUM' },
+    // LOW (+0, info)
+    { name: 'nanggroe aceh darussalam', risk: 'LOW' },
+    { name: 'kalimantan tengah', risk: 'LOW' },
+    { name: 'central kalimantan', risk: 'LOW' },
+    { name: 'kalimantan barat', risk: 'LOW' },
+    { name: 'west kalimantan', risk: 'LOW' },
+    { name: 'nusa tenggara timur', risk: 'LOW' },
+    { name: 'east nusa tenggara', risk: 'LOW' },
+    { name: 'nusa tenggara barat', risk: 'LOW' },
+    { name: 'west nusa tenggara', risk: 'LOW' },
+    { name: 'kalimantan selatan', risk: 'LOW' },
+    { name: 'south kalimantan', risk: 'LOW' },
+    { name: 'sulawesi utara', risk: 'LOW' },
+    { name: 'north sulawesi', risk: 'LOW' },
+    { name: 'sulawesi tengah', risk: 'LOW' },
+    { name: 'central sulawesi', risk: 'LOW' },
+    { name: 'sulawesi tenggara', risk: 'LOW' },
+    { name: 'southeast sulawesi', risk: 'LOW' },
+    { name: 'maluku utara', risk: 'LOW' },
+    { name: 'north maluku', risk: 'LOW' },
+    { name: 'bangka belitung', risk: 'LOW' },
+    { name: 'gorontalo', risk: 'LOW' },
+    { name: 'papua', risk: 'LOW' },
+    { name: 'aceh', risk: 'LOW' },
+    { name: 'ntt', risk: 'LOW' },
+    { name: 'ntb', risk: 'LOW' },
+].sort((a, b) => b.name.length - a.name.length);
 /** Ubah angka 0..100 ke level (threshold dipertahankan dari v1) */
 function levelOf(score) {
     if (score >= 70)
@@ -472,7 +574,7 @@ let ApplicationsService = class ApplicationsService {
         }
         // ── 6. Faktor: profil individu ──
         if (app.type === "INDIVIDUAL") {
-            const { rows: pr } = await this.pool.query(`SELECT occupation, pep_self_declared, nationality FROM persons WHERE id=$1`, [app.person_id]);
+            const { rows: pr } = await this.pool.query(`SELECT occupation, pep_self_declared, nationality, address_identity, address_residential FROM persons WHERE id=$1`, [app.person_id]);
             const p = pr[0] ?? {};
             if (p.pep_self_declared) {
                 score += W.PEP_SELF_DECLARED;
@@ -483,6 +585,41 @@ let ApplicationsService = class ApplicationsService {
             if (matchedOcc) {
                 score += W.HIGH_RISK_OCCUPATION;
                 riskFactors.push({ code: "INDIVIDUAL_HIGH_RISK_OCCUPATION", label: "Pekerjaan berisiko tinggi", score: W.HIGH_RISK_OCCUPATION, severity: "MEDIUM", source: "profile", details: `Pekerjaan: ${p.occupation}` });
+            }
+            // ── RBA: profil pekerjaan (occupation risk) ──
+            const occNorm = (p.occupation || "").trim().toLowerCase();
+            const rbaOcc = RBA_OCCUPATION_MAP.find(e => occNorm.includes(e.name));
+            if (rbaOcc) {
+                const pts = rbaOcc.risk === "HIGH" ? W.RBA_OCC_HIGH : rbaOcc.risk === "MEDIUM" ? W.RBA_OCC_MEDIUM : 0;
+                score += pts;
+                riskFactors.push({
+                    code: `INDIVIDUAL_OCCUPATION_${rbaOcc.risk}_RBA`,
+                    label: `Profil pekerjaan ${rbaOcc.risk.toLowerCase()} risk (RBA)`,
+                    score: pts,
+                    severity: rbaOcc.risk === "HIGH" ? "HIGH" : rbaOcc.risk === "MEDIUM" ? "MEDIUM" : "LOW",
+                    source: "rba_occupation",
+                    metadata: { matched: rbaOcc.name, source: "occupation" },
+                });
+            }
+            // ── RBA: area geografis domisili (address risk) ──
+            const addrIdent = (p.address_identity || "").trim().toLowerCase();
+            const addrResi = (p.address_residential || "").trim().toLowerCase();
+            const addrText = `${addrIdent} ${addrResi}`.trim();
+            const rbaGeo = RBA_GEOGRAPHY_MAP.find(e => addrText.includes(e.name));
+            if (rbaGeo) {
+                const pts = rbaGeo.risk === "HIGH" ? W.RBA_GEO_HIGH : rbaGeo.risk === "MEDIUM" ? W.RBA_GEO_MEDIUM : 0;
+                score += pts;
+                const geoSource = addrIdent.includes(rbaGeo.name) ? "address_identity"
+                    : addrResi.includes(rbaGeo.name) ? "address_residential"
+                        : "address";
+                riskFactors.push({
+                    code: `GEOGRAPHY_${rbaGeo.risk}_RBA`,
+                    label: `Area geografis ${rbaGeo.risk.toLowerCase()} risk berdasarkan RBA`,
+                    score: pts,
+                    severity: rbaGeo.risk === "HIGH" ? "HIGH" : rbaGeo.risk === "MEDIUM" ? "MEDIUM" : "LOW",
+                    source: "rba_geography",
+                    metadata: { matched: rbaGeo.name, source: geoSource },
+                });
             }
             const nat = (p.nationality || "").toUpperCase();
             if (HIGH_RISK_COUNTRIES.length && HIGH_RISK_COUNTRIES.includes(nat)) {

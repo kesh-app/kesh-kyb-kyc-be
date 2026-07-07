@@ -35,6 +35,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   let financeStaffToken: string;
   let financeManagerToken: string;
   let frontDeskToken: string;
+  let directorToken: string;
+  let auditorToken: string;
 
   // Application IDs yang diakumulasi lintas describe block
   // pg driver mengembalikan BIGINT sebagai string — simpan sebagai string
@@ -120,6 +122,38 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       .post(`${BASE}/auth/login`)
       .send({ email: frontDeskEmail, password: 'Test@123456' });
     frontDeskToken = loginFrontDesk.body.access_token;
+
+    // Buat Director test user (untuk monitoring director-review)
+    const directorEmail = `director${SUFFIX}@test.local`;
+    await request(app.getHttpServer())
+      .post(`${BASE}/users/admins`)
+      .set('Authorization', `Bearer ${sysAdminToken}`)
+      .send({
+        email: directorEmail,
+        fullName: `Test Director ${SUFFIX}`,
+        role: 'Director',
+        password: 'Test@123456',
+      });
+    const loginDirector = await request(app.getHttpServer())
+      .post(`${BASE}/auth/login`)
+      .send({ email: directorEmail, password: 'Test@123456' });
+    directorToken = loginDirector.body.access_token;
+
+    // Buat Auditor test user (read-only monitoring)
+    const auditorEmail = `auditor${SUFFIX}@test.local`;
+    await request(app.getHttpServer())
+      .post(`${BASE}/users/admins`)
+      .set('Authorization', `Bearer ${sysAdminToken}`)
+      .send({
+        email: auditorEmail,
+        fullName: `Test Auditor ${SUFFIX}`,
+        role: 'Auditor',
+        password: 'Test@123456',
+      });
+    const loginAuditor = await request(app.getHttpServer())
+      .post(`${BASE}/auth/login`)
+      .send({ email: auditorEmail, password: 'Test@123456' });
+    auditorToken = loginAuditor.body.access_token;
   }, 30000);
 
   afterAll(async () => {
@@ -3022,6 +3056,663 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const bo = res.body.find((p: any) => p.role === 'BO');
       expect(bo.cif_no).toBe(boFirstCifNo);
       expect(bo.cif_relationship_type).toBe('BO');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // S. RBA Occupation & Geography scoring (internal RBA mapping)
+  // ══════════════════════════════════════════════════════════
+  describe('S. RBA Occupation & Geography scoring', () => {
+    // Helper: create individual, upload KTP, submit → return submit response body
+    async function createAndSubmit(opts: {
+      identNum: string;
+      phone: string;
+      occupation: string;
+      address: string;
+    }) {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `RBA Test ${opts.identNum}`,
+          identity_type: 'KTP',
+          identity_number: opts.identNum,
+          address_identity: opts.address,
+          pob: 'Bogor',
+          dob: '1990-05-10',
+          nationality: 'ID',
+          phone: opts.phone,
+          occupation: opts.occupation,
+          gender: 'M',
+          signature_uri: 'https://storage.test/rba_sig.png',
+        })
+        .expect(201);
+
+      const appId = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/rba_ktp.jpg' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      return res.body;
+    }
+
+    it('S-01: Occupation "PNS" → INDIVIDUAL_OCCUPATION_HIGH_RBA, score +20, severity HIGH', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299501${SUFFIX}`,
+        phone: `09001${SUFFIX}`,
+        occupation: 'PNS',
+        address: 'Jl. Merdeka No. 5, Purwokerto',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const f = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_HIGH_RBA');
+      expect(f).toBeDefined();
+      expect(f.score).toBe(20);
+      expect(f.severity).toBe('HIGH');
+      expect(f.metadata?.matched).toBe('pns');
+      expect(body.risk.risk_score).toBeGreaterThanOrEqual(20);
+    });
+
+    it('S-02: Occupation "Pegawai BUMN" → INDIVIDUAL_OCCUPATION_MEDIUM_RBA, score +10, severity MEDIUM', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299502${SUFFIX}`,
+        phone: `09002${SUFFIX}`,
+        occupation: 'Pegawai BUMN',
+        address: 'Jl. Industri No. 3, Malang',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const f = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_MEDIUM_RBA');
+      expect(f).toBeDefined();
+      expect(f.score).toBe(10);
+      expect(f.severity).toBe('MEDIUM');
+      expect(f.metadata?.matched).toBe('pegawai bumn');
+      expect(body.risk.risk_score).toBeGreaterThanOrEqual(10);
+    });
+
+    it('S-03: Occupation "Pegawai Bank" → INDIVIDUAL_OCCUPATION_LOW_RBA, score 0 (info only)', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299503${SUFFIX}`,
+        phone: `09003${SUFFIX}`,
+        occupation: 'Pegawai Bank',
+        address: 'Jl. Perbankan No. 7, Semarang',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const f = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_LOW_RBA');
+      expect(f).toBeDefined();
+      expect(f.score).toBe(0);
+      expect(f.severity).toBe('LOW');
+      expect(f.metadata?.matched).toBe('pegawai bank');
+    });
+
+    it('S-04: Address "DKI Jakarta" → GEOGRAPHY_HIGH_RBA, score +15, severity HIGH, metadata matched', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299504${SUFFIX}`,
+        phone: `09004${SUFFIX}`,
+        occupation: 'Karyawan',
+        address: 'Jl. Sudirman No. 1, DKI Jakarta 10220',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const f = factors.find((x: any) => x.code === 'GEOGRAPHY_HIGH_RBA');
+      expect(f).toBeDefined();
+      expect(f.score).toBe(15);
+      expect(f.severity).toBe('HIGH');
+      expect(f.metadata?.matched).toBe('dki jakarta');
+      expect(f.metadata?.source).toBe('address_identity');
+      expect(body.risk.risk_score).toBeGreaterThanOrEqual(15);
+    });
+
+    it('S-05: Address "DI Yogyakarta" → GEOGRAPHY_MEDIUM_RBA, score +7, severity MEDIUM', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299505${SUFFIX}`,
+        phone: `09005${SUFFIX}`,
+        occupation: 'Karyawan',
+        address: 'Jl. Malioboro No. 10, DI Yogyakarta 55271',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const f = factors.find((x: any) => x.code === 'GEOGRAPHY_MEDIUM_RBA');
+      expect(f).toBeDefined();
+      expect(f.score).toBe(7);
+      expect(f.severity).toBe('MEDIUM');
+      expect(f.metadata?.matched).toBe('di yogyakarta');
+      expect(body.risk.risk_score).toBeGreaterThanOrEqual(7);
+    });
+
+    it('S-06: Address "Papua" → GEOGRAPHY_LOW_RBA, score 0 (info only)', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299506${SUFFIX}`,
+        phone: `09006${SUFFIX}`,
+        occupation: 'Karyawan',
+        address: 'Jl. Arfak No. 1, Papua 98301',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const f = factors.find((x: any) => x.code === 'GEOGRAPHY_LOW_RBA');
+      expect(f).toBeDefined();
+      expect(f.score).toBe(0);
+      expect(f.severity).toBe('LOW');
+      expect(f.metadata?.matched).toBe('papua');
+    });
+
+    it('S-07: HIGH occupation (Pegawai Negeri Sipil) + HIGH geography (Jakarta) → combined score ≥35', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299507${SUFFIX}`,
+        phone: `09007${SUFFIX}`,
+        occupation: 'Pegawai Negeri Sipil',
+        address: 'Jl. Veteran No. 3, Jakarta Selatan 12160',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const occF = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_HIGH_RBA');
+      const geoF = factors.find((x: any) => x.code === 'GEOGRAPHY_HIGH_RBA');
+      expect(occF).toBeDefined();
+      expect(geoF).toBeDefined();
+      expect(occF.score).toBe(20);
+      expect(geoF.score).toBe(15);
+      expect(body.risk.risk_score).toBeGreaterThanOrEqual(35);
+    });
+
+    it('S-08: PEP self-declared forces HIGH even with LOW occupation + LOW geography', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `RBA PEP Force ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `3299508${SUFFIX}`,
+          address_identity: 'Jl. Arfak No. 99, Papua 98399',
+          pob: 'Sorong',
+          dob: '1985-07-01',
+          nationality: 'ID',
+          phone: `09008${SUFFIX}`,
+          occupation: 'Pegawai Bank',
+          gender: 'F',
+          signature_uri: 'https://storage.test/rba_pep_sig.png',
+        })
+        .expect(201);
+
+      const appId = String(create.body.id);
+
+      const { rows: appRows } = await pgPool.query(
+        'SELECT person_id FROM applications WHERE id=$1', [appId],
+      );
+      await pgPool.query(
+        'UPDATE persons SET pep_self_declared=true WHERE id=$1', [appRows[0].person_id],
+      );
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/rba_pep_ktp.jpg' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.risk.risk_level).toBe('HIGH');
+      expect(res.body.risk.risk_score).toBeGreaterThanOrEqual(70);
+      const codes = res.body.risk.risk_factors.map((f: any) => f.code);
+      expect(codes).toContain('INDIVIDUAL_PEP_SELF_DECLARED');
+      // LOW RBA factors still recorded
+      expect(codes).toContain('INDIVIDUAL_OCCUPATION_LOW_RBA');
+      expect(codes).toContain('GEOGRAPHY_LOW_RBA');
+    });
+
+    it('S-09: Risk factors include metadata.matched for RBA factors', async () => {
+      const body = await createAndSubmit({
+        identNum: `3299509${SUFFIX}`,
+        phone: `09009${SUFFIX}`,
+        occupation: 'Wiraswasta',
+        address: 'Jl. Niaga No. 2, Surabaya, Jawa Timur 60271',
+      });
+
+      const factors: any[] = body.risk.risk_factors;
+      const occF = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_HIGH_RBA');
+      const geoF = factors.find((x: any) => x.code === 'GEOGRAPHY_HIGH_RBA');
+
+      expect(occF?.metadata?.matched).toBeDefined();
+      expect(typeof occF?.metadata?.matched).toBe('string');
+      expect(geoF?.metadata?.matched).toBeDefined();
+      expect(typeof geoF?.metadata?.matched).toBe('string');
+      expect(geoF?.metadata?.source).toBe('address_identity');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // T. Transaction Monitoring — LTKT & LTKM
+  // ══════════════════════════════════════════════════════════
+  describe('T. Transaction Monitoring — LTKT & LTKM', () => {
+    // Helper: create LOW-risk individual, submit (→ SUBMITTED), approve → APPROVED.
+    // Distinct NIK → distinct CIF sehingga agregasi harian ter-isolasi per skenario.
+    async function createApprovedIndividual(nik: string, phone: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `MON Sender ${nik}`,
+          identity_type: 'KTP',
+          identity_number: nik,
+          address_identity: 'Jl. Cendana No. 1, Bandung',
+          pob: 'Bandung',
+          dob: '1988-08-08',
+          nationality: 'ID',
+          phone,
+          occupation: 'Software Engineer',
+          gender: 'M',
+          signature_uri: 'https://storage.test/mon_sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/mon_ktp.jpg' })
+        .expect(201);
+
+      const submit = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      // LOW risk → SUBMITTED (bukan IN_REVIEW)
+      expect(submit.body.status).toBe('SUBMITTED');
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED', reason: 'monitoring sender' })
+        .expect(200);
+
+      return appId;
+    }
+
+    async function createTransfer(
+      senderAppId: string,
+      opts: { amount: number; benef?: string; transfer_method?: string; additional_info?: any },
+    ): Promise<string> {
+      const body: any = {
+        amount: opts.amount,
+        sender_application_id: Number(senderAppId),
+        beneficiaryBankName: 'Bank Monitoring',
+        beneficiaryBankCode: '009',
+        beneficiaryAccountNumber: opts.benef ?? `900${SUFFIX}`,
+        beneficiaryAccountName: 'PT Penerima Monitoring',
+      };
+      if (opts.transfer_method) body.transfer_method = opts.transfer_method;
+      if (opts.additional_info) body.additional_info = opts.additional_info;
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(body)
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    async function evaluate(transferId: string, token = complianceToken) {
+      return request(app.getHttpServer())
+        .post(`${BASE}/monitoring/evaluate-transfer/${transferId}`)
+        .set('Authorization', `Bearer ${token}`);
+    }
+
+    // Helper: siapkan LTKM case bersih (high-risk customer) → return case id.
+    async function setupLtkmCase(nik: string, phone: string): Promise<string> {
+      const appId = await createApprovedIndividual(nik, phone);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `LTKM${phone}` });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      return String(ev.body.id);
+    }
+
+    const codesOf = (body: any): string[] =>
+      (body.triggers ?? []).map((t: any) => t.rule_code);
+
+    // ── T-01: Role Director dikenali ──
+    it('T-01: Director role dapat dibuat & login (dari setup) → bisa akses GET cases', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    // ── T-02: LTKT single cash ≥ 500M → strictly LTKT (high-value hanya supporting) ──
+    it('T-02: single cash transfer ≥ 500M tanpa faktor suspicious lain → case_type LTKT', async () => {
+      const appId = await createApprovedIndividual(`70001${SUFFIX}`, `07001${SUFFIX}`);
+      const trId = await createTransfer(appId, {
+        amount: 500_000_000,
+        transfer_method: 'CASH',
+        benef: `CASH1${SUFFIX}`,
+      });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      expect(codesOf(ev.body)).toContain('LTKT_CASH_SINGLE_500M');
+      // high-value transfer ikut tercatat tapi hanya supporting → tidak menjadikan BOTH
+      expect(ev.body.case_type).toBe('LTKT');
+      expect(ev.body.status).toBe('DETECTED');
+
+      // supporting alert tetap tersimpan tapi ditandai non-classifying
+      const hv = ev.body.triggers.find((t: any) => t.rule_code === 'LTKM_HIGH_VALUE_TRANSFER');
+      expect(hv).toBeDefined();
+      expect(hv.details.supporting).toBe(true);
+    });
+
+    // ── T-03: LTKT aggregate daily cash ≥ 500M ──
+    it('T-03: 2x cash 300M same CIF/day → LTKT_CASH_AGGREGATE_DAILY_500M', async () => {
+      const appId = await createApprovedIndividual(`70002${SUFFIX}`, `07002${SUFFIX}`);
+      await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `AGG1${SUFFIX}` });
+      const tr2 = await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `AGG2${SUFFIX}` });
+      const ev = await evaluate(tr2);
+      expect(ev.status).toBe(201);
+      expect(codesOf(ev.body)).toContain('LTKT_CASH_AGGREGATE_DAILY_500M');
+    });
+
+    // ── T-04: LTKM high risk customer ──
+    it('T-04: sender risk_level HIGH → LTKM_HIGH_RISK_CUSTOMER', async () => {
+      const appId = await createApprovedIndividual(`70004${SUFFIX}`, `07004${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `HR${SUFFIX}` });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      expect(codesOf(ev.body)).toContain('LTKM_HIGH_RISK_CUSTOMER');
+      expect(ev.body.case_type).toBe('LTKM');
+    });
+
+    // ── T-05: LTKM PEP related ──
+    it('T-05: sender risk factor PEP → LTKM_PEP_RELATED', async () => {
+      const appId = await createApprovedIndividual(`70005${SUFFIX}`, `07005${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_factors=$2::jsonb WHERE application_id=$1`,
+        [
+          appId,
+          JSON.stringify([
+            { code: 'WATCHLIST_PEP_CANDIDATE', label: 'PEP', score: 20, severity: 'MEDIUM', source: 'screening' },
+          ]),
+        ],
+      );
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `PEP${SUFFIX}` });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      expect(codesOf(ev.body)).toContain('LTKM_PEP_RELATED');
+    });
+
+    // ── T-06: LTKM many beneficiaries daily ──
+    it('T-06: ≥5 distinct beneficiaries same CIF/day → LTKM_MANY_BENEFICIARIES_DAILY', async () => {
+      const appId = await createApprovedIndividual(`70006${SUFFIX}`, `07006${SUFFIX}`);
+      let lastTr = '';
+      for (let i = 1; i <= 5; i++) {
+        lastTr = await createTransfer(appId, { amount: 1_000_000, benef: `MB${i}_${SUFFIX}` });
+      }
+      const ev = await evaluate(lastTr);
+      expect(ev.status).toBe(201);
+      expect(codesOf(ev.body)).toContain('LTKM_MANY_BENEFICIARIES_DAILY');
+    });
+
+    // ── T-06b: High value alone (≥100M, no other suspicious) → TIDAK membuat case ──
+    it('T-06b: high value 150M non-cash alone → tidak membuat LTKM case (triggered:false)', async () => {
+      const appId = await createApprovedIndividual(`70061${SUFFIX}`, `07061${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 150_000_000, benef: `HV${SUFFIX}` });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      expect(ev.body.triggered).toBe(false);
+
+      // pastikan tidak ada monitoring case untuk transfer ini
+      const { rows } = await pgPool.query(
+        `SELECT COUNT(*)::int AS c FROM monitoring_cases WHERE transfer_id=$1`,
+        [Number(trId)],
+      );
+      expect(rows[0].c).toBe(0);
+    });
+
+    // ── T-06c: High value + high risk customer → LTKM (classifying + supporting) ──
+    it('T-06c: high value 150M + risk HIGH → LTKM dengan high-value sebagai supporting', async () => {
+      const appId = await createApprovedIndividual(`70062${SUFFIX}`, `07062${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 150_000_000, benef: `HVHR${SUFFIX}` });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      const codes = codesOf(ev.body);
+      expect(codes).toContain('LTKM_HIGH_RISK_CUSTOMER');
+      expect(codes).toContain('LTKM_HIGH_VALUE_TRANSFER');
+      expect(ev.body.case_type).toBe('LTKM');
+    });
+
+    // ── T-06d: Cash ≥500M + high risk customer → BOTH ──
+    it('T-06d: cash 500M + risk HIGH → case_type BOTH', async () => {
+      const appId = await createApprovedIndividual(`70063${SUFFIX}`, `07063${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, {
+        amount: 500_000_000,
+        transfer_method: 'CASH',
+        benef: `CBHR${SUFFIX}`,
+      });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      const codes = codesOf(ev.body);
+      expect(codes).toContain('LTKT_CASH_SINGLE_500M');
+      expect(codes).toContain('LTKM_HIGH_RISK_CUSTOMER');
+      expect(ev.body.case_type).toBe('BOTH');
+    });
+
+    // ── T-07: Compliance CLOSE_FALSE_POSITIVE ──
+    it('T-07: compliance CLOSE_FALSE_POSITIVE → status CLOSED_FALSE_POSITIVE', async () => {
+      const caseId = await setupLtkmCase(`70007${SUFFIX}`, `07007${SUFFIX}`);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'CLOSE_FALSE_POSITIVE', notes: 'bukan mencurigakan' })
+        .expect(200);
+      expect(res.body.status).toBe('CLOSED_FALSE_POSITIVE');
+    });
+
+    // ── T-08: Compliance NEED_CLARIFICATION ──
+    it('T-08: compliance NEED_CLARIFICATION → status NEED_CLARIFICATION', async () => {
+      const caseId = await setupLtkmCase(`70008${SUFFIX}`, `07008${SUFFIX}`);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'NEED_CLARIFICATION', notes: 'butuh dokumen tambahan' })
+        .expect(200);
+      expect(res.body.status).toBe('NEED_CLARIFICATION');
+    });
+
+    // ── T-09: Compliance ESCALATE_TO_DIRECTOR ──
+    it('T-09: compliance ESCALATE_TO_DIRECTOR → status PENDING_DIRECTOR_REVIEW', async () => {
+      const caseId = await setupLtkmCase(`70009${SUFFIX}`, `07009${SUFFIX}`);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'ESCALATE_TO_DIRECTOR' })
+        .expect(200);
+      expect(res.body.status).toBe('PENDING_DIRECTOR_REVIEW');
+    });
+
+    // ── T-10: Director APPROVED → READY_TO_REPORT + report DRAFT ──
+    it('T-10: director APPROVED → READY_TO_REPORT, report_status DRAFT, report_type LTKM', async () => {
+      const caseId = await setupLtkmCase(`70010${SUFFIX}`, `07010${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'ESCALATE_TO_DIRECTOR' })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ decision: 'APPROVED', notes: 'setuju laporkan' })
+        .expect(200);
+      expect(res.body.status).toBe('READY_TO_REPORT');
+      expect(res.body.report_status).toBe('DRAFT');
+      expect(res.body.report_type).toBe('LTKM');
+    });
+
+    // ── T-11: Director REJECTED ──
+    it('T-11: director REJECTED → status DIRECTOR_REJECTED', async () => {
+      const caseId = await setupLtkmCase(`70011${SUFFIX}`, `07011${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'ESCALATE_TO_DIRECTOR' })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ decision: 'REJECTED', notes: 'tidak perlu dilaporkan' })
+        .expect(200);
+      expect(res.body.status).toBe('DIRECTOR_REJECTED');
+    });
+
+    // ── T-12: Report SUBMITTED → REPORTED ──
+    it('T-12: report SUBMITTED → status REPORTED', async () => {
+      const caseId = await setupLtkmCase(`70012${SUFFIX}`, `07012${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'ESCALATE_TO_DIRECTOR' })
+        .expect(200);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/report`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          report_status: 'SUBMITTED',
+          report_reference_no: `LTKM-REF-${SUFFIX}`,
+          report_file_uri: 'https://storage.test/ltkm_report.pdf',
+        })
+        .expect(200);
+      expect(res.body.status).toBe('REPORTED');
+      expect(res.body.report_status).toBe('SUBMITTED');
+      expect(res.body.reported_at).toBeTruthy();
+
+      // muncul di report queue
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/reports?report_status=SUBMITTED`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(list.body.data.some((c: any) => String(c.id) === String(caseId))).toBe(true);
+    });
+
+    // ── T-13: FrontDesk tidak boleh akses ──
+    it('T-13: FrontDesk GET /monitoring/cases → 403', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
+    });
+
+    // ── T-14: Auditor read-only ──
+    it('T-14: Auditor bisa GET cases (200) tapi tidak bisa compliance-review (403)', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+
+      const caseId = await setupLtkmCase(`70014${SUFFIX}`, `07014${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ action: 'CLOSE_FALSE_POSITIVE' })
+        .expect(403);
+    });
+
+    // ── T-15: Pagination ──
+    it('T-15: GET /monitoring/cases pagination limit=2 → data ≤ 2, echo page/limit', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases?page=1&limit=2`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.page).toBe(1);
+      expect(res.body.limit).toBe(2);
+      expect(res.body.data.length).toBeLessThanOrEqual(2);
+      expect(typeof res.body.total).toBe('number');
+    });
+
+    // ── T-16: Duplicate evaluation tidak membuat case ganda ──
+    it('T-16: evaluate transfer dua kali → case yang sama (dedup)', async () => {
+      const appId = await createApprovedIndividual(`70016${SUFFIX}`, `07016${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `DUP${SUFFIX}` });
+
+      const ev1 = await evaluate(trId);
+      expect(ev1.status).toBe(201);
+      const ev2 = await evaluate(trId);
+      expect(ev2.status).toBe(201);
+      expect(String(ev2.body.id)).toBe(String(ev1.body.id));
+      expect(ev2.body.case_no).toBe(ev1.body.case_no);
+
+      // hanya satu case aktif untuk transfer ini
+      const { rows } = await pgPool.query(
+        `SELECT COUNT(*)::int AS c FROM monitoring_cases WHERE transfer_id=$1`,
+        [Number(trId)],
+      );
+      expect(rows[0].c).toBe(1);
+    });
+
+    // ── T-17: LTKM tidak boleh READY_TO_REPORT langsung tanpa Director ──
+    it('T-17: compliance READY_TO_REPORT pada LTKM → 400 (butuh Director)', async () => {
+      const caseId = await setupLtkmCase(`70017${SUFFIX}`, `07017${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'READY_TO_REPORT' })
+        .expect(400);
+    });
+
+    // ── T-18: GET case detail termasuk triggers + linked transfer ──
+    it('T-18: GET /monitoring/cases/:id → detail + triggers + transfer summary', async () => {
+      const appId = await createApprovedIndividual(`70018${SUFFIX}`, `07018${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `DET${SUFFIX}` });
+      const ev = await evaluate(trId);
+      const caseId = String(ev.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases/${caseId}`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.triggers)).toBe(true);
+      expect(res.body.triggers.length).toBeGreaterThan(0);
+      expect(res.body.transfer).toBeTruthy();
+      expect(String(res.body.transfer.id)).toBe(String(trId));
+      expect(res.body.cif_no).toBeTruthy();
     });
   });
 });

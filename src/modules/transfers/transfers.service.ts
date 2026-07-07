@@ -19,12 +19,16 @@ import {
   generatePartnerReferenceNo,
   normalizeCurrency,
 } from "./snap.util";
+import { MonitoringService } from "../monitoring/monitoring.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
 @Injectable()
 export class TransfersService {
-  constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
+  constructor(
+    @Inject("PG_POOL") private readonly pool: Pool,
+    private readonly monitoring: MonitoringService,
+  ) {}
 
   private async audit(
     actorId: number | string,
@@ -184,6 +188,10 @@ export class TransfersService {
     const row = q.rows[0];
 
     await this.audit(resolveUserId(user), "TRANSFER_CREATE", String(row.id), null, row, ip);
+
+    // Auto monitoring evaluation — tidak boleh menggagalkan transfer.
+    await this.monitoring.safeEvaluateTransfer(Number(row.id), user);
+
     return row;
   }
 
@@ -329,6 +337,10 @@ export class TransfersService {
       next.rows[0],
       ip,
     );
+
+    // Auto monitoring evaluation — tidak boleh menggagalkan transfer.
+    await this.monitoring.safeEvaluateTransfer(id, user);
+
     return next.rows[0];
   }
 
@@ -488,6 +500,12 @@ export class TransfersService {
       next.rows[0],
       ip,
     );
+
+    // Auto monitoring evaluation pada hasil SUCCESS — tidak boleh menggagalkan transfer.
+    if (isSuccess) {
+      await this.monitoring.safeEvaluateTransfer(id, user);
+    }
+
     return next.rows[0];
   }
 

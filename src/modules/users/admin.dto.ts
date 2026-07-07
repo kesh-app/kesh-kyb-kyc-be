@@ -17,6 +17,7 @@ export const INTERNAL_ROLES = [
   'Auditor',
   'FinanceStaff',
   'FinanceManager',
+  'Director',
 ] as const;
 
 export type InternalRole = (typeof INTERNAL_ROLES)[number];

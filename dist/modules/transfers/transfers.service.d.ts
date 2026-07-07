@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import { CreateTransferDto, DecideTransferDto, SetTransferResultDto, UpdateTransferDto } from "./dto";
+import { MonitoringService } from "../monitoring/monitoring.service";
 type AuthedUser = {
     sub?: number | string;
     id?: number | string;
@@ -7,7 +8,8 @@ type AuthedUser = {
 };
 export declare class TransfersService {
     private readonly pool;
-    constructor(pool: Pool);
+    private readonly monitoring;
+    constructor(pool: Pool, monitoring: MonitoringService);
     private audit;
     /**
      * Pastikan partner_reference_no unik. Jika user mengirim sendiri → validasi

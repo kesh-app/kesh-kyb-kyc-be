@@ -32,6 +32,7 @@ function buildPgConfig() {
     'FinanceStaff',
     'FinanceManager',
     'SystemAdmin',
+    'Director',
   ];
   for (const r of roles) {
     await client.query(

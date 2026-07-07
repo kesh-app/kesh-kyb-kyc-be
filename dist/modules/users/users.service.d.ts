@@ -5,7 +5,7 @@ export type UserRow = {
     name: string;
     email: string;
     password_hash: string;
-    role: "BranchAdmin" | "FrontDesk" | "ComplianceLead" | "Auditor" | "FinanceStaff" | "FinanceManager" | "SystemAdmin";
+    role: "BranchAdmin" | "FrontDesk" | "ComplianceLead" | "Auditor" | "FinanceStaff" | "FinanceManager" | "SystemAdmin" | "Director";
     branch_id: number | null;
     last_login_at: Date | null;
     created_at: Date;

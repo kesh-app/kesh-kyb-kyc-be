@@ -20,6 +20,7 @@ exports.INTERNAL_ROLES = [
     'Auditor',
     'FinanceStaff',
     'FinanceManager',
+    'Director',
 ];
 class CreateAdminUserDto {
 }

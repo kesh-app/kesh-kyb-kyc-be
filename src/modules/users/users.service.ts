@@ -20,7 +20,8 @@ export type UserRow = {
     | "Auditor"
     | "FinanceStaff"
     | "FinanceManager"
-    | "SystemAdmin"; // ✅ tambah
+    | "SystemAdmin"
+    | "Director"; // ✅ tambah
   branch_id: number | null;
   last_login_at: Date | null;
   created_at: Date;

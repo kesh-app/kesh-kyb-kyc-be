@@ -11,12 +11,13 @@ const common_1 = require("@nestjs/common");
 const db_module_1 = require("../db/db.module");
 const transfers_controller_1 = require("./transfers.controller");
 const transfers_service_1 = require("./transfers.service");
+const monitoring_module_1 = require("../monitoring/monitoring.module");
 let TransfersModule = class TransfersModule {
 };
 exports.TransfersModule = TransfersModule;
 exports.TransfersModule = TransfersModule = __decorate([
     (0, common_1.Module)({
-        imports: [db_module_1.DbModule],
+        imports: [db_module_1.DbModule, monitoring_module_1.MonitoringModule],
         controllers: [transfers_controller_1.TransfersController],
         providers: [transfers_service_1.TransfersService],
     })

@@ -6,6 +6,7 @@ export interface RiskFactor {
     severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
     source: string;
     details?: string;
+    metadata?: Record<string, any>;
 }
 export declare class ApplicationsService {
     private readonly pool;
