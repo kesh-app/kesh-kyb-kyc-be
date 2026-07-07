@@ -179,6 +179,26 @@ export class ApplicationsController {
     return { ...saved, file_url: url };
   }
 
+  // ── EDD endpoints ────────────────────────────────────────────────────────
+
+  @Roles("ComplianceLead", "Auditor")
+  @Get(":id/edd")
+  async getEdd(@Param("id", ParseIntPipe) appId: number) {
+    return this.svc.getEdd(appId);
+  }
+
+  @Roles("ComplianceLead")
+  @Patch(":id/edd")
+  async saveEdd(
+    @Param("id", ParseIntPipe) appId: number,
+    @Body() body: any,
+    @Req() req: any,
+  ) {
+    return this.svc.saveEdd(appId, body, req.user.sub);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   @Roles("FrontDesk", "ComplianceLead")
   @Patch(":id/submit")
   async submit(@Param("id", ParseIntPipe) appId: number, @Req() req: any) {

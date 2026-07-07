@@ -70,9 +70,20 @@ export class WatchlistController {
   // FrontDesk & Auditor tidak diberi akses (paling aman; status quo Auditor tetap tanpa akses).
   @Roles("ComplianceLead", "SystemAdmin")
   @Get("history")
-  async history(@Query("limit") limit?: string) {
-    const n = Math.min(Number(limit) || 20, 100);
-    return this.svc.listIngestHistory(n);
+  async history(
+    @Query("page") page?: string,
+    @Query("limit") limit?: string,
+    @Query("list_type") list_type?: string,
+    @Query("source_list") source_list?: string,
+    @Query("status") status?: string,
+  ) {
+    return this.svc.listIngestHistory({
+      page: Number(page) || 1,
+      limit: Number(limit) || 20,
+      list_type: list_type?.trim() || undefined,
+      source_list: source_list?.trim() || undefined,
+      status: status?.trim() || undefined,
+    });
   }
 
   // Data watchlist entries yang tersimpan (untuk FE menampilkan isi list, bukan hanya riwayat).

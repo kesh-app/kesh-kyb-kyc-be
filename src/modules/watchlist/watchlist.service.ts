@@ -460,43 +460,81 @@ export class WatchlistService {
     };
   }
 
-  async listIngestHistory(limit = 20) {
-    const q = await this.pool.query(
-      `SELECT l.id, l.created_at, l.list_type, l.list_source, l.original_filename,
-       l.total_rows, l.success_rows, l.error_message,
-       u.name AS uploaded_by      -- <-- ganti full_name menjadi name
-FROM watchlist_ingest_logs l
-LEFT JOIN users u ON u.id = l.actor_id
-ORDER BY l.created_at DESC
-LIMIT $1
-`,
-      [limit],
-    );
-    // Petakan ke bentuk yang dipakai FE untuk kolom "Jumlah": total/success/error_count/status.
-    return q.rows.map((r: any) => {
-      const total = Number(r.total_rows ?? 0);
-      const success = Number(r.success_rows ?? 0);
-      const error_count = Math.max(0, total - success);
-      const status =
-        total === 0 || success === 0
-          ? "FAILED"
-          : error_count > 0
-            ? "PARTIAL"
-            : "SUCCESS";
-      return {
-        id: r.id,
-        list_type: r.list_type,
-        source_list: r.list_source,
-        original_filename: r.original_filename,
-        uploaded_at: r.created_at,
-        uploaded_by: r.uploaded_by,
-        total,
-        success,
-        error_count,
-        status,
-        error_message: r.error_message,
-      };
-    });
+  /**
+   * Riwayat upload watchlist dengan pagination + filter.
+   * Filter: list_type, source_list, status (SUCCESS/PARTIAL/FAILED).
+   * `status` dihitung di SQL agar count & pagination konsisten dengan filter.
+   * Field FE untuk kolom "Jumlah": total/success/error_count/status.
+   */
+  async listIngestHistory(opts: {
+    page?: number;
+    limit?: number;
+    list_type?: string;
+    source_list?: string;
+    status?: string;
+  }) {
+    const page = Math.max(1, Number(opts.page) || 1);
+    const limit = Math.max(1, Math.min(100, Number(opts.limit) || 20));
+    const offset = (page - 1) * limit;
+
+    // Ekspresi status konsisten dengan mapping lama:
+    //  FAILED  : total=0 atau success=0
+    //  PARTIAL : success < total (dan success>0)
+    //  SUCCESS : success = total (dan total>0)
+    const statusExpr = `CASE
+        WHEN COALESCE(l.total_rows,0) = 0 OR COALESCE(l.success_rows,0) = 0 THEN 'FAILED'
+        WHEN COALESCE(l.success_rows,0) < COALESCE(l.total_rows,0) THEN 'PARTIAL'
+        ELSE 'SUCCESS'
+      END`;
+
+    const wh: string[] = [];
+    const params: any[] = [];
+    if (opts.list_type)
+      wh.push(`l.list_type = $${params.push(opts.list_type)}`);
+    if (opts.source_list)
+      wh.push(`l.list_source = $${params.push(opts.source_list)}`);
+    if (opts.status)
+      wh.push(`${statusExpr} = $${params.push(opts.status.toUpperCase())}`);
+    const whereSql = wh.length ? `WHERE ${wh.join(" AND ")}` : "";
+
+    const sql = `
+      SELECT l.id, l.created_at, l.list_type, l.list_source, l.original_filename,
+             l.total_rows, l.success_rows, l.error_message,
+             u.name AS uploaded_by,
+             ${statusExpr} AS status,
+             COUNT(*) OVER()::int AS total_count
+      FROM watchlist_ingest_logs l
+      LEFT JOIN users u ON u.id = l.actor_id
+      ${whereSql}
+      ORDER BY l.created_at DESC
+      LIMIT $${params.push(limit)} OFFSET $${params.push(offset)}
+    `;
+
+    const { rows } = await this.pool.query(sql, params);
+    const total = rows[0]?.total_count ?? 0;
+
+    return {
+      data: rows.map((r: any) => {
+        const rowTotal = Number(r.total_rows ?? 0);
+        const rowSuccess = Number(r.success_rows ?? 0);
+        return {
+          id: r.id,
+          list_type: r.list_type,
+          source_list: r.list_source,
+          original_filename: r.original_filename,
+          uploaded_at: r.created_at,
+          uploaded_by: r.uploaded_by,
+          total: rowTotal,
+          success: rowSuccess,
+          error_count: Math.max(0, rowTotal - rowSuccess),
+          status: r.status,
+          error_message: r.error_message,
+        };
+      }),
+      page,
+      limit,
+      total,
+    };
   }
 
   /**

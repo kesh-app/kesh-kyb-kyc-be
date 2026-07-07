@@ -363,7 +363,16 @@ export class ApplicationsService {
     );
     const risk = riskRows[0] ?? null;
 
-    return { application: app, person, business, documents: docs, parties, risk };
+    // edd summary — selalu ada key edd_required & edd_completed
+    const { rows: eddRows } = await this.pool.query(
+      `SELECT edd_required, edd_completed FROM application_edd WHERE application_id=$1`,
+      [appId],
+    );
+    const edd = eddRows[0]
+      ? { edd_required: eddRows[0].edd_required, edd_completed: eddRows[0].edd_completed }
+      : { edd_required: false, edd_completed: false };
+
+    return { application: app, person, business, documents: docs, parties, risk, edd };
   }
 
   async validateBeforeSubmit(appId: number) {
@@ -505,12 +514,18 @@ export class ApplicationsService {
       );
       for (const c of candidates) {
         if (Number(c.score) < SIMILARITY_THRESHOLD) continue;
+        // entity_ref CHECK constraint: 'PERSON' | 'BUSINESS' | 'BO'
+        const entityRef =
+          s.subject_type === "BUSINESS" ? "BUSINESS" : "PERSON";
+
         await this.pool.query(
           `INSERT INTO screening_results
-             (application_id, subject_type, subject_ref, list_type, watchlist_id,
+             (application_id, subject_type, entity_ref, subject_ref, ref_id,
+              list_type, watchlist_id,
               matched_name, matched_dob, matched_nationality, score)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [appId, s.subject_type, s.ref || null, c.list_type, c.id,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [appId, s.subject_type, entityRef, s.ref || null, s.ref,
+           c.list_type, c.id,
            c.name, c.date_of_birth || null, c.nationality || null, c.score],
         );
       }
@@ -821,7 +836,79 @@ export class ApplicationsService {
     // <<< SCREEN & RISK otomatis setelah submit >>>
     const risk = await this.screenAndComputeRisk(appId);
 
+    // HIGH RISK → set IN_REVIEW + wajibkan EDD
+    if (risk.risk_level === "HIGH") {
+      await this.pool.query(
+        `UPDATE applications SET status='IN_REVIEW', updated_at=now() WHERE id=$1`,
+        [appId],
+      );
+      await this.initEddForHighRisk(appId, reviewerId);
+      return { id: appId, status: "IN_REVIEW", risk };
+    }
+
     return { id: appId, status: "SUBMITTED", risk };
+  }
+
+  private async initEddForHighRisk(appId: number, reviewerId: number) {
+    const { rows: apps } = await this.pool.query(
+      `SELECT type, person_id, business_id FROM applications WHERE id=$1`,
+      [appId],
+    );
+    const app = apps[0];
+    if (!app) return;
+
+    let snapshot: Record<string, any> = { cdd_reference_no: String(appId) };
+
+    if (app.type === "INDIVIDUAL" && app.person_id) {
+      const { rows: p } = await this.pool.query(
+        `SELECT full_name, identity_number, identity_type, address_identity, occupation, phone
+         FROM persons WHERE id=$1`,
+        [app.person_id],
+      );
+      if (p[0]) {
+        snapshot = {
+          ...snapshot,
+          full_name: p[0].full_name,
+          identity_number: p[0].identity_number,
+          identity_type: p[0].identity_type,
+          domicile_address: p[0].address_identity,
+          occupation_or_business_type: p[0].occupation,
+          phone_number: p[0].phone,
+          customer_category: "INDIVIDUAL",
+        };
+      }
+    } else if (app.type === "BUSINESS" && app.business_id) {
+      const { rows: b } = await this.pool.query(
+        `SELECT legal_name, npwp, address_line, business_activity, phone
+         FROM business_entities WHERE id=$1`,
+        [app.business_id],
+      );
+      if (b[0]) {
+        snapshot = {
+          ...snapshot,
+          full_name: b[0].legal_name,
+          identity_number: b[0].npwp,
+          identity_type: "NPWP_BADAN",
+          domicile_address: b[0].address_line,
+          occupation_or_business_type: b[0].business_activity,
+          phone_number: b[0].phone,
+          customer_category: "BUSINESS",
+        };
+      }
+    }
+
+    await this.pool.query(
+      `INSERT INTO application_edd
+         (application_id, edd_required, edd_completed, applicant_snapshot,
+          created_by, updated_by, created_at, updated_at)
+       VALUES ($1, true, false, $2, $3, $3, now(), now())
+       ON CONFLICT (application_id) DO UPDATE SET
+         edd_required  = true,
+         applicant_snapshot = EXCLUDED.applicant_snapshot,
+         updated_by    = $3,
+         updated_at    = now()`,
+      [appId, JSON.stringify(snapshot), reviewerId],
+    );
   }
 
   async list(limit = 20, offset = 0) {
@@ -957,6 +1044,172 @@ export class ApplicationsService {
     return doc;
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // EDD — Enhanced Due Diligence (Lampiran 2 Formulir EDD APU PPT PPPSPM)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  async getEdd(appId: number) {
+    const { rows: apps } = await this.pool.query(
+      `SELECT id FROM applications WHERE id=$1`,
+      [appId],
+    );
+    if (!apps[0]) throw new NotFoundException("Application not found");
+
+    const { rows } = await this.pool.query(
+      `SELECT * FROM application_edd WHERE application_id=$1`,
+      [appId],
+    );
+    if (!rows[0]) {
+      return {
+        application_id: appId,
+        edd_required: false,
+        edd_completed: false,
+        applicant_snapshot: {},
+        high_risk_reasons: {},
+        additional_information: {},
+        beneficial_owner: {},
+        officer_analysis: {},
+        compliance_decision: {},
+        director_decision: {},
+        internal_checklist: {},
+        completed_by: null,
+        completed_at: null,
+        created_by: null,
+        updated_by: null,
+        created_at: null,
+        updated_at: null,
+      };
+    }
+    return rows[0];
+  }
+
+  async saveEdd(appId: number, body: any, userId: number) {
+    const { complete = false } = body;
+
+    const { rows: apps } = await this.pool.query(
+      `SELECT id FROM applications WHERE id=$1`,
+      [appId],
+    );
+    if (!apps[0]) throw new NotFoundException("Application not found");
+
+    // Baca state saat ini untuk merge
+    const { rows: existing } = await this.pool.query(
+      `SELECT * FROM application_edd WHERE application_id=$1`,
+      [appId],
+    );
+    const curr = existing[0];
+
+    const merged = {
+      applicant_snapshot:     body.applicant_snapshot     ?? curr?.applicant_snapshot     ?? {},
+      high_risk_reasons:      body.high_risk_reasons      ?? curr?.high_risk_reasons      ?? {},
+      additional_information: body.additional_information ?? curr?.additional_information ?? {},
+      beneficial_owner:       body.beneficial_owner       ?? curr?.beneficial_owner       ?? {},
+      officer_analysis:       body.officer_analysis       ?? curr?.officer_analysis       ?? {},
+      compliance_decision:    body.compliance_decision    ?? curr?.compliance_decision    ?? {},
+      director_decision:      body.director_decision      ?? curr?.director_decision      ?? {},
+      internal_checklist:     body.internal_checklist     ?? curr?.internal_checklist     ?? {},
+    };
+
+    if (complete) this.validateEddCompletion(merged);
+
+    await this.pool.query(
+      `INSERT INTO application_edd
+         (application_id, edd_required, edd_completed,
+          applicant_snapshot, high_risk_reasons, additional_information,
+          beneficial_owner, officer_analysis, compliance_decision,
+          director_decision, internal_checklist,
+          completed_by, completed_at, created_by, updated_by, created_at, updated_at)
+       VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+               $11, $12, $13, $13, now(), now())
+       ON CONFLICT (application_id) DO UPDATE SET
+         edd_completed          = CASE WHEN $2 THEN true ELSE application_edd.edd_completed END,
+         applicant_snapshot     = $3,
+         high_risk_reasons      = $4,
+         additional_information = $5,
+         beneficial_owner       = $6,
+         officer_analysis       = $7,
+         compliance_decision    = $8,
+         director_decision      = $9,
+         internal_checklist     = $10,
+         completed_by           = CASE WHEN $2 THEN $11 ELSE application_edd.completed_by END,
+         completed_at           = CASE WHEN $2 THEN $12 ELSE application_edd.completed_at END,
+         updated_by             = $13,
+         updated_at             = now()`,
+      [
+        appId,
+        complete,
+        JSON.stringify(merged.applicant_snapshot),
+        JSON.stringify(merged.high_risk_reasons),
+        JSON.stringify(merged.additional_information),
+        JSON.stringify(merged.beneficial_owner),
+        JSON.stringify(merged.officer_analysis),
+        JSON.stringify(merged.compliance_decision),
+        JSON.stringify(merged.director_decision),
+        JSON.stringify(merged.internal_checklist),
+        complete ? userId : null,
+        complete ? new Date().toISOString() : null,
+        userId,
+      ],
+    );
+
+    return this.getEdd(appId);
+  }
+
+  private validateEddCompletion(merged: any) {
+    const errors: string[] = [];
+    const snapshot   = merged.applicant_snapshot     ?? {};
+    const hr         = merged.high_risk_reasons      ?? {};
+    const addInfo    = merged.additional_information ?? {};
+    const officer    = merged.officer_analysis       ?? {};
+    const compliance = merged.compliance_decision    ?? {};
+    const checklist  = merged.internal_checklist     ?? {};
+
+    if (!snapshot.full_name && !snapshot.cdd_reference_no)
+      errors.push("applicant_snapshot: full_name atau cdd_reference_no wajib diisi");
+
+    const hrCats = ["customer_characteristics", "transaction_patterns", "screening_results", "clarification_requests"];
+    if (!hrCats.some((c) => Array.isArray(hr[c]) && hr[c].length > 0))
+      errors.push("high_risk_reasons: minimal 1 kategori dengan minimal 1 alasan");
+
+    if (!officer.overall_risk_summary)
+      errors.push("officer_analysis.overall_risk_summary wajib diisi");
+
+    if (!Array.isArray(officer.follow_up_recommendations) || officer.follow_up_recommendations.length === 0)
+      errors.push("officer_analysis.follow_up_recommendations minimal 1 item");
+
+    if (!compliance.decision)
+      errors.push("compliance_decision.decision wajib diisi");
+
+    if (!checklist.edd_form_completed)
+      errors.push("internal_checklist.edd_form_completed harus true");
+
+    if (officer.cdd_edd_consistency === "NOT_CONSISTENT" && !officer.consistency_notes)
+      errors.push("officer_analysis.consistency_notes wajib diisi jika cdd_edd_consistency = NOT_CONSISTENT");
+
+    if (officer.transaction_profile_reasonableness === "NOT_REASONABLE" && !officer.transaction_notes)
+      errors.push("officer_analysis.transaction_notes wajib diisi jika transaction_profile_reasonableness = NOT_REASONABLE");
+
+    if (officer.occupation_source_funds_wealth_assessment === "NOT_ADEQUATE" && !officer.source_funds_wealth_notes)
+      errors.push("officer_analysis.source_funds_wealth_notes wajib diisi jika occupation_source_funds_wealth_assessment = NOT_ADEQUATE");
+
+    const relPurpose = addInfo.relationship_or_transaction_purpose;
+    if (Array.isArray(relPurpose) && relPurpose.includes("OTHER") && !addInfo.relationship_or_transaction_purpose_other)
+      errors.push("additional_information.relationship_or_transaction_purpose_other wajib diisi jika OTHER dipilih");
+
+    const srcFunds = addInfo.source_of_funds;
+    if (Array.isArray(srcFunds) && srcFunds.includes("OTHER") && !addInfo.source_of_funds_other)
+      errors.push("additional_information.source_of_funds_other wajib diisi jika OTHER dipilih");
+
+    const wealth = addInfo.wealth_information;
+    if (Array.isArray(wealth) && wealth.includes("OTHER") && !addInfo.wealth_information_other)
+      errors.push("additional_information.wealth_information_other wajib diisi jika OTHER dipilih");
+
+    if (errors.length)
+      throw new BadRequestException({ message: "EDD belum memenuhi syarat untuk diselesaikan", errors });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+
   async decide(
     appId: number,
     decision: "APPROVED" | "REJECTED",
@@ -977,6 +1230,17 @@ export class ApplicationsService {
     }
 
     if (decision === "APPROVED") {
+      // Blokir jika EDD wajib tapi belum selesai (HIGH RISK)
+      const { rows: eddRows } = await this.pool.query(
+        `SELECT edd_required, edd_completed FROM application_edd WHERE application_id=$1`,
+        [appId],
+      );
+      if (eddRows[0]?.edd_required && !eddRows[0]?.edd_completed) {
+        throw new BadRequestException(
+          "Application HIGH RISK wajib memiliki EDD lengkap sebelum disetujui.",
+        );
+      }
+
       // Blokir jika ada CONFIRMED DTTOT/PPPSPM
       const { rows: blockers } = await this.pool.query(
         `SELECT id, list_type FROM screening_results

@@ -82,19 +82,36 @@ export declare class WatchlistService {
             uploaded_by: any;
         };
     }>;
-    listIngestHistory(limit?: number): Promise<{
-        id: any;
-        list_type: any;
-        source_list: any;
-        original_filename: any;
-        uploaded_at: any;
-        uploaded_by: any;
-        total: number;
-        success: number;
-        error_count: number;
-        status: string;
-        error_message: any;
-    }[]>;
+    /**
+     * Riwayat upload watchlist dengan pagination + filter.
+     * Filter: list_type, source_list, status (SUCCESS/PARTIAL/FAILED).
+     * `status` dihitung di SQL agar count & pagination konsisten dengan filter.
+     * Field FE untuk kolom "Jumlah": total/success/error_count/status.
+     */
+    listIngestHistory(opts: {
+        page?: number;
+        limit?: number;
+        list_type?: string;
+        source_list?: string;
+        status?: string;
+    }): Promise<{
+        data: {
+            id: any;
+            list_type: any;
+            source_list: any;
+            original_filename: any;
+            uploaded_at: any;
+            uploaded_by: any;
+            total: number;
+            success: number;
+            error_count: number;
+            status: any;
+            error_message: any;
+        }[];
+        page: number;
+        limit: number;
+        total: any;
+    }>;
     /**
      * List watchlist entries yang sudah tersimpan (untuk FE menampilkan data, bukan hanya riwayat upload).
      * Filter: list_type, source_list, watchlist_type, subject_type, dan search `q`.

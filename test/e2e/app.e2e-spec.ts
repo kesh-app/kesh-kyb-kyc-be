@@ -660,13 +660,16 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   // I. WATCHLIST HISTORY
   // ══════════════════════════════════════════════════════════
   describe('I. Watchlist', () => {
-    it('I-01: GET /watchlist/history → 200 array', async () => {
+    it('I-01: GET /watchlist/history → 200 {data,page,limit,total}', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/watchlist/history`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
-      expect(Array.isArray(res.body)).toBe(true);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(typeof res.body.total).toBe('number');
+      expect(res.body.page).toBe(1);
+      expect(res.body.limit).toBe(20);
     });
 
     it('I-02: GET /watchlist/history dengan role non-compliance → 403', async () => {
@@ -1258,9 +1261,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
-      expect(Array.isArray(res.body)).toBe(true);
-      expect(res.body.length).toBeGreaterThan(0);
-      const h = res.body[0];
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+      const h = res.body.data[0];
       expect(h).toHaveProperty('total');
       expect(h).toHaveProperty('success');
       expect(h).toHaveProperty('error_count');
@@ -1269,6 +1272,62 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(h).toHaveProperty('uploaded_at');
       expect(typeof h.total).toBe('number');
       expect(['SUCCESS', 'PARTIAL', 'FAILED']).toContain(h.status);
+    });
+
+    // ── Pagination & filter untuk Riwayat Upload ──
+    it('I2-10: history pagination limit=2 → data ≤ 2, total number, page/limit echo', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .query({ page: 1, limit: 2 })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.page).toBe(1);
+      expect(res.body.limit).toBe(2);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeLessThanOrEqual(2);
+      expect(typeof res.body.total).toBe('number');
+      expect(res.body.total).toBeGreaterThan(0);
+    });
+
+    it('I2-11: history filter list_type=PEP → semua row PEP', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .query({ list_type: 'PEP', limit: 100 })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(res.body.data.every((r: any) => r.list_type === 'PEP')).toBe(true);
+    });
+
+    it('I2-12: history filter source_list → hanya source itu (isolasi per upload)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .query({ source_list: entriesSource })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      // I2 beforeAll melakukan 2 upload (PEP + DTTOT) dengan source ini
+      expect(res.body.total).toBe(2);
+      expect(res.body.data.every((r: any) => r.source_list === entriesSource)).toBe(true);
+    });
+
+    it('I2-13: history SystemAdmin → 200 (paginated)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .query({ page: 1, limit: 5 })
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    it('I2-14: history FrontDesk → 403', async () => {
+      return request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .query({ page: 1, limit: 5 })
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
     });
   });
 
@@ -1347,7 +1406,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${sysAdminToken}`)
         .expect(200);
 
-      expect(Array.isArray(res.body)).toBe(true);
+      expect(Array.isArray(res.body.data)).toBe(true);
     });
 
     it('J-09: GET /users/admins dengan SystemAdmin → 200', async () => {
@@ -2027,6 +2086,333 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
 
       expect(res.body.partnerReferenceNo).toBe(MANUAL_REF);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // O. EDD — Enhanced Due Diligence (HIGH RISK flow)
+  //
+  // Strategy HIGH RISK (score ≥70) tanpa bergantung pada watchlist matching:
+  //   - casino dealer occupation (+15, HIGH_RISK_OCCUPATION)
+  //   - pep_self_declared=true via pgPool (+40)
+  //   - KTP status REJECTED via pgPool (+15, DOC_REJECTED)
+  //   Total: 70 → HIGH
+  // ══════════════════════════════════════════════════════════
+  describe('O. EDD — Enhanced Due Diligence', () => {
+    const EDD_PERSON_NAME = `EDD Risk Test ${SUFFIX}`;
+    let eddHighAppId: string;
+    let eddRejectAppId: string;
+
+    // Helper: buat individual HIGH RISK menggunakan pgPool untuk set faktor risiko langsung
+    async function createHighRiskIndividual(identNum: string, phone: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: EDD_PERSON_NAME,
+          identity_type: 'KTP',
+          identity_number: identNum,
+          address_identity: 'Jl. EDD No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1970-01-01',
+          nationality: 'ID',
+          phone,
+          occupation: 'casino dealer',   // +15 pts
+          gender: 'M',
+          signature_uri: 'https://storage.test/edd_sig.png',
+        })
+        .expect(201);
+
+      const appId = String(create.body.id);
+
+      // Set pep_self_declared=true (+40 pts)
+      const { rows: appRows } = await pgPool.query(
+        'SELECT person_id FROM applications WHERE id=$1', [appId],
+      );
+      await pgPool.query(
+        'UPDATE persons SET pep_self_declared=true WHERE id=$1', [appRows[0].person_id],
+      );
+
+      // Tambah KTP dan mark REJECTED (+15 pts DOC_REJECTED)
+      const docRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/edd_ktp.jpg' })
+        .expect(201);
+
+      await pgPool.query(
+        'UPDATE documents SET status=$1 WHERE id=$2', ['REJECTED', docRes.body.id],
+      );
+
+      // Score: 15+40+15 = 70 → HIGH
+      return appId;
+    }
+
+    it('O-01: Submit HIGH RISK individual → status IN_REVIEW, risk_level HIGH', async () => {
+      eddHighAppId = await createHighRiskIndividual(`31890000${SUFFIX}`, `088800${SUFFIX}`);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.status).toBe('IN_REVIEW');
+      expect(res.body.risk.risk_level).toBe('HIGH');
+      expect(res.body.risk.risk_score).toBeGreaterThanOrEqual(70);
+    });
+
+    it('O-02: GET /applications/:id includes edd_required=true, edd_completed=false', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddHighAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.edd).toBeDefined();
+      expect(res.body.edd.edd_required).toBe(true);
+      expect(res.body.edd.edd_completed).toBe(false);
+    });
+
+    it('O-03: APPROVE HIGH RISK tanpa EDD selesai → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(400);
+
+      expect(res.body.message).toContain('EDD');
+    });
+
+    it('O-04: REJECT HIGH RISK tanpa EDD → 200 REJECTED (diizinkan)', async () => {
+      eddRejectAppId = await createHighRiskIndividual(`31890001${SUFFIX}`, `088801${SUFFIX}`);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddRejectAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddRejectAppId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'REJECTED', reason: 'HIGH RISK reject tanpa EDD' })
+        .expect(200);
+
+      expect(res.body.status).toBe('REJECTED');
+    });
+
+    it('O-05: GET /applications/:id/edd → 200, edd_required=true, applicant_snapshot terisi', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.edd_required).toBe(true);
+      expect(res.body.edd_completed).toBe(false);
+      expect(res.body.applicant_snapshot).toBeDefined();
+      expect(res.body.applicant_snapshot.full_name).toBe(EDD_PERSON_NAME);
+      expect(res.body.applicant_snapshot.customer_category).toBe('INDIVIDUAL');
+    });
+
+    it('O-06: PATCH /edd draft (partial) → 200, data tersimpan + snapshot dari init tetap ada', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          high_risk_reasons: {
+            customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'],
+          },
+          officer_analysis: {
+            overall_risk_summary: 'HIGH',
+            follow_up_recommendations: ['REQUEST_ADDITIONAL_DOCUMENTS'],
+          },
+        })
+        .expect(200);
+
+      expect(res.body.edd_completed).toBe(false);
+      expect(res.body.high_risk_reasons.customer_characteristics).toContain('HIGH_RISK_OCCUPATION_OR_BUSINESS');
+      expect(res.body.officer_analysis.overall_risk_summary).toBe('HIGH');
+      // snapshot dari initEddForHighRisk harus tetap ada
+      expect(res.body.applicant_snapshot.full_name).toBe(EDD_PERSON_NAME);
+    });
+
+    it('O-07: PATCH /edd complete=true dengan data tidak lengkap → 400 dengan errors', async () => {
+      // Hanya kirim complete=true tanpa field wajib lainnya
+      // compliance_decision.decision dan internal_checklist.edd_form_completed masih kosong
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ complete: true })
+        .expect(400);
+
+      expect(res.body.message).toContain('EDD belum memenuhi syarat');
+      expect(Array.isArray(res.body.errors)).toBe(true);
+      expect(res.body.errors.length).toBeGreaterThan(0);
+    });
+
+    it('O-08: PATCH /edd complete=true dengan semua field wajib → 200, edd_completed=true', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          complete: true,
+          applicant_snapshot: {
+            full_name: EDD_PERSON_NAME,
+            identity_number: `31890000${SUFFIX}`,
+            identity_type: 'KTP',
+            customer_category: 'INDIVIDUAL',
+          },
+          high_risk_reasons: {
+            customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'],
+          },
+          officer_analysis: {
+            overall_risk_summary: 'HIGH',
+            follow_up_recommendations: ['REQUEST_ADDITIONAL_DOCUMENTS'],
+            cdd_edd_consistency: 'CONSISTENT',
+            transaction_profile_reasonableness: 'REASONABLE',
+            occupation_source_funds_wealth_assessment: 'ADEQUATE',
+          },
+          compliance_decision: {
+            decision: 'DELAYED',
+            decision_reason: 'Menunggu dokumen tambahan',
+            officer_name: 'Compliance Officer',
+          },
+          internal_checklist: {
+            edd_form_completed: true,
+          },
+        })
+        .expect(200);
+
+      expect(res.body.edd_completed).toBe(true);
+      expect(res.body.completed_by).not.toBeNull();
+      expect(String(res.body.completed_by)).toMatch(/^\d+$/);
+      expect(res.body.completed_at).not.toBeNull();
+    });
+
+    it('O-09: APPROVE HIGH RISK setelah EDD selesai → 200 APPROVED', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED', reason: 'EDD lengkap, risiko telah dinilai' })
+        .expect(200);
+
+      expect(res.body.status).toBe('APPROVED');
+    });
+
+    it('O-10: LOW RISK app dapat APPROVE tanpa EDD', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: 'Budi Santoso Murni',
+          identity_type: 'KTP',
+          identity_number: `31890002${SUFFIX}`,
+          address_identity: 'Jl. Murni No. 1, Bandung',
+          pob: 'Bandung',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `088802${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'M',
+          signature_uri: 'https://storage.test/low_sig.png',
+        })
+        .expect(201);
+
+      const lowId = String(createRes.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${lowId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/low_ktp.jpg' })
+        .expect(201);
+
+      const submitRes = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${lowId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(submitRes.body.status).toBe('SUBMITTED');
+      expect(submitRes.body.risk.risk_level).not.toBe('HIGH');
+
+      const approveRes = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${lowId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(200);
+
+      expect(approveRes.body.status).toBe('APPROVED');
+    });
+
+    it('O-11: FrontDesk GET /edd → 403', async () => {
+      return request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
+    });
+
+    it('O-12: ComplianceLead GET /edd setelah complete → 200, edd_completed=true', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.edd_required).toBe(true);
+      expect(res.body.edd_completed).toBe(true);
+    });
+
+    it('O-13: FrontDesk PATCH /edd → 403', async () => {
+      return request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ officer_analysis: { overall_risk_summary: 'LOW' } })
+        .expect(403);
+    });
+
+    it('O-13b: SystemAdmin GET /edd → 200, edd_required=true', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .expect(200);
+
+      expect(res.body.edd_required).toBe(true);
+    });
+
+    it('O-14: Conditional validation — NOT_CONSISTENT tanpa consistency_notes → 400', async () => {
+      const condAppId = await createHighRiskIndividual(`31890003${SUFFIX}`, `088803${SUFFIX}`);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${condAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${condAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          complete: true,
+          applicant_snapshot: { full_name: EDD_PERSON_NAME },
+          high_risk_reasons: { customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'] },
+          officer_analysis: {
+            overall_risk_summary: 'HIGH',
+            follow_up_recommendations: ['CONTINUE_RELATIONSHIP_OR_TRANSACTION'],
+            cdd_edd_consistency: 'NOT_CONSISTENT',
+            // sengaja tidak kirim consistency_notes
+          },
+          compliance_decision: { decision: 'APPROVED' },
+          internal_checklist: { edd_form_completed: true },
+        })
+        .expect(400);
+
+      expect(res.body.errors.some((e: string) => e.includes('consistency_notes'))).toBe(true);
+    });
+
+    it('O-15: GET /edd pada LOW RISK app (tidak ada EDD record) → 200 default structure', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.edd_required).toBe(false);
+      expect(res.body.edd_completed).toBe(false);
+      expect(res.body.applicant_snapshot).toEqual({});
     });
   });
 });

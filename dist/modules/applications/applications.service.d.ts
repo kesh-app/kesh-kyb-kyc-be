@@ -26,6 +26,10 @@ export declare class ApplicationsService {
         documents: any[];
         parties: any[];
         risk: any;
+        edd: {
+            edd_required: any;
+            edd_completed: any;
+        };
     }>;
     validateBeforeSubmit(appId: number): Promise<{
         ok: boolean;
@@ -71,6 +75,7 @@ export declare class ApplicationsService {
             risk_factors: RiskFactor[];
         };
     }>;
+    private initEddForHighRisk;
     list(limit?: number, offset?: number): Promise<any[]>;
     listDocuments(appId: number): Promise<any[]>;
     getScreening(appId: number): Promise<{
@@ -86,5 +91,8 @@ export declare class ApplicationsService {
     listWithRisk(limit?: number, offset?: number): Promise<any[]>;
     getDocument(appId: number, docId: number): Promise<any>;
     deleteDocument(appId: number, docId: number): Promise<any>;
+    getEdd(appId: number): Promise<any>;
+    saveEdd(appId: number, body: any, userId: number): Promise<any>;
+    private validateEddCompletion;
     decide(appId: number, decision: "APPROVED" | "REJECTED", reason: string | null, reviewerId: number): Promise<any>;
 }

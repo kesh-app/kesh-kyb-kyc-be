@@ -149,8 +149,27 @@ Query params: `page` (default 1), `limit` (default 20, max 100), `list_type`,
 > upload adalah lewat `list_type` + `source_list`. Endpoint `/uploads/:id/entries` tidak
 > disediakan karena relasi tsb belum ada (tidak dipaksakan pada data lama).
 
-### `GET /watchlist/history` — riwayat upload
+### `GET /watchlist/history` — riwayat upload (paginated)
 
-Mengembalikan array: `id`, `list_type`, `source_list`, `uploaded_at`, `uploaded_by`,
-`total`, `success`, `error_count`, `status` (`SUCCESS`/`PARTIAL`/`FAILED`), `original_filename`,
-`error_message`. Field `total`/`success`/`error_count` mengisi kolom "Jumlah" di FE.
+Query params: `page` (default 1), `limit` (default 20, max 100), `list_type`,
+`source_list`, `status` (`SUCCESS`/`PARTIAL`/`FAILED`). `status` dihitung dari
+`total_rows`/`success_rows` sehingga count & pagination konsisten dengan filter.
+
+```jsonc
+{
+  "data": [ { "id": "1", "list_type": "PEP", "source_list": "BNPT",
+              "uploaded_at": "...", "uploaded_by": "...",
+              "total": 100, "success": 98, "error_count": 2, "status": "PARTIAL",
+              "original_filename": "...", "error_message": "..." } ],
+  "page": 1, "limit": 20, "total": 123
+}
+```
+
+Field `total`/`success`/`error_count` mengisi kolom "Jumlah" di FE.
+
+> ⚠️ **Breaking change (pagination history):** sebelumnya `GET /watchlist/history`
+> mengembalikan **array langsung**; sekarang mengembalikan objek
+> `{ data, page, limit, total }`. FE/report yang membaca array harus dipindah ke
+> `response.data`. Item di dalam `data` **tidak berubah** (field names sama:
+> `uploaded_at`, `source_list`, `total`, `success`, `error_count`, `status`, dst),
+> jadi hanya perlu menyesuaikan ke `response.data`.

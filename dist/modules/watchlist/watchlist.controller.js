@@ -35,9 +35,14 @@ let WatchlistController = class WatchlistController {
     }
     // Riwayat watchlist: ComplianceLead (owner fitur) + SystemAdmin (read-only).
     // FrontDesk & Auditor tidak diberi akses (paling aman; status quo Auditor tetap tanpa akses).
-    async history(limit) {
-        const n = Math.min(Number(limit) || 20, 100);
-        return this.svc.listIngestHistory(n);
+    async history(page, limit, list_type, source_list, status) {
+        return this.svc.listIngestHistory({
+            page: Number(page) || 1,
+            limit: Number(limit) || 20,
+            list_type: list_type?.trim() || undefined,
+            source_list: source_list?.trim() || undefined,
+            status: status?.trim() || undefined,
+        });
     }
     // Data watchlist entries yang tersimpan (untuk FE menampilkan isi list, bukan hanya riwayat).
     // RBAC sama dengan history: ComplianceLead + SystemAdmin. FrontDesk/Auditor/Finance diblokir.
@@ -86,9 +91,13 @@ __decorate([
 __decorate([
     (0, roles_decorator_1.Roles)("ComplianceLead", "SystemAdmin"),
     (0, common_1.Get)("history"),
-    __param(0, (0, common_1.Query)("limit")),
+    __param(0, (0, common_1.Query)("page")),
+    __param(1, (0, common_1.Query)("limit")),
+    __param(2, (0, common_1.Query)("list_type")),
+    __param(3, (0, common_1.Query)("source_list")),
+    __param(4, (0, common_1.Query)("status")),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [String, String, String, String, String]),
     __metadata("design:returntype", Promise)
 ], WatchlistController.prototype, "history", null);
 __decorate([

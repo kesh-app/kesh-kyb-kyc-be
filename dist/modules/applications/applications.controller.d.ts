@@ -13,6 +13,10 @@ export declare class ApplicationsController {
         documents: any[];
         parties: any[];
         risk: any;
+        edd: {
+            edd_required: any;
+            edd_completed: any;
+        };
     }>;
     /** (Opsional) quick pre-check tanpa submit */
     precheck(appId: number): Promise<{
@@ -33,6 +37,8 @@ export declare class ApplicationsController {
     listDocs(appId: number): Promise<any[]>;
     getDoc(appId: number, docId: number): Promise<any>;
     uploadDocument(appId: number, file: Express.Multer.File, docType?: string): Promise<any>;
+    getEdd(appId: number): Promise<any>;
+    saveEdd(appId: number, body: any, req: any): Promise<any>;
     submit(appId: number, req: any): Promise<{
         id: number;
         status: string;

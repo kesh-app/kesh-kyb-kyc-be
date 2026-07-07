@@ -20,19 +20,24 @@ export declare class WatchlistController {
             uploaded_by: any;
         };
     }>;
-    history(limit?: string): Promise<{
-        id: any;
-        list_type: any;
-        source_list: any;
-        original_filename: any;
-        uploaded_at: any;
-        uploaded_by: any;
-        total: number;
-        success: number;
-        error_count: number;
-        status: string;
-        error_message: any;
-    }[]>;
+    history(page?: string, limit?: string, list_type?: string, source_list?: string, status?: string): Promise<{
+        data: {
+            id: any;
+            list_type: any;
+            source_list: any;
+            original_filename: any;
+            uploaded_at: any;
+            uploaded_by: any;
+            total: number;
+            success: number;
+            error_count: number;
+            status: any;
+            error_message: any;
+        }[];
+        page: number;
+        limit: number;
+        total: any;
+    }>;
     entries(page?: string, limit?: string, list_type?: string, source_list?: string, watchlist_type?: string, subject_type?: string, q?: string): Promise<{
         data: {
             id: any;

@@ -87,6 +87,14 @@ let ApplicationsController = class ApplicationsController {
         });
         return { ...saved, file_url: url };
     }
+    // ── EDD endpoints ────────────────────────────────────────────────────────
+    async getEdd(appId) {
+        return this.svc.getEdd(appId);
+    }
+    async saveEdd(appId, body, req) {
+        return this.svc.saveEdd(appId, body, req.user.sub);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
     async submit(appId, req) {
         return this.svc.submit(appId, req.user.sub);
     }
@@ -221,6 +229,24 @@ __decorate([
     __metadata("design:paramtypes", [Number, Object, String]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "uploadDocument", null);
+__decorate([
+    (0, roles_decorator_1.Roles)("ComplianceLead", "Auditor"),
+    (0, common_1.Get)(":id/edd"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "getEdd", null);
+__decorate([
+    (0, roles_decorator_1.Roles)("ComplianceLead"),
+    (0, common_1.Patch)(":id/edd"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Body)()),
+    __param(2, (0, common_1.Req)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Object, Object]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "saveEdd", null);
 __decorate([
     (0, roles_decorator_1.Roles)("FrontDesk", "ComplianceLead"),
     (0, common_1.Patch)(":id/submit"),
