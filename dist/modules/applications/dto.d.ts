@@ -15,6 +15,7 @@ export declare class CreateIndividualDto {
     gender: 'M' | 'F' | 'O';
     email?: string;
     signature_uri?: string;
+    cif_relationship_type?: 'OUR_CUSTOMER' | 'WIC';
 }
 /**
  * BUSINESS (KYB)
@@ -25,7 +26,7 @@ export declare class CreateBusinessDto {
     incorporation_place: string;
     incorporation_date: string;
     business_license_number: string;
-    nib: string;
+    nib?: string;
     npwp: string;
     address_line: string;
     city: string;

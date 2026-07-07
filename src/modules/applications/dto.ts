@@ -50,6 +50,10 @@ export class CreateIndividualDto {
   // Wajib saat SUBMIT, boleh kosong saat DRAFT
   @IsOptional() @IsString()
   signature_uri?: string;
+
+  // CIF relationship type — OUR_CUSTOMER (default) atau WIC; BO tidak diizinkan pada individual create
+  @IsOptional() @IsIn(['OUR_CUSTOMER', 'WIC'])
+  cif_relationship_type?: 'OUR_CUSTOMER' | 'WIC';
 }
 
 /**
@@ -72,8 +76,8 @@ export class CreateBusinessDto {
   @IsString() @IsNotEmpty()
   business_license_number!: string;
 
-  @IsString() @IsNotEmpty()
-  nib!: string;
+  @IsOptional() @IsString()
+  nib?: string;
 
   @IsString() @IsNotEmpty()
   npwp!: string;

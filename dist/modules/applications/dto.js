@@ -79,6 +79,11 @@ __decorate([
     (0, class_validator_1.IsString)(),
     __metadata("design:type", String)
 ], CreateIndividualDto.prototype, "signature_uri", void 0);
+__decorate([
+    (0, class_validator_1.IsOptional)(),
+    (0, class_validator_1.IsIn)(['OUR_CUSTOMER', 'WIC']),
+    __metadata("design:type", String)
+], CreateIndividualDto.prototype, "cif_relationship_type", void 0);
 /**
  * BUSINESS (KYB)
  */
@@ -110,8 +115,8 @@ __decorate([
     __metadata("design:type", String)
 ], CreateBusinessDto.prototype, "business_license_number", void 0);
 __decorate([
+    (0, class_validator_1.IsOptional)(),
     (0, class_validator_1.IsString)(),
-    (0, class_validator_1.IsNotEmpty)(),
     __metadata("design:type", String)
 ], CreateBusinessDto.prototype, "nib", void 0);
 __decorate([

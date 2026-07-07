@@ -2415,4 +2415,613 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.applicant_snapshot).toEqual({});
     });
   });
+
+  // ══════════════════════════════════════════════════════════
+  // P. PEP Force-HIGH — any PEP detection forces risk_level HIGH
+  //
+  // Business rule: if screening or self-declaration detects PEP,
+  // final risk_level must be HIGH regardless of computed score.
+  //
+  // Sub-cases:
+  //   P-01..P-04: watchlist PEP candidate match (score=20 → old LOW → new HIGH)
+  //   P-05..P-06: self-declared PEP alone (score=40 → old MEDIUM → new HIGH)
+  // ══════════════════════════════════════════════════════════
+  describe('P. PEP Force-HIGH — any PEP detection forces HIGH risk', () => {
+    const PEP_WL_NAME = `PEP Force High ${SUFFIX}`;
+    let pepWlAppId: string;
+    let pepSelfAppId: string;
+
+    it('P-01: Upload PEP watchlist entry → 201', async () => {
+      const csv = [
+        'Unique_ID,Full_Name,Date_of_Birth,Nationality',
+        `PEPFH${SUFFIX},${PEP_WL_NAME},1975-06-15,ID`,
+      ].join('\n');
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `pep_force_high_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'PEP')
+        .field('list_source', `E2E PEP Force High ${SUFFIX}`)
+        .expect(201);
+
+      expect(res.body.success).toBeGreaterThanOrEqual(1);
+    });
+
+    it('P-02: Submit application whose name matches PEP watchlist → risk_level HIGH, WATCHLIST_PEP_CANDIDATE factor, status IN_REVIEW', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: PEP_WL_NAME,
+          identity_type: 'KTP',
+          identity_number: `31899000${SUFFIX}`,
+          address_identity: 'Jl. PEP No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1975-06-15',
+          nationality: 'ID',
+          phone: `0899900${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'M',
+          signature_uri: 'https://storage.test/pep_fh_sig.png',
+        })
+        .expect(201);
+
+      pepWlAppId = String(createRes.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${pepWlAppId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/pep_fh_ktp.jpg' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${pepWlAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.status).toBe('IN_REVIEW');
+      expect(res.body.risk.risk_level).toBe('HIGH');
+      expect(res.body.risk.risk_score).toBeGreaterThanOrEqual(70);
+
+      const codes: string[] = res.body.risk.risk_factors.map((f: any) => f.code);
+      expect(codes).toContain('WATCHLIST_PEP_CANDIDATE');
+    });
+
+    it('P-03: GET /applications/:id → edd_required=true, edd_completed=false', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${pepWlAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.edd).toBeDefined();
+      expect(res.body.edd.edd_required).toBe(true);
+      expect(res.body.edd.edd_completed).toBe(false);
+    });
+
+    it('P-04: APPROVE PEP-detected application without EDD → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${pepWlAppId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(400);
+
+      expect(res.body.message).toContain('EDD');
+    });
+
+    it('P-05: Self-declared PEP alone (score=40, old rule=MEDIUM) → new rule forces HIGH', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `PEP Self Declared ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `31899001${SUFFIX}`,
+          address_identity: 'Jl. PEP SD No. 2, Bandung',
+          pob: 'Bandung',
+          dob: '1980-03-20',
+          nationality: 'ID',
+          phone: `0899901${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'F',
+          signature_uri: 'https://storage.test/pep_sd_sig.png',
+        })
+        .expect(201);
+
+      pepSelfAppId = String(createRes.body.id);
+
+      // Set pep_self_declared=true — score alone = 40 which was MEDIUM under old rule
+      const { rows: appRows } = await pgPool.query(
+        'SELECT person_id FROM applications WHERE id=$1', [pepSelfAppId],
+      );
+      await pgPool.query(
+        'UPDATE persons SET pep_self_declared=true WHERE id=$1', [appRows[0].person_id],
+      );
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${pepSelfAppId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/pep_sd_ktp.jpg' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${pepSelfAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.status).toBe('IN_REVIEW');
+      expect(res.body.risk.risk_level).toBe('HIGH');
+      expect(res.body.risk.risk_score).toBeGreaterThanOrEqual(70);
+
+      const codes: string[] = res.body.risk.risk_factors.map((f: any) => f.code);
+      expect(codes).toContain('INDIVIDUAL_PEP_SELF_DECLARED');
+    });
+
+    it('P-06: GET /applications/:id for self-declared PEP → edd_required=true', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${pepSelfAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.edd.edd_required).toBe(true);
+      expect(res.body.edd.edd_completed).toBe(false);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // Q. CIF Number — Customer Information File
+  //
+  // Format:
+  //   Individual : KSH-I-<NIK_LAST6>-<SEQ5>
+  //   Business   : KSH-B-<NIB_OR_NPWP_LAST6>-<SEQ5>
+  //
+  // Rules:
+  //   - Generated once at creation, immutable thereafter
+  //   - Unique across all records
+  //   - If NIB absent, use NPWP last6 for business CIF
+  //   - SEQ5 = 5-digit zero-padded sequence
+  // ══════════════════════════════════════════════════════════
+  describe('Q. CIF Number', () => {
+    const CIF_NIK         = `32000099${SUFFIX}`; // 15-digit KTP-like number
+    const CIF_NIK_LAST6   = CIF_NIK.replace(/\D/g, '').slice(-6);
+
+    const CIF_NIB         = `12900099${SUFFIX}`; // NIB
+    const CIF_NIB_LAST6   = CIF_NIB.replace(/\D/g, '').slice(-6);
+
+    const CIF_NPWP_NO_NIB = `98.765.432.1-${SUFFIX.slice(0, 3)}.${SUFFIX.slice(3)}`; // NPWP with dots/dash
+    const CIF_NPWP_DIGITS = CIF_NPWP_NO_NIB.replace(/\D/g, '');
+    const CIF_NPWP_LAST6  = CIF_NPWP_DIGITS.slice(-6);
+
+    let cifIndivAppId: string;
+    let cifBizNibAppId: string;
+    let cifBizNpwpAppId: string;
+    let firstCifNo: string;
+
+    it('Q-01: Individual with KTP → GET person.cif_no matches KSH-I-<NIK_LAST6>-DDDDD', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `CIF Test Individual ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: CIF_NIK,
+          address_identity: 'Jl. CIF No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1985-05-10',
+          nationality: 'ID',
+          phone: `0811111${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'M',
+          signature_uri: 'https://storage.test/cif_sig.png',
+        })
+        .expect(201);
+
+      cifIndivAppId = String(createRes.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${cifIndivAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const cif: string = res.body.person.cif_no;
+      expect(cif).toBeDefined();
+      expect(cif).toMatch(/^KSH-I-\d{6}-\d{5}$/);
+      expect(cif).toContain(`KSH-I-${CIF_NIK_LAST6}-`);
+
+      firstCifNo = cif;
+    });
+
+    it('Q-02: Business with NIB → GET business.cif_no matches KSH-B-<NIB_LAST6>-DDDDD', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: `PT CIF Nib Test ${SUFFIX}`,
+          legal_form: 'PT',
+          incorporation_place: 'Jakarta',
+          incorporation_date: '2020-01-01',
+          business_license_number: `BL_CIF_${SUFFIX}`,
+          nib: CIF_NIB,
+          npwp: `11.111.111.1-${SUFFIX.slice(0, 3)}.${SUFFIX.slice(3)}`,
+          address_line: 'Jl. NIB No. 1',
+          city: 'Jakarta',
+          province: 'DKI Jakarta',
+          postal_code: '10110',
+          business_activity: 'perdagangan',
+          phone: `0222111${SUFFIX}`,
+        })
+        .expect(201);
+
+      cifBizNibAppId = String(createRes.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${cifBizNibAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const cif: string = res.body.business.cif_no;
+      expect(cif).toBeDefined();
+      expect(cif).toMatch(/^KSH-B-\d{6}-\d{5}$/);
+      expect(cif).toContain(`KSH-B-${CIF_NIB_LAST6}-`);
+    });
+
+    it('Q-03: Business without NIB → cif_no uses NPWP last6', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: `PT CIF Npwp Test ${SUFFIX}`,
+          legal_form: 'CV',
+          incorporation_place: 'Bandung',
+          incorporation_date: '2021-06-01',
+          business_license_number: `BL_NPWP_${SUFFIX}`,
+          nib: null,
+          npwp: CIF_NPWP_NO_NIB,
+          address_line: 'Jl. NPWP No. 2',
+          city: 'Bandung',
+          province: 'Jawa Barat',
+          postal_code: '40115',
+          business_activity: 'jasa konsultan',
+          phone: `0333222${SUFFIX}`,
+        })
+        .expect(201);
+
+      cifBizNpwpAppId = String(createRes.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${cifBizNpwpAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const cif: string = res.body.business.cif_no;
+      expect(cif).toBeDefined();
+      expect(cif).toMatch(/^KSH-B-\d{6}-\d{5}$/);
+      expect(cif).toContain(`KSH-B-${CIF_NPWP_LAST6}-`);
+    });
+
+    it('Q-04: Two different individuals → unique CIF numbers', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `CIF Test Individual 2 ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `32000098${SUFFIX}`,
+          address_identity: 'Jl. CIF No. 2, Jakarta',
+          pob: 'Surabaya',
+          dob: '1990-03-15',
+          nationality: 'ID',
+          phone: `0811112${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'F',
+          signature_uri: 'https://storage.test/cif2_sig.png',
+        })
+        .expect(201);
+
+      const appId2 = String(createRes.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId2}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const cif2: string = res.body.person.cif_no;
+      expect(cif2).toBeDefined();
+      expect(cif2).not.toBe(firstCifNo);
+    });
+
+    it('Q-05: CIF tidak berubah setelah submit', async () => {
+      // Add KTP document first so precheck passes
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${cifIndivAppId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/cif_ktp.jpg' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${cifIndivAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${cifIndivAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.person.cif_no).toBe(firstCifNo);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // R. CIF Relationship Type & BO CIF Reuse
+  //
+  // Business rules verified:
+  //   - BO party gets CIF KSH-I-..., cif_relationship_type=BO
+  //   - Individual with same NIK as existing BO reuses that CIF
+  //   - Individual created first → BO added later reuses person CIF
+  //   - persons.cif_relationship_type=OUR_CUSTOMER by default
+  //   - WIC is accepted as optional cif_relationship_type on individual create
+  // ══════════════════════════════════════════════════════════
+  describe('R. CIF Relationship Type & BO CIF Reuse', () => {
+    // Shared NIK between BO and Individual scenarios
+    const BO_FIRST_NIK    = `3299100${SUFFIX}`; // BO added first, individual later
+    const INDIV_FIRST_NIK = `3299200${SUFFIX}`; // individual created first, BO later
+
+    let boFirstBizAppId: string;   // business app where BO is added first
+    let boFirstIndivAppId: string; // individual app created after BO (same NIK)
+    let boFirstCifNo: string;      // CIF assigned to the BO party
+
+    let indivFirstAppId: string;   // individual app created first
+    let indivFirstCifNo: string;   // CIF of that individual
+    let indivFirstBizAppId: string; // business app where same person added as BO after
+
+    // ── Scenario A: BO first, then Individual ──────────────────────────────
+
+    it('R-01: Create business app and add BO party → party gets KSH-I-... CIF', async () => {
+      // Create a fresh business application
+      const bizCreate = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: `PT BO First Test ${SUFFIX}`,
+          legal_form: 'PT',
+          incorporation_place: 'Jakarta',
+          incorporation_date: '2022-01-01',
+          business_license_number: `BL_BOF_${SUFFIX}`,
+          nib: `9000100${SUFFIX}`,
+          npwp: `22.222.222.2-${SUFFIX.slice(0,3)}.${SUFFIX.slice(3)}`,
+          address_line: 'Jl. BO First No. 1',
+          city: 'Jakarta',
+          province: 'DKI Jakarta',
+          postal_code: '10110',
+          business_activity: 'perdagangan',
+          phone: `0444100${SUFFIX}`,
+        })
+        .expect(201);
+
+      boFirstBizAppId = String(bizCreate.body.id);
+
+      // Add BO party
+      const partyRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${boFirstBizAppId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'BO',
+          full_name: `BO Person First ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: BO_FIRST_NIK,
+          dob: '1980-01-01',
+          nationality: 'ID',
+          phone: `0555100${SUFFIX}`,
+        })
+        .expect(201);
+
+      expect(partyRes.body.cif_no).toBeDefined();
+      expect(partyRes.body.cif_no).toMatch(/^KSH-I-\d{6}-\d{5}$/);
+      expect(partyRes.body.cif_relationship_type).toBe('BO');
+
+      boFirstCifNo = partyRes.body.cif_no;
+    });
+
+    it('R-02: GET /parties on the business → BO party has cif_no and cif_relationship_type=BO', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${boFirstBizAppId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const bo = res.body.find((p: any) => p.role === 'BO');
+      expect(bo).toBeDefined();
+      expect(bo.cif_no).toBe(boFirstCifNo);
+      expect(bo.cif_relationship_type).toBe('BO');
+    });
+
+    it('R-03: Create individual application with same NIK as BO → reuses BO CIF', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `BO Person First ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: BO_FIRST_NIK,
+          address_identity: 'Jl. BO NIK No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1980-01-01',
+          nationality: 'ID',
+          phone: `0555101${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'M',
+          signature_uri: 'https://storage.test/bo_first_sig.png',
+        })
+        .expect(201);
+
+      boFirstIndivAppId = String(createRes.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${boFirstIndivAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      // CIF must be the same as the BO party CIF
+      expect(res.body.person.cif_no).toBe(boFirstCifNo);
+      // Relationship type must be OUR_CUSTOMER for individual applications
+      expect(res.body.person.cif_relationship_type).toBe('OUR_CUSTOMER');
+    });
+
+    // ── Scenario B: Individual first, then BO ──────────────────────────────
+
+    it('R-04: Create individual first → person gets CIF + cif_relationship_type OUR_CUSTOMER', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Indiv First ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: INDIV_FIRST_NIK,
+          address_identity: 'Jl. Indiv First No. 2, Jakarta',
+          pob: 'Surabaya',
+          dob: '1985-07-07',
+          nationality: 'ID',
+          phone: `0555200${SUFFIX}`,
+          occupation: 'Pedagang',
+          gender: 'F',
+          signature_uri: 'https://storage.test/indiv_first_sig.png',
+        })
+        .expect(201);
+
+      indivFirstAppId = String(createRes.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivFirstAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.person.cif_no).toBeDefined();
+      expect(res.body.person.cif_no).toMatch(/^KSH-I-\d{6}-\d{5}$/);
+      expect(res.body.person.cif_relationship_type).toBe('OUR_CUSTOMER');
+
+      indivFirstCifNo = res.body.person.cif_no;
+    });
+
+    it('R-05: Add same person as BO to another business → BO.cif_no reuses individual CIF', async () => {
+      const bizCreate = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: `PT Indiv First Biz ${SUFFIX}`,
+          legal_form: 'PT',
+          incorporation_place: 'Surabaya',
+          incorporation_date: '2023-03-03',
+          business_license_number: `BL_IFB_${SUFFIX}`,
+          nib: `9000200${SUFFIX}`,
+          npwp: `33.333.333.3-${SUFFIX.slice(0,3)}.${SUFFIX.slice(3)}`,
+          address_line: 'Jl. Indiv Biz No. 2',
+          city: 'Surabaya',
+          province: 'Jawa Timur',
+          postal_code: '60271',
+          business_activity: 'jasa',
+          phone: `0555201${SUFFIX}`,
+        })
+        .expect(201);
+
+      indivFirstBizAppId = String(bizCreate.body.id);
+
+      const partyRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${indivFirstBizAppId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'BO',
+          full_name: `Indiv First ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: INDIV_FIRST_NIK,
+          dob: '1985-07-07',
+          nationality: 'ID',
+          phone: `0555202${SUFFIX}`,
+        })
+        .expect(201);
+
+      // BO must reuse the individual's existing CIF
+      expect(partyRes.body.cif_no).toBe(indivFirstCifNo);
+      expect(partyRes.body.cif_relationship_type).toBe('BO');
+    });
+
+    it('R-06: GET /applications/:id (business) parties include cif_no + cif_relationship_type', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivFirstBizAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const bo = res.body.parties.find((p: any) => p.role === 'BO');
+      expect(bo).toBeDefined();
+      expect(bo.cif_no).toBe(indivFirstCifNo);
+      expect(bo.cif_relationship_type).toBe('BO');
+    });
+
+    // ── Scenario C: WIC enum value accepted ────────────────────────────────
+
+    it('R-07: Create individual with cif_relationship_type=WIC → accepted (201), person gets WIC type', async () => {
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `WIC Customer ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `3299300${SUFFIX}`,
+          address_identity: 'Jl. WIC No. 3, Bandung',
+          pob: 'Bandung',
+          dob: '1992-11-11',
+          nationality: 'ID',
+          phone: `0555300${SUFFIX}`,
+          occupation: 'Pedagang',
+          gender: 'M',
+          signature_uri: 'https://storage.test/wic_sig.png',
+          cif_relationship_type: 'WIC',
+        })
+        .expect(201);
+
+      const wicAppId = String(createRes.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${wicAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.person.cif_no).toBeDefined();
+      expect(res.body.person.cif_relationship_type).toBe('WIC');
+    });
+
+    it('R-08: non-BO party (DIRECTOR) has cif_relationship_type=null and cif_no=null', async () => {
+      // Add a DIRECTOR to the same business used in R-01 so we have both BO and DIRECTOR
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${boFirstBizAppId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'DIRECTOR',
+          full_name: `Direktur Non BO ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `3299400${SUFFIX}`,
+          dob: '1978-04-04',
+          nationality: 'ID',
+          phone: `0555400${SUFFIX}`,
+        })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${boFirstBizAppId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const director = res.body.find((p: any) => p.role === 'DIRECTOR');
+      expect(director).toBeDefined();
+      expect(director.cif_no).toBeNull();
+      expect(director.cif_relationship_type).toBeNull();
+
+      // BO party in the same list is still correct
+      const bo = res.body.find((p: any) => p.role === 'BO');
+      expect(bo.cif_no).toBe(boFirstCifNo);
+      expect(bo.cif_relationship_type).toBe('BO');
+    });
+  });
 });

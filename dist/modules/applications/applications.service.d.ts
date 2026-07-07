@@ -10,6 +10,10 @@ export interface RiskFactor {
 export declare class ApplicationsService {
     private readonly pool;
     constructor(pool: Pool);
+    private extractLast6Digits;
+    private generateIndividualCif;
+    private generateBusinessCif;
+    private resolveCifForIdentity;
     private recomputeAutoBump;
     createIndividual(dto: any, userId: number, branchId?: number): Promise<any>;
     isOnWatchlist(fullName: string, aliases: string[], identityNumber: string): Promise<boolean>;

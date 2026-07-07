@@ -71,6 +71,58 @@ export interface RiskFactor {
 export class ApplicationsService {
   constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
 
+  // ── CIF helpers ──────────────────────────────────────────────────────────────
+
+  private extractLast6Digits(value: string | null | undefined): string {
+    const digits = (value ?? "").replace(/\D/g, "");
+    if (!digits) return "000000";
+    return digits.slice(-6).padStart(6, "0");
+  }
+
+  private async generateIndividualCif(identityNumber: string | null | undefined): Promise<string> {
+    const last6 = this.extractLast6Digits(identityNumber);
+    const { rows } = await this.pool.query(`SELECT nextval('cif_individual_seq') AS seq`);
+    const seq = String(rows[0].seq).padStart(5, "0");
+    return `KSH-I-${last6}-${seq}`;
+  }
+
+  private async generateBusinessCif(nib: string | null | undefined, npwp: string | null | undefined): Promise<string> {
+    const last6 = this.extractLast6Digits(nib || npwp);
+    const { rows } = await this.pool.query(`SELECT nextval('cif_business_seq') AS seq`);
+    const seq = String(rows[0].seq).padStart(5, "0");
+    return `KSH-B-${last6}-${seq}`;
+  }
+
+  // Look up an existing CIF assigned to any person or BO party with the same
+  // digit-normalized identity number. Prevents duplicate CIF for the same person
+  // across OUR_CUSTOMER and BO contexts.
+  private async resolveCifForIdentity(rawIdentityNumber: string | null | undefined): Promise<string | null> {
+    const norm = (rawIdentityNumber ?? "").replace(/\D/g, "");
+    if (!norm) return null;
+
+    const { rows: pr } = await this.pool.query(
+      `SELECT cif_no FROM persons
+       WHERE regexp_replace(COALESCE(identity_number,''), '[^0-9]', '', 'g') = $1
+         AND cif_no IS NOT NULL
+       LIMIT 1`,
+      [norm],
+    );
+    if (pr[0]?.cif_no) return pr[0].cif_no;
+
+    const { rows: bp } = await this.pool.query(
+      `SELECT bp.cif_no
+       FROM business_parties bp
+       JOIN persons p ON p.id = bp.person_id
+       WHERE regexp_replace(COALESCE(p.identity_number,''), '[^0-9]', '', 'g') = $1
+         AND bp.cif_no IS NOT NULL
+       LIMIT 1`,
+      [norm],
+    );
+    return bp[0]?.cif_no ?? null;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+
   // di src/modules/applications/applications.service.ts (dalam class ApplicationsService)
 
   private async recomputeAutoBump(appId: number, reviewerId?: number) {
@@ -138,11 +190,15 @@ export class ApplicationsService {
 
       // 1) coba cari person existing (khususnya utk KTP)
       let personId: number | null = null;
+      let personHasCif = false;
       const { rows: found } = await client.query(
-        `SELECT id FROM persons WHERE identity_type = $1 AND identity_number = $2 LIMIT 1`,
+        `SELECT id, cif_no FROM persons WHERE identity_type = $1 AND identity_number = $2 LIMIT 1`,
         [dto.identity_type, dto.identity_number],
       );
-      if (found[0]) personId = found[0].id;
+      if (found[0]) {
+        personId = found[0].id;
+        personHasCif = !!found[0].cif_no;
+      }
 
       // 2) kalau belum ada, insert person baru
       if (!personId) {
@@ -168,6 +224,18 @@ export class ApplicationsService {
           ],
         );
         personId = ins.rows[0].id;
+      }
+
+      // 3) Ensure person has a CIF. Covers: new person, and existing person created
+      //    via addParty (e.g. as DIRECTOR) who never received a CIF.
+      if (!personHasCif) {
+        const existingCif = await this.resolveCifForIdentity(dto.identity_number);
+        const cif = existingCif ?? (await this.generateIndividualCif(dto.identity_number));
+        const relType = (dto.cif_relationship_type as string) || "OUR_CUSTOMER";
+        await client.query(
+          `UPDATE persons SET cif_no = $1, cif_relationship_type = $2 WHERE id = $3 AND cif_no IS NULL`,
+          [cif, relType, personId],
+        );
       }
 
       // 3) buat application dengan status DRAFT
@@ -259,6 +327,10 @@ export class ApplicationsService {
       );
       const businessId = q.rows[0].id;
 
+      // Generate CIF — sequence is non-transactional, safe to call outside transaction
+      const cif = await this.generateBusinessCif(dto.nib, dto.npwp);
+      await client.query(`UPDATE business_entities SET cif_no = $1 WHERE id = $2`, [cif, businessId]);
+
       const appRes = await client.query(
         `INSERT INTO applications (type, status, branch_id, created_by, business_id)
          VALUES ('BUSINESS','DRAFT',$1,$2,$3)
@@ -310,7 +382,7 @@ export class ApplicationsService {
         `SELECT id, full_name, identity_type, identity_number,
                 pob, dob, nationality, phone, email, gender,
                 occupation, address_identity, address_residential, signature_uri,
-                pep_self_declared
+                pep_self_declared, cif_no, cif_relationship_type
          FROM persons WHERE id=$1`,
         [app.person_id],
       );
@@ -324,7 +396,7 @@ export class ApplicationsService {
         `SELECT id, legal_name, trade_name, legal_form,
                 incorporation_place, incorporation_date,
                 nib, npwp, address_line, city, province, postal_code,
-                phone, industry_code, business_activity
+                phone, industry_code, business_activity, cif_no
          FROM business_entities WHERE id=$1`,
         [app.business_id],
       );
@@ -343,6 +415,7 @@ export class ApplicationsService {
     if (app.business_id) {
       const { rows } = await this.pool.query(
         `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
+                bp.cif_no, bp.cif_relationship_type,
                 p.id as person_id, p.full_name, p.identity_type, p.identity_number
          FROM business_parties bp
          JOIN persons p ON p.id = bp.person_id
@@ -670,7 +743,17 @@ export class ApplicationsService {
 
     // ── 10. Cap 0..100, tentukan level ──
     score = Math.max(0, Math.min(100, score));
-    const risk_level = levelOf(score);
+
+    // PEP detection forces risk_level HIGH regardless of computed score.
+    // Score is also raised to minimum 70 for consistency with HIGH threshold.
+    const PEP_RISK_CODES = [
+      "WATCHLIST_PEP_CONFIRMED",
+      "WATCHLIST_PEP_CANDIDATE",
+      "INDIVIDUAL_PEP_SELF_DECLARED",
+    ];
+    const hasPep = riskFactors.some((f) => PEP_RISK_CODES.includes(f.code));
+    if (hasPep) score = Math.max(score, 70);
+    const risk_level = hasPep ? "HIGH" : levelOf(score);
 
     // ── 11. Legacy factors (backward compat untuk kolom factors) ──
     const hitSummary = hitRows
@@ -722,11 +805,12 @@ export class ApplicationsService {
 
     const { rows } = await this.pool.query(
       `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
-            p.id AS person_id, p.full_name, p.identity_type, p.identity_number, p.dob, p.nationality
-     FROM business_parties bp
-     JOIN persons p ON p.id = bp.person_id
-     WHERE bp.business_id = $1
-     ORDER BY bp.created_at DESC`,
+              bp.cif_no, bp.cif_relationship_type,
+              p.id AS person_id, p.full_name, p.identity_type, p.identity_number, p.dob, p.nationality
+       FROM business_parties bp
+       JOIN persons p ON p.id = bp.person_id
+       WHERE bp.business_id = $1
+       ORDER BY bp.created_at DESC`,
       [app.business_id],
     );
     return rows;
@@ -744,6 +828,10 @@ export class ApplicationsService {
       throw new BadRequestException(
         "Parties only apply to BUSINESS applications",
       );
+
+    // Normalise KTP number (strip non-digits) consistent with createIndividual
+    if (dto.identity_type === "KTP")
+      dto.identity_number = (dto.identity_number || "").replace(/\D+/g, "").trim();
 
     // cari existing person by (identity_type, identity_number)
     const { rows: existing } = await this.pool.query(
@@ -789,13 +877,29 @@ export class ApplicationsService {
       personId = ins.rows[0].id;
     }
 
+    // CIF resolution for BO parties (and sync to persons so OUR_CUSTOMER apps reuse it)
+    let partyCif: string | null = null;
+    if (dto.role === "BO") {
+      partyCif = await this.resolveCifForIdentity(dto.identity_number);
+      if (!partyCif) {
+        partyCif = await this.generateIndividualCif(dto.identity_number);
+      }
+      // Sync CIF to persons so a future individual application for same NIK reuses it
+      await this.pool.query(
+        `UPDATE persons SET cif_no = COALESCE(cif_no, $1) WHERE id = $2`,
+        [partyCif, personId],
+      );
+    }
+
     // insert ke business_parties (unique per business/person/role)
     const party = await this.pool.query(
-      `INSERT INTO business_parties (business_id, person_id, role, is_active)
-     VALUES ($1,$2,$3,TRUE)
-     ON CONFLICT (business_id, person_id, role) DO UPDATE SET is_active=TRUE
-     RETURNING id, business_id, person_id, role, is_active, created_at`,
-      [app.business_id, personId, dto.role],
+      `INSERT INTO business_parties (business_id, person_id, role, is_active, cif_no, cif_relationship_type)
+     VALUES ($1,$2,$3,TRUE,$4,$5)
+     ON CONFLICT (business_id, person_id, role) DO UPDATE
+       SET is_active = TRUE,
+           cif_no = COALESCE(business_parties.cif_no, EXCLUDED.cif_no)
+     RETURNING id, business_id, person_id, role, is_active, created_at, cif_no, cif_relationship_type`,
+      [app.business_id, personId, dto.role, partyCif, dto.role === "BO" ? "BO" : null],
     );
 
     return party.rows[0];
