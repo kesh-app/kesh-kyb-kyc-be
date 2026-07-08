@@ -581,8 +581,22 @@ export class MonitoringService {
     return { ...c, triggers };
   }
 
-  async getCase(id: number) {
+  async getCase(id: number, user?: AuthedUser) {
     const base = await this.getCaseWithTriggers(id);
+
+    // Director hanya boleh melihat case yang menunggu review Dirut DAN sudah
+    // melalui compliance review yang lengkap.
+    if (user?.role === "Director") {
+      const complianceComplete =
+        !!base.compliance_reviewed_by &&
+        !!base.compliance_reviewed_at &&
+        !!base.compliance_action;
+      if (base.status !== "PENDING_DIRECTOR_REVIEW" || !complianceComplete) {
+        throw new ForbiddenException(
+          "Director hanya dapat melihat case PENDING_DIRECTOR_REVIEW yang sudah lengkap compliance review-nya",
+        );
+      }
+    }
 
     // Ringkasan transfer & application jika ada
     let transfer: any = null;
@@ -611,17 +625,30 @@ export class MonitoringService {
     return { ...base, transfer, application };
   }
 
-  async listCases(query: any) {
+  async listCases(query: any, user?: AuthedUser) {
     const page = Math.max(1, parseInt(query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
     const offset = (page - 1) * limit;
 
+    // Director hanya melihat case yang menunggu review Dirut — abaikan status
+    // apa pun yang dikirim FE/user, paksa PENDING_DIRECTOR_REVIEW.
+    const effectiveStatus =
+      user?.role === "Director" ? "PENDING_DIRECTOR_REVIEW" : query.status;
+
     const where: string[] = ["1=1"];
     const params: any[] = [];
 
-    if (query.status) {
-      params.push(query.status);
+    if (effectiveStatus) {
+      params.push(effectiveStatus);
       where.push(`status = $${params.length}`);
+    }
+
+    // Director hanya melihat PENDING yang benar-benar sudah lengkap compliance
+    // review-nya (guard terhadap case malformed).
+    if (user?.role === "Director") {
+      where.push("compliance_reviewed_by IS NOT NULL");
+      where.push("compliance_reviewed_at IS NOT NULL");
+      where.push("compliance_action IS NOT NULL");
     }
     if (query.case_type) {
       params.push(query.case_type);
@@ -723,6 +750,17 @@ export class MonitoringService {
       );
     }
 
+    // Aksi yang mengarah ke Director / laporan wajib disertai notes non-kosong.
+    const NOTES_REQUIRED_ACTIONS = ["ESCALATE_TO_DIRECTOR", "RECOMMEND_REPORT"];
+    if (
+      NOTES_REQUIRED_ACTIONS.includes(dto.action) &&
+      !(dto.notes && dto.notes.trim().length > 0)
+    ) {
+      throw new BadRequestException(
+        `notes wajib diisi untuk aksi ${dto.action}`,
+      );
+    }
+
     const actorId = resolveUserId(user);
     let status = c.status as string;
     let reportType: string | null = c.report_type;
@@ -805,6 +843,18 @@ export class MonitoringService {
     if (c.status !== "PENDING_DIRECTOR_REVIEW") {
       throw new BadRequestException(
         "Hanya case berstatus PENDING_DIRECTOR_REVIEW yang bisa direview Director",
+      );
+    }
+
+    // Defense-in-depth: PENDING_DIRECTOR_REVIEW hanya sah bila sudah melalui
+    // compliance review yang lengkap. Tolak case malformed.
+    if (
+      !c.compliance_reviewed_by ||
+      !c.compliance_reviewed_at ||
+      !c.compliance_action
+    ) {
+      throw new BadRequestException(
+        "Case belum melalui compliance review yang lengkap (compliance_reviewed_by/at/action wajib terisi)",
       );
     }
 

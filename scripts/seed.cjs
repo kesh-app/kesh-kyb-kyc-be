@@ -72,11 +72,25 @@ function buildPgConfig() {
     ['System Admin', sysEmail, sysHash, 'SystemAdmin', 'MAIN']
   );
 
+  // 🔹 Director default (Direktur Utama) — untuk testing monitoring director-review
+  const directorEmail = 'director@kesh.co.id'.toLowerCase();
+  const directorPassword = process.env.SEED_DIRECTOR_PASSWORD || 'Password123!';
+  const directorHash = await bcrypt.hash(directorPassword, 10);
+  await client.query(
+    `INSERT INTO users(name,email,password_hash,role,branch_id)
+     VALUES($1,$2,$3,$4,(SELECT id FROM branches WHERE code=$5))
+     ON CONFLICT (email) DO NOTHING`,
+    ['Direktur Utama', directorEmail, directorHash, 'Director', 'MAIN']
+  );
+
   await client.end();
   console.log('Seeding complete.');
   console.log('SystemAdmin credentials:');
   console.log(`  email    : ${sysEmail}`);
   console.log(`  password : ${sysPassword}`);
+  console.log('Director credentials:');
+  console.log(`  email    : ${directorEmail}`);
+  console.log(`  password : ${directorPassword}`);
 })().catch(e => {
   console.error('Seed error:', e);
   process.exit(1);

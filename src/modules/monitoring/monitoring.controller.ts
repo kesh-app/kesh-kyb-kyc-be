@@ -26,25 +26,28 @@ export class MonitoringController {
   constructor(private readonly svc: MonitoringService) {}
 
   // ── Read: list cases ──────────────────────────────────────────────────────
-  // ComplianceLead, Director, Auditor (read-only). SystemAdmin via guard.
+  // ComplianceLead, Auditor (read-only), Director. SystemAdmin via guard.
+  // Director hanya melihat case PENDING_DIRECTOR_REVIEW (di-force di service).
   @Get("cases")
   @Roles("ComplianceLead", "Director", "Auditor")
-  async listCases(@Query() query: any) {
-    return this.svc.listCases(query);
+  async listCases(@Req() req: any, @Query() query: any) {
+    return this.svc.listCases(query, req.user);
   }
 
   // ── Read: report queue ────────────────────────────────────────────────────
+  // Report queue adalah tahap setelah persetujuan Dirut → Director TIDAK punya akses.
   @Get("reports")
-  @Roles("ComplianceLead", "Director", "Auditor")
+  @Roles("ComplianceLead", "Auditor")
   async listReports(@Query() query: any) {
     return this.svc.listReports(query);
   }
 
   // ── Read: case detail ─────────────────────────────────────────────────────
+  // Director hanya boleh membaca detail case PENDING_DIRECTOR_REVIEW (dijaga di service).
   @Get("cases/:id")
   @Roles("ComplianceLead", "Director", "Auditor")
-  async getCase(@Param("id", ParseIntPipe) id: number) {
-    return this.svc.getCase(id);
+  async getCase(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
+    return this.svc.getCase(id, req.user);
   }
 
   // ── Manual evaluation of a transfer ───────────────────────────────────────
