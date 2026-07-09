@@ -968,6 +968,12 @@ let ApplicationsService = class ApplicationsService {
         await this.pool.query(`DELETE FROM documents WHERE id=$1`, [docId]);
         return doc;
     }
+    async getApplicationType(appId) {
+        const { rows } = await this.pool.query(`SELECT type FROM applications WHERE id=$1`, [appId]);
+        if (!rows[0])
+            throw new common_1.NotFoundException('Application not found');
+        return rows[0].type;
+    }
     // ──────────────────────────────────────────────────────────────────────────
     // EDD — Enhanced Due Diligence (Lampiran 2 Formulir EDD APU PPT PPPSPM)
     // ──────────────────────────────────────────────────────────────────────────

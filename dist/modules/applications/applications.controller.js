@@ -67,6 +67,12 @@ let ApplicationsController = class ApplicationsController {
     async listDocs(appId) {
         return this.svc.listDocuments(appId);
     }
+    async getDocumentUrl(appId, docId) {
+        const doc = await this.svc.getDocument(appId, docId);
+        const key = doc.extracted_json?.object_key ?? doc.file_uri;
+        const signedUrl = await this.uploads.getSignedUrl(key);
+        return { signed_url: signedUrl, expires_in: 300 };
+    }
     async getDoc(appId, docId) {
         return this.svc.getDocument(appId, docId);
     }
@@ -74,18 +80,39 @@ let ApplicationsController = class ApplicationsController {
         if (!file)
             throw new common_1.BadRequestException("No file uploaded");
         const ext = mimeToExt(file.mimetype);
-        const { url, key } = await this.uploads.uploadBuffer(file.buffer, file.mimetype, ext);
+        const inferredDocType = docType || inferDocType(file.originalname);
+        let objectKey;
+        if (this.uploads.isObs()) {
+            const appType = await this.svc.getApplicationType(appId);
+            const prefix = appType === "BUSINESS" ? "kyb" : "kyc";
+            const safeFilename = sanitizeFilename(file.originalname);
+            objectKey = `${prefix}/${appId}/${inferredDocType}/${Date.now()}-${safeFilename}.${ext}`;
+        }
+        let uploadResult;
+        try {
+            uploadResult = await this.uploads.uploadBuffer(file.buffer, file.mimetype, ext, objectKey);
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new common_1.InternalServerErrorException(`File storage failed: ${msg}`);
+        }
         const saved = await this.svc.addDocument(appId, {
-            doc_type: docType || inferDocType(file.originalname),
-            file_uri: url,
+            doc_type: inferredDocType,
+            // OBS: store the object key; LOCAL: store the full public URL
+            file_uri: uploadResult.url,
             extracted_json: {
-                object_key: key,
+                object_key: uploadResult.key,
                 mime: file.mimetype,
                 size: file.size ?? null,
                 original_name: file.originalname ?? null,
             },
         });
-        return { ...saved, file_url: url };
+        // For OBS: return a fresh signed URL valid for 5 min.
+        // For LOCAL: return the direct static URL.
+        const fileUrl = this.uploads.isObs()
+            ? await this.uploads.getSignedUrl(uploadResult.key)
+            : uploadResult.url;
+        return { ...saved, file_url: fileUrl };
     }
     // ── EDD endpoints ────────────────────────────────────────────────────────
     async getEdd(appId) {
@@ -105,7 +132,7 @@ let ApplicationsController = class ApplicationsController {
         const doc = await this.svc.deleteDocument(appId, docId);
         const key = doc?.extracted_json?.object_key;
         if (key)
-            await this.uploads.deleteObject?.(key);
+            await this.uploads.deleteObject(key);
         return { ok: true, deleted_id: docId };
     }
 };
@@ -199,6 +226,14 @@ __decorate([
     __metadata("design:paramtypes", [Number]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "listDocs", null);
+__decorate([
+    (0, common_1.Get)(":id/documents/:docId/url"),
+    __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Param)("docId", common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Number]),
+    __metadata("design:returntype", Promise)
+], ApplicationsController.prototype, "getDocumentUrl", null);
 __decorate([
     (0, common_1.Get)(":id/documents/:docId"),
     __param(0, (0, common_1.Param)("id", common_1.ParseIntPipe)),
@@ -307,5 +342,11 @@ function inferDocType(name) {
     if (n.includes("NPWP"))
         return "NPWP_BADAN";
     return "OTHER";
+}
+function sanitizeFilename(name) {
+    return name
+        .replace(/[^a-zA-Z0-9._-]/g, "_")
+        .replace(/_{2,}/g, "_")
+        .substring(0, 100);
 }
 //# sourceMappingURL=applications.controller.js.map

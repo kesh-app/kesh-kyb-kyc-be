@@ -41,6 +41,20 @@ async function bootstrap() {
   const uploadDir = path.resolve(process.cwd(), process.env.UPLOAD_DIR || 'uploads');
   app.use('/uploads', express.static(uploadDir));
 
+  // Warn early if OBS is configured but env vars are missing
+  if ((process.env.STORAGE_PROVIDER || '').toUpperCase() === 'HUAWEI_OBS') {
+    const obsRequired = [
+      'OBS_BUCKET_NAME', 'OBS_REGION', 'OBS_ENDPOINT',
+      'HUAWEI_OBS_ACCESS_KEY_ID', 'HUAWEI_OBS_SECRET_ACCESS_KEY',
+    ];
+    const missing = obsRequired.filter((k) => !process.env[k]);
+    if (missing.length) {
+      console.error(
+        `[STORAGE] STORAGE_PROVIDER=HUAWEI_OBS but missing: ${missing.join(', ')} — will fall back to LOCAL`,
+      );
+    }
+  }
+
   const port = Number(process.env.API_PORT) || 4000;
   await app.listen(port);
   console.log(`API running at http://localhost:${port}/api`);

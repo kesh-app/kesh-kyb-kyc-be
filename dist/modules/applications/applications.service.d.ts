@@ -96,6 +96,7 @@ export declare class ApplicationsService {
     listWithRisk(limit?: number, offset?: number): Promise<any[]>;
     getDocument(appId: number, docId: number): Promise<any>;
     deleteDocument(appId: number, docId: number): Promise<any>;
+    getApplicationType(appId: number): Promise<string>;
     getEdd(appId: number): Promise<any>;
     saveEdd(appId: number, body: any, userId: number): Promise<any>;
     private validateEddCompletion;

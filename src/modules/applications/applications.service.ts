@@ -1290,6 +1290,15 @@ export class ApplicationsService {
     return doc;
   }
 
+  async getApplicationType(appId: number): Promise<string> {
+    const { rows } = await this.pool.query(
+      `SELECT type FROM applications WHERE id=$1`,
+      [appId],
+    );
+    if (!rows[0]) throw new NotFoundException('Application not found');
+    return rows[0].type as string;
+  }
+
   // ──────────────────────────────────────────────────────────────────────────
   // EDD — Enhanced Due Diligence (Lampiran 2 Formulir EDD APU PPT PPPSPM)
   // ──────────────────────────────────────────────────────────────────────────

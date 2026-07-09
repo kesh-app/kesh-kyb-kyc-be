@@ -38,6 +38,7 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var UploadsService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.UploadsService = void 0;
 const common_1 = require("@nestjs/common");
@@ -45,13 +46,68 @@ const fs = __importStar(require("fs/promises"));
 const fssync = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto_1 = require("crypto");
-let UploadsService = class UploadsService {
+const obs_storage_1 = require("./obs.storage");
+const OBS_REQUIRED_VARS = [
+    'OBS_BUCKET_NAME',
+    'OBS_REGION',
+    'OBS_ENDPOINT',
+    'HUAWEI_OBS_ACCESS_KEY_ID',
+    'HUAWEI_OBS_SECRET_ACCESS_KEY',
+];
+let UploadsService = UploadsService_1 = class UploadsService {
     constructor() {
+        this.logger = new common_1.Logger(UploadsService_1.name);
         this.baseUrl = process.env.BASE_URL || 'http://localhost:4000';
         this.uploadDir = process.env.UPLOAD_DIR || 'uploads';
+        this.provider = (process.env.STORAGE_PROVIDER || 'LOCAL').toUpperCase();
+        this.obs = null;
     }
-    // Simpan file ke folder lokal dan kembalikan URL + object_key
-    async uploadBuffer(buf, mime, ext = '') {
+    onModuleInit() {
+        if (this.provider === 'HUAWEI_OBS') {
+            const missing = OBS_REQUIRED_VARS.filter((k) => !process.env[k]);
+            if (missing.length) {
+                this.logger.error(`STORAGE_PROVIDER=HUAWEI_OBS but missing env vars: ${missing.join(', ')}. ` +
+                    `Falling back to LOCAL — files will NOT be stored in OBS.`);
+                this.provider = 'LOCAL';
+            }
+            else {
+                this.obs = new obs_storage_1.ObsStorage();
+                this.logger.log(`Storage: Huawei OBS — bucket=${process.env.OBS_BUCKET_NAME} endpoint=${process.env.OBS_ENDPOINT}`);
+            }
+        }
+        else {
+            this.logger.log(`Storage: LOCAL — dir=${path.resolve(this.uploadDir)}`);
+        }
+    }
+    isObs() {
+        return this.provider === 'HUAWEI_OBS' && this.obs !== null;
+    }
+    async uploadBuffer(buf, mime, ext = '', objectKey) {
+        if (this.isObs()) {
+            return this.obs.uploadBuffer(buf, mime, ext, objectKey);
+        }
+        return this.uploadLocal(buf, mime, ext);
+    }
+    async deleteObject(key) {
+        if (this.isObs()) {
+            return this.obs.deleteObject(key);
+        }
+        return this.deleteLocal(key);
+    }
+    /**
+     * Returns a URL to access the stored file.
+     * OBS: generates a short-lived signed URL (private bucket).
+     * LOCAL: returns the public static URL.
+     */
+    async getSignedUrl(key, expiresSeconds = 300) {
+        if (this.isObs()) {
+            return this.obs.getSignedUrl(key, expiresSeconds);
+        }
+        if (key.startsWith('http://') || key.startsWith('https://'))
+            return key;
+        return `${this.baseUrl}/${key}`;
+    }
+    async uploadLocal(buf, mime, ext = '') {
         const now = new Date();
         const year = String(now.getUTCFullYear());
         const month = String(now.getUTCMonth() + 1).padStart(2, '0');
@@ -62,15 +118,11 @@ let UploadsService = class UploadsService {
         const filename = `${(0, crypto_1.randomUUID)()}${ext ? '.' + ext : ''}`;
         const filePath = path.join(dir, filename);
         await fs.writeFile(filePath, buf);
-        // object_key relatif yang konsisten di semua driver (awali dengan "uploads/")
         const key = ['uploads', year, month, filename].join('/');
-        // URL publik untuk disimpan di DB (dev/local served lewat /uploads)
         const url = `${this.baseUrl}/${key}`;
         return { key, url, meta: { mime } };
     }
-    // Hapus file fisik berdasarkan object_key
-    async deleteObject(key) {
-        // key format: "uploads/YYYY/MM/uuid.ext"
+    async deleteLocal(key) {
         const localBase = this.uploadDir.replace(/\\/g, '/').replace(/^\.?\//, '');
         const rel = key.replace(/^uploads\//, `${localBase}/`);
         const filePath = path.resolve(process.cwd(), rel);
@@ -78,12 +130,12 @@ let UploadsService = class UploadsService {
             await fs.unlink(filePath);
         }
         catch {
-            // abaikan jika file tidak ada
+            // ignore if file doesn't exist
         }
     }
 };
 exports.UploadsService = UploadsService;
-exports.UploadsService = UploadsService = __decorate([
+exports.UploadsService = UploadsService = UploadsService_1 = __decorate([
     (0, common_1.Injectable)()
 ], UploadsService);
 //# sourceMappingURL=uploads.service.js.map

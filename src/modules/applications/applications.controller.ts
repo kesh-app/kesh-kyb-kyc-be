@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  InternalServerErrorException,
   Param,
   ParseIntPipe,
   Patch,
@@ -127,6 +128,18 @@ export class ApplicationsController {
     return this.svc.listDocuments(appId);
   }
 
+  @Get(":id/documents/:docId/url")
+  async getDocumentUrl(
+    @Param("id", ParseIntPipe) appId: number,
+    @Param("docId", ParseIntPipe) docId: number,
+  ) {
+    const doc = await this.svc.getDocument(appId, docId);
+    const key =
+      (doc.extracted_json?.object_key as string | undefined) ?? doc.file_uri;
+    const signedUrl = await this.uploads.getSignedUrl(key);
+    return { signed_url: signedUrl, expires_in: 300 };
+  }
+
   @Get(":id/documents/:docId")
   async getDoc(
     @Param("id", ParseIntPipe) appId: number,
@@ -159,24 +172,48 @@ export class ApplicationsController {
     if (!file) throw new BadRequestException("No file uploaded");
 
     const ext = mimeToExt(file.mimetype);
-    const { url, key } = await this.uploads.uploadBuffer(
-      file.buffer,
-      file.mimetype,
-      ext
-    );
+    const inferredDocType = docType || inferDocType(file.originalname);
+
+    let objectKey: string | undefined;
+    if (this.uploads.isObs()) {
+      const appType = await this.svc.getApplicationType(appId);
+      const prefix = appType === "BUSINESS" ? "kyb" : "kyc";
+      const safeFilename = sanitizeFilename(file.originalname);
+      objectKey = `${prefix}/${appId}/${inferredDocType}/${Date.now()}-${safeFilename}.${ext}`;
+    }
+
+    let uploadResult: { key: string; url: string };
+    try {
+      uploadResult = await this.uploads.uploadBuffer(
+        file.buffer,
+        file.mimetype,
+        ext,
+        objectKey,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new InternalServerErrorException(`File storage failed: ${msg}`);
+    }
 
     const saved = await this.svc.addDocument(appId, {
-      doc_type: docType || inferDocType(file.originalname),
-      file_uri: url,
+      doc_type: inferredDocType,
+      // OBS: store the object key; LOCAL: store the full public URL
+      file_uri: uploadResult.url,
       extracted_json: {
-        object_key: key,
+        object_key: uploadResult.key,
         mime: file.mimetype,
         size: file.size ?? null,
         original_name: file.originalname ?? null,
       },
     });
 
-    return { ...saved, file_url: url };
+    // For OBS: return a fresh signed URL valid for 5 min.
+    // For LOCAL: return the direct static URL.
+    const fileUrl = this.uploads.isObs()
+      ? await this.uploads.getSignedUrl(uploadResult.key)
+      : uploadResult.url;
+
+    return { ...saved, file_url: fileUrl };
   }
 
   // ── EDD endpoints ────────────────────────────────────────────────────────
@@ -223,7 +260,7 @@ export class ApplicationsController {
   ) {
     const doc = await this.svc.deleteDocument(appId, docId);
     const key = doc?.extracted_json?.object_key as string | undefined;
-    if (key) await this.uploads.deleteObject?.(key);
+    if (key) await this.uploads.deleteObject(key);
     return { ok: true, deleted_id: docId };
   }
 }
@@ -244,4 +281,11 @@ function inferDocType(name?: string) {
   if (n.includes("NIB") || n.includes("SIUP")) return "NIB_SIUP";
   if (n.includes("NPWP")) return "NPWP_BADAN";
   return "OTHER";
+}
+
+function sanitizeFilename(name: string): string {
+  return name
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/_{2,}/g, "_")
+    .substring(0, 100);
 }

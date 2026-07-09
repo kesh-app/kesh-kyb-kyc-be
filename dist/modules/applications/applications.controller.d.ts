@@ -35,6 +35,10 @@ export declare class ApplicationsController {
         risk: any;
     }>;
     listDocs(appId: number): Promise<any[]>;
+    getDocumentUrl(appId: number, docId: number): Promise<{
+        signed_url: string;
+        expires_in: number;
+    }>;
     getDoc(appId: number, docId: number): Promise<any>;
     uploadDocument(appId: number, file: Express.Multer.File, docType?: string): Promise<any>;
     getEdd(appId: number): Promise<any>;
