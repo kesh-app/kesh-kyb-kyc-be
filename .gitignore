@@ -21,7 +21,8 @@ coverage/
 !.env.sample
 
 # Runtime uploads / local storage
-uploads/
+# NOTE: anchored to repo root so it does NOT match src/modules/uploads/
+/uploads/
 tmp/
 temp/
 logs/
