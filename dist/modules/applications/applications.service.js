@@ -11,6 +11,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
+var ApplicationsService_1;
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ApplicationsService = void 0;
 const common_1 = require("@nestjs/common");
@@ -162,9 +163,10 @@ function levelOf(score) {
         return "MEDIUM";
     return "LOW";
 }
-let ApplicationsService = class ApplicationsService {
+let ApplicationsService = ApplicationsService_1 = class ApplicationsService {
     constructor(pool) {
         this.pool = pool;
+        this.logger = new common_1.Logger(ApplicationsService_1.name);
     }
     // ── CIF helpers ──────────────────────────────────────────────────────────────
     extractLast6Digits(value) {
@@ -376,8 +378,10 @@ let ApplicationsService = class ApplicationsService {
         const { rows: apps } = await this.pool.query(`SELECT id FROM applications WHERE id=$1`, [appId]);
         if (!apps[0])
             throw new common_1.NotFoundException("Application not found");
+        // Dokumen tidak punya workflow review — record hanya dibuat setelah file
+        // berhasil di-upload ke storage, jadi status langsung UPLOADED (sukses).
         const res = await this.pool.query(`INSERT INTO documents (application_id, doc_type, file_uri, status, extracted_json)
-       VALUES ($1,$2,$3,'PENDING',$4)
+       VALUES ($1,$2,$3,'UPLOADED',$4)
        RETURNING id, application_id, doc_type, file_uri, status, extracted_json, created_at`, [appId, dto.doc_type, dto.file_uri, dto.extracted_json || null]);
         return res.rows[0];
     }
@@ -407,7 +411,7 @@ let ApplicationsService = class ApplicationsService {
             business = biz[0] ?? null;
         }
         // documents
-        const { rows: docs } = await this.pool.query(`SELECT id, doc_type, file_uri, status, extracted_json, created_at
+        const { rows: docs } = await this.pool.query(`SELECT id, application_id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents WHERE application_id=$1 ORDER BY created_at DESC`, [appId]);
         // parties (BUSINESS only)
         let parties = [];
@@ -439,8 +443,9 @@ let ApplicationsService = class ApplicationsService {
         const app = rows[0];
         if (!app)
             throw new common_1.NotFoundException("Application not found");
-        // ambil dokumen
-        const { rows: docs } = await this.pool.query(`SELECT doc_type FROM documents WHERE application_id=$1`, [appId]);
+        // ambil dokumen — dokumen wajib dianggap valid jika record ada & file
+        // sukses ter-upload (status <> 'FAILED'). Tidak ada review/approval dokumen.
+        const { rows: docs } = await this.pool.query(`SELECT doc_type FROM documents WHERE application_id=$1 AND status <> 'FAILED'`, [appId]);
         const docSet = new Set(docs.map((d) => d.doc_type));
         if (app.type === "INDIVIDUAL") {
             const { rows: pr } = await this.pool.query(`SELECT signature_uri FROM persons WHERE id=$1`, [app.person_id]);
@@ -900,7 +905,7 @@ let ApplicationsService = class ApplicationsService {
         const { rows: apps } = await this.pool.query(`SELECT id FROM applications WHERE id=$1`, [appId]);
         if (!apps[0])
             throw new common_1.NotFoundException("Application not found");
-        const { rows } = await this.pool.query(`SELECT id, doc_type, file_uri, status, extracted_json, created_at
+        const { rows } = await this.pool.query(`SELECT id, application_id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents
        WHERE application_id=$1
        ORDER BY created_at DESC`, [appId]);
@@ -953,14 +958,19 @@ let ApplicationsService = class ApplicationsService {
         return rows;
     }
     async getDocument(appId, docId) {
-        const { rows } = await this.pool.query(`SELECT id, application_id, doc_type, file_uri, status, extracted_json
+        const { rows } = await this.pool.query(`SELECT id, application_id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents
        WHERE id=$1`, [docId]);
         const doc = rows[0];
         if (!doc)
             throw new common_1.NotFoundException("Document not found");
-        if (doc.application_id !== appId)
+        // NOTE: pg returns BIGINT columns as JS strings, while appId comes from
+        // ParseIntPipe as a number. Compare as strings to avoid a spurious
+        // "does not belong" mismatch (e.g. "5" !== 5).
+        if (String(doc.application_id) !== String(appId)) {
+            this.logger.warn(`Document ownership mismatch: docId=${docId} requested appId=${appId} but document.application_id=${doc.application_id}`);
             throw new common_1.ForbiddenException("Document does not belong to this application");
+        }
         return doc;
     }
     async deleteDocument(appId, docId) {
@@ -1140,7 +1150,7 @@ let ApplicationsService = class ApplicationsService {
     }
 };
 exports.ApplicationsService = ApplicationsService;
-exports.ApplicationsService = ApplicationsService = __decorate([
+exports.ApplicationsService = ApplicationsService = ApplicationsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, common_1.Inject)("PG_POOL")),
     __metadata("design:paramtypes", [pg_1.Pool])

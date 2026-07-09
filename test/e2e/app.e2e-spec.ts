@@ -334,7 +334,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       indivAppIdOk = String(res.body.id);
     });
 
-    it('D-02: POST /documents (KTP) → 201, status PENDING', async () => {
+    it('D-02: POST /documents (KTP) → 201, status UPLOADED', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/applications/${indivAppIdOk}/documents`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -345,7 +345,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
 
       expect(res.body.doc_type).toBe('KTP');
-      expect(res.body.status).toBe('PENDING');
+      expect(res.body.status).toBe('UPLOADED');
       expect(String(res.body.application_id)).toBe(String(indivAppIdOk));
     });
 
@@ -385,6 +385,134 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   });
 
   // ══════════════════════════════════════════════════════════
+  // D2. DOCUMENT LIFECYCLE — delete & signed URL ownership check
+  //     Regression: pg mengembalikan BIGINT application_id sebagai
+  //     string, ParseIntPipe memberi number → perbandingan strict
+  //     "5" !== 5 selalu true → "Document does not belong" palsu.
+  // ══════════════════════════════════════════════════════════
+  describe('D2. Document lifecycle — delete & signed URL', () => {
+    let ownerAppId: string; // application pemilik dokumen
+    let otherAppId: string; // application lain (bukan pemilik)
+    let docId: string;
+
+    beforeAll(async () => {
+      const mkApp = async (suffix: string) => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({
+            full_name: `Doc Owner ${suffix}`,
+            identity_type: 'KTP',
+            identity_number: `319900${suffix}`,
+            address_identity: 'Jl. Dokumen No. 1, Jakarta',
+            pob: 'Jakarta',
+            dob: '1990-01-01',
+            nationality: 'ID',
+            phone: `0812${suffix}`,
+            occupation: 'Karyawan Swasta',
+            gender: 'M',
+            email: `docowner${suffix}@test.com`,
+            signature_uri: 'https://storage.test/signatures/sig.png',
+          })
+          .expect(201);
+        return String(res.body.id);
+      };
+      ownerAppId = await mkApp(`${SUFFIX}A`);
+      otherAppId = await mkApp(`${SUFFIX}B`);
+    });
+
+    it('D2-01: POST /documents → 201, mengembalikan document.id DB + application_id benar', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${ownerAppId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          doc_type: 'KTP',
+          file_uri: 'https://storage.test/docs/ktp-lifecycle.jpg',
+        })
+        .expect(201);
+
+      expect(res.body.id).toBeDefined();
+      // id adalah document DB id, bukan filename/object key
+      expect(String(res.body.id)).toMatch(/^\d+$/);
+      expect(String(res.body.application_id)).toBe(String(ownerAppId));
+      expect(res.body.status).toBe('UPLOADED');
+      docId = String(res.body.id);
+    });
+
+    it('D2-02: GET /documents/:docId/url dengan appId benar → 200 { signed_url, expires_in: 300 }', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${ownerAppId}/documents/${docId}/url`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(typeof res.body.signed_url).toBe('string');
+      expect(res.body.signed_url.length).toBeGreaterThan(0);
+      expect(res.body.expires_in).toBe(300);
+    });
+
+    it('D2-03: GET /documents/:docId/url dengan appId salah → 403 "does not belong"', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${otherAppId}/documents/${docId}/url`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(403);
+
+      expect(res.body.message).toContain('does not belong');
+    });
+
+    it('D2-04: DELETE /documents/:docId dengan appId salah → 403 "does not belong"', async () => {
+      const res = await request(app.getHttpServer())
+        .delete(`${BASE}/applications/${otherAppId}/documents/${docId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(403);
+
+      expect(res.body.message).toContain('does not belong');
+    });
+
+    it('D2-05: DELETE /documents/:docId dengan appId benar → 200 ok (regression fix)', async () => {
+      const res = await request(app.getHttpServer())
+        .delete(`${BASE}/applications/${ownerAppId}/documents/${docId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.ok).toBe(true);
+      expect(String(res.body.deleted_id)).toBe(String(docId));
+
+      // Verifikasi benar-benar terhapus dari DB
+      const { rows } = await pgPool.query(
+        `SELECT id FROM documents WHERE id=$1`,
+        [docId],
+      );
+      expect(rows.length).toBe(0);
+    });
+
+    it('D2-06: legacy PENDING dengan file_uri → backfill jadi UPLOADED', async () => {
+      // Simulasikan record legacy status PENDING (masih diizinkan constraint),
+      // lalu jalankan statement backfill migrasi 0028 → harus jadi UPLOADED.
+      const ins = await pgPool.query(
+        `INSERT INTO documents (application_id, doc_type, file_uri, status)
+         VALUES ($1, 'KTP', 'https://storage.test/legacy-ktp.jpg', 'PENDING')
+         RETURNING id`,
+        [ownerAppId],
+      );
+      const legacyId = String(ins.rows[0].id);
+
+      await pgPool.query(
+        `UPDATE documents SET status='UPLOADED'
+         WHERE status='PENDING' AND file_uri IS NOT NULL AND id=$1`,
+        [legacyId],
+      );
+
+      const { rows } = await pgPool.query(
+        `SELECT status FROM documents WHERE id=$1`,
+        [legacyId],
+      );
+      expect(rows[0].status).toBe('UPLOADED');
+
+      await pgPool.query(`DELETE FROM documents WHERE id=$1`, [legacyId]);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
   // E. DECISION — hanya setelah SUBMITTED / IN_REVIEW
   // ══════════════════════════════════════════════════════════
   describe('E. Decision flow', () => {
@@ -406,6 +534,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
 
       expect(res.body.status).toBe('APPROVED');
+    });
+
+    it('E-02b: Application APPROVED tidak mengubah status dokumen (tetap UPLOADED)', async () => {
+      // Dokumen tidak punya review/approval — approve application tidak boleh
+      // memutasi dokumen menjadi APPROVED/VERIFIED.
+      const { rows } = await pgPool.query(
+        `SELECT status FROM documents WHERE application_id=$1`,
+        [indivAppIdOk],
+      );
+      expect(rows.length).toBeGreaterThan(0);
+      for (const r of rows) {
+        expect(r.status).toBe('UPLOADED');
+      }
     });
 
     it('E-03: Decision REJECTED dengan reason → 200 REJECTED (app terpisah)', async () => {

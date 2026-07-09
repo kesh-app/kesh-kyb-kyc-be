@@ -1,6 +1,7 @@
 import {
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   ForbiddenException,
   BadRequestException,
@@ -174,6 +175,8 @@ export interface RiskFactor {
 
 @Injectable()
 export class ApplicationsService {
+  private readonly logger = new Logger(ApplicationsService.name);
+
   constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
 
   // ── CIF helpers ──────────────────────────────────────────────────────────────
@@ -463,9 +466,11 @@ export class ApplicationsService {
     );
     if (!apps[0]) throw new NotFoundException("Application not found");
 
+    // Dokumen tidak punya workflow review — record hanya dibuat setelah file
+    // berhasil di-upload ke storage, jadi status langsung UPLOADED (sukses).
     const res = await this.pool.query(
       `INSERT INTO documents (application_id, doc_type, file_uri, status, extracted_json)
-       VALUES ($1,$2,$3,'PENDING',$4)
+       VALUES ($1,$2,$3,'UPLOADED',$4)
        RETURNING id, application_id, doc_type, file_uri, status, extracted_json, created_at`,
       [appId, dto.doc_type, dto.file_uri, dto.extracted_json || null],
     );
@@ -510,7 +515,7 @@ export class ApplicationsService {
 
     // documents
     const { rows: docs } = await this.pool.query(
-      `SELECT id, doc_type, file_uri, status, extracted_json, created_at
+      `SELECT id, application_id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents WHERE application_id=$1 ORDER BY created_at DESC`,
       [appId],
     );
@@ -561,9 +566,10 @@ export class ApplicationsService {
     const app = rows[0];
     if (!app) throw new NotFoundException("Application not found");
 
-    // ambil dokumen
+    // ambil dokumen — dokumen wajib dianggap valid jika record ada & file
+    // sukses ter-upload (status <> 'FAILED'). Tidak ada review/approval dokumen.
     const { rows: docs } = await this.pool.query(
-      `SELECT doc_type FROM documents WHERE application_id=$1`,
+      `SELECT doc_type FROM documents WHERE application_id=$1 AND status <> 'FAILED'`,
       [appId],
     );
     const docSet = new Set(docs.map((d) => d.doc_type));
@@ -1179,7 +1185,7 @@ export class ApplicationsService {
     if (!apps[0]) throw new NotFoundException("Application not found");
 
     const { rows } = await this.pool.query(
-      `SELECT id, doc_type, file_uri, status, extracted_json, created_at
+      `SELECT id, application_id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents
        WHERE application_id=$1
        ORDER BY created_at DESC`,
@@ -1270,17 +1276,24 @@ export class ApplicationsService {
 
   async getDocument(appId: number, docId: number) {
     const { rows } = await this.pool.query(
-      `SELECT id, application_id, doc_type, file_uri, status, extracted_json
+      `SELECT id, application_id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents
        WHERE id=$1`,
       [docId],
     );
     const doc = rows[0];
     if (!doc) throw new NotFoundException("Document not found");
-    if (doc.application_id !== appId)
+    // NOTE: pg returns BIGINT columns as JS strings, while appId comes from
+    // ParseIntPipe as a number. Compare as strings to avoid a spurious
+    // "does not belong" mismatch (e.g. "5" !== 5).
+    if (String(doc.application_id) !== String(appId)) {
+      this.logger.warn(
+        `Document ownership mismatch: docId=${docId} requested appId=${appId} but document.application_id=${doc.application_id}`,
+      );
       throw new ForbiddenException(
         "Document does not belong to this application",
       );
+    }
     return doc;
   }
 

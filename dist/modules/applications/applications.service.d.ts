@@ -10,6 +10,7 @@ export interface RiskFactor {
 }
 export declare class ApplicationsService {
     private readonly pool;
+    private readonly logger;
     constructor(pool: Pool);
     private extractLast6Digits;
     private generateIndividualCif;
