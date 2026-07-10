@@ -179,13 +179,13 @@ let ApplicationsService = ApplicationsService_1 = class ApplicationsService {
         const last6 = this.extractLast6Digits(identityNumber);
         const { rows } = await this.pool.query(`SELECT nextval('cif_individual_seq') AS seq`);
         const seq = String(rows[0].seq).padStart(5, "0");
-        return `KSH-I-${last6}-${seq}`;
+        return `KSHI${last6}${seq}`;
     }
     async generateBusinessCif(nib, npwp) {
         const last6 = this.extractLast6Digits(nib || npwp);
         const { rows } = await this.pool.query(`SELECT nextval('cif_business_seq') AS seq`);
         const seq = String(rows[0].seq).padStart(5, "0");
-        return `KSH-B-${last6}-${seq}`;
+        return `KSHB${last6}${seq}`;
     }
     // Look up an existing CIF assigned to any person or BO party with the same
     // digit-normalized identity number. Prevents duplicate CIF for the same person

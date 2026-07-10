@@ -24,5 +24,15 @@ export declare class TransfersService {
     list(user: AuthedUser, status?: string): Promise<any[]>;
     getById(id: number, user: AuthedUser): Promise<any>;
     snapPreview(id: number, user: AuthedUser): Promise<Record<string, any>>;
+    searchSenders(q?: string, page?: number, limit?: number): Promise<{
+        data: any[];
+        page: number;
+        limit: number;
+        total: any;
+    }>;
+    getBanks(): {
+        code: string;
+        name: string;
+    }[];
 }
 export {};

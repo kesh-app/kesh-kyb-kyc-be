@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import {
   IsDateString,
   IsEmail,
@@ -6,12 +7,16 @@ import {
   IsOptional,
   IsString,
   Length,
+  Matches,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
 
 export class CreateTransferDto {
-  @IsInt() @Min(1)
+  @IsInt()
+  @Min(10_000, { message: 'amount minimal Rp10.000' })
+  @Max(500_000_000, { message: 'amount maksimal Rp500.000.000' })
   amount!: number;
 
   @IsString()
@@ -23,6 +28,11 @@ export class CreateTransferDto {
   @IsInt()
   sender_application_id!: number;
 
+  // Trim whitespace sebelum validasi; hanya digit yang diizinkan.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Matches(/^\d+$/, {
+    message: 'beneficiaryAccountNumber harus berisi digit saja (tanpa spasi, huruf, atau tanda baca)',
+  })
   @IsString()
   beneficiaryAccountNumber!: string;
 
@@ -83,6 +93,13 @@ export class CreateTransferDto {
 
   @IsOptional() @IsObject()
   additional_info?: Record<string, unknown>;
+
+  // ── Req F — sumber dana dan tujuan transaksi ────────────────────────
+  @IsOptional() @IsString() @MaxLength(255)
+  source_of_funds?: string;
+
+  @IsOptional() @IsString() @MaxLength(255)
+  transaction_purpose?: string;
 }
 
 export class UpdateTransferDto extends CreateTransferDto {}

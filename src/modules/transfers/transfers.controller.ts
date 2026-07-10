@@ -81,6 +81,24 @@ export class TransfersController {
     return this.svc.list(req.user, status);
   }
 
+  // BANK CATALOG — static list for FE dropdown
+  @Get("banks")
+  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin")
+  getBanks() {
+    return this.svc.getBanks();
+  }
+
+  // SENDER SEARCH — cari aplikasi APPROVED sebagai calon pengirim transfer
+  @Get("senders/search")
+  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin")
+  async searchSenders(
+    @Query("q") q = "",
+    @Query("page") page = "1",
+    @Query("limit") limit = "20",
+  ) {
+    return this.svc.searchSenders(q, Number(page), Number(limit));
+  }
+
   // SNAP PREVIEW — pure mapping of stored data, NO external bank/API call
   @Get(":id/snap-preview")
   @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")

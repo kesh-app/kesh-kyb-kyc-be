@@ -602,10 +602,17 @@ export class MonitoringService {
     let transfer: any = null;
     if (base.transfer_id) {
       const { rows } = await this.pool.query(
-        `SELECT id, partner_reference_no, amount, amount_value, amount_currency,
-                status, result, transfer_method, transfer_channel,
-                beneficiary_account_number, beneficiary_account_name, created_at
-         FROM transfers WHERE id=$1`,
+        `SELECT t.id, t.partner_reference_no, t.amount, t.amount_value, t.amount_currency,
+                t.status, t.result, t.transfer_method, t.transfer_channel,
+                t.beneficiary_account_number, t.beneficiary_account_name, t.created_at,
+                t.source_of_funds, t.transaction_purpose,
+                COALESCE(p.full_name, b.legal_name) AS sender_name,
+                COALESCE(p.cif_no, b.cif_no)       AS sender_cif_no
+         FROM transfers t
+         LEFT JOIN applications a ON a.id = t.sender_application_id
+         LEFT JOIN persons p ON p.id = a.person_id
+         LEFT JOIN business_entities b ON b.id = a.business_id
+         WHERE t.id=$1`,
         [base.transfer_id],
       );
       transfer = rows[0] ?? null;

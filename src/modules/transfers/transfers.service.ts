@@ -147,11 +147,13 @@ export class TransfersService {
         transaction_date,
         requested_execution_date,
         additional_info,
+        source_of_funds,
+        transaction_purpose,
         updated_at
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-        $19,$20,$21,$22,$23,$24,$25,$26,$27, now()
+        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29, now()
       )
       RETURNING *`,
       [
@@ -182,6 +184,8 @@ export class TransfersService {
         dto.transaction_date ?? null,
         dto.requested_execution_date ?? null,
         JSON.stringify(additionalInfo),
+        dto.source_of_funds ?? null,
+        dto.transaction_purpose ?? null,
       ],
     );
 
@@ -244,6 +248,8 @@ export class TransfersService {
         transaction_date=COALESCE($22, transaction_date),
         requested_execution_date=COALESCE($23, requested_execution_date),
         additional_info=COALESCE($24, additional_info),
+        source_of_funds=COALESCE($25, source_of_funds),
+        transaction_purpose=COALESCE($26, transaction_purpose),
         updated_at=now()
       WHERE id=$1
       RETURNING *`,
@@ -272,6 +278,8 @@ export class TransfersService {
         dto.transaction_date ?? null,
         dto.requested_execution_date ?? null,
         dto.additional_info ? JSON.stringify(dto.additional_info) : null,
+        dto.source_of_funds ?? null,
+        dto.transaction_purpose ?? null,
       ],
     );
 
@@ -521,28 +529,35 @@ export class TransfersService {
       // 🔹 Staff → hanya transfer yang dia buat
       // plus data lama yang belum punya created_by (NULL) supaya tetap kelihatan
       params.push(resolveUserId(user));
-      where += ` AND (created_by = $${params.length} OR created_by IS NULL)`;
+      where += ` AND (t.created_by = $${params.length} OR t.created_by IS NULL)`;
     }
     // 🔹 FinanceManager, SystemAdmin, dll → tidak ada filter khusus
 
     const normStatus = status?.toUpperCase();
     if (normStatus && normStatus !== "ALL") {
       params.push(normStatus);
-      where += ` AND status = $${params.length}`;
+      where += ` AND t.status = $${params.length}`;
     }
 
     const q = await this.pool.query(
       `SELECT
-         id, partner_reference_no, reference_no, sender_application_id,
-         amount, currency, amount_value, amount_currency,
-         beneficiary_account_name, beneficiary_account_number,
-         beneficiary_bank_code, beneficiary_bank_name,
-         status, result, created_at, submitted_at, approved_at,
-         completed_at, failed_at
-     FROM transfers
-     ${where}
-     ORDER BY id DESC
-     LIMIT 200`,
+         t.id, t.partner_reference_no, t.reference_no, t.sender_application_id,
+         t.amount, t.currency, t.amount_value, t.amount_currency,
+         t.beneficiary_account_name, t.beneficiary_account_number,
+         t.beneficiary_bank_code, t.beneficiary_bank_name,
+         t.status, t.result, t.created_at, t.submitted_at, t.approved_at,
+         t.completed_at, t.failed_at,
+         t.source_of_funds, t.transaction_purpose,
+         COALESCE(p.full_name, b.legal_name) AS sender_name,
+         COALESCE(p.cif_no, b.cif_no)       AS sender_cif_no,
+         a.type                              AS sender_type
+       FROM transfers t
+       LEFT JOIN applications a ON a.id = t.sender_application_id
+       LEFT JOIN persons p ON p.id = a.person_id
+       LEFT JOIN business_entities b ON b.id = a.business_id
+       ${where}
+       ORDER BY t.id DESC
+       LIMIT 200`,
       params,
     );
 
@@ -555,9 +570,18 @@ export class TransfersService {
   async getById(id: number, user: AuthedUser) {
     const isManager = user.role === "FinanceManager" || user.role === "SystemAdmin";
 
-    const q = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [
-      id,
-    ]);
+    const q = await this.pool.query(
+      `SELECT t.*,
+              COALESCE(p.full_name, b.legal_name) AS sender_name,
+              COALESCE(p.cif_no, b.cif_no)       AS sender_cif_no,
+              a.type                              AS sender_type
+       FROM transfers t
+       LEFT JOIN applications a ON a.id = t.sender_application_id
+       LEFT JOIN persons p ON p.id = a.person_id
+       LEFT JOIN business_entities b ON b.id = a.business_id
+       WHERE t.id=$1`,
+      [id],
+    );
     const rowCount = q.rowCount ?? 0;
     if (rowCount === 0) {
       throw new NotFoundException("Transfer not found");
@@ -588,5 +612,71 @@ export class TransfersService {
   async snapPreview(id: number, user: AuthedUser) {
     const row = await this.getById(id, user);
     return buildSnapTransferPayload(row);
+  }
+
+  // ---------------------------------------------------------------------------
+  // SENDER SEARCH — cari aplikasi APPROVED sebagai calon pengirim
+  // ---------------------------------------------------------------------------
+  async searchSenders(q = '', page = 1, limit = 20) {
+    const pageN = Math.max(1, page);
+    const limitN = Math.min(100, Math.max(1, limit));
+    const offset = (pageN - 1) * limitN;
+    const pattern = `%${q}%`;
+
+    const countQ = await this.pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM applications a
+       LEFT JOIN persons p ON p.id = a.person_id
+       LEFT JOIN business_entities b ON b.id = a.business_id
+       WHERE a.status = 'APPROVED'
+         AND ($1 = '' OR COALESCE(p.full_name, b.legal_name) ILIKE $2
+              OR COALESCE(p.cif_no, b.cif_no) ILIKE $2
+              OR COALESCE(p.identity_number, '') ILIKE $2
+              OR COALESCE(b.nib, '') ILIKE $2
+              OR COALESCE(b.npwp, '') ILIKE $2)`,
+      [q, pattern],
+    );
+
+    const dataQ = await this.pool.query(
+      `SELECT a.id AS application_id, a.type AS application_type, a.status,
+              COALESCE(p.full_name, b.legal_name) AS display_name,
+              COALESCE(p.cif_no, b.cif_no) AS cif_no,
+              COALESCE(p.identity_number, b.nib) AS identity_number_or_business_number
+       FROM applications a
+       LEFT JOIN persons p ON p.id = a.person_id
+       LEFT JOIN business_entities b ON b.id = a.business_id
+       WHERE a.status = 'APPROVED'
+         AND ($1 = '' OR COALESCE(p.full_name, b.legal_name) ILIKE $2
+              OR COALESCE(p.cif_no, b.cif_no) ILIKE $2
+              OR COALESCE(p.identity_number, '') ILIKE $2
+              OR COALESCE(b.nib, '') ILIKE $2
+              OR COALESCE(b.npwp, '') ILIKE $2)
+       ORDER BY a.id DESC
+       LIMIT $3 OFFSET $4`,
+      [q, pattern, limitN, offset],
+    );
+
+    return { data: dataQ.rows, page: pageN, limit: limitN, total: countQ.rows[0].total };
+  }
+
+  // ---------------------------------------------------------------------------
+  // BANK CATALOG — daftar bank statis untuk FE dropdown
+  // ---------------------------------------------------------------------------
+  getBanks() {
+    return [
+      { code: 'BCA',     name: 'Bank Central Asia' },
+      { code: 'MANDIRI', name: 'Bank Mandiri' },
+      { code: 'BRI',     name: 'Bank Rakyat Indonesia' },
+      { code: 'BNI',     name: 'Bank Negara Indonesia' },
+      { code: 'CIMB',    name: 'CIMB Niaga' },
+      { code: 'DANAMON', name: 'Bank Danamon' },
+      { code: 'PERMATA', name: 'Bank Permata' },
+      { code: 'BTN',     name: 'Bank Tabungan Negara' },
+      { code: 'BSI',     name: 'Bank Syariah Indonesia' },
+      { code: 'MAYBANK', name: 'Maybank Indonesia' },
+      { code: 'OCBC',    name: 'OCBC Indonesia' },
+      { code: 'PANIN',   name: 'Panin Bank' },
+      { code: 'NOBU',    name: 'Bank Nobu' },
+    ];
   }
 }

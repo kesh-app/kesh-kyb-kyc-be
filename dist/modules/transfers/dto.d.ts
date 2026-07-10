@@ -22,6 +22,8 @@ export declare class CreateTransferDto {
     transaction_date?: string;
     requested_execution_date?: string;
     additional_info?: Record<string, unknown>;
+    source_of_funds?: string;
+    transaction_purpose?: string;
 }
 export declare class UpdateTransferDto extends CreateTransferDto {
 }

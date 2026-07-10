@@ -68,6 +68,10 @@ export function buildSnapTransferPayload(t: any): Record<string, any> {
     sourceAccountNo: t?.source_account_no ?? null,
     transactionDate: t?.transaction_date ?? null,
     remark: t?.description ?? null,
-    additionalInfo: t?.additional_info ?? {},
+    additionalInfo: {
+      ...(t?.additional_info ?? {}),
+      ...(t?.source_of_funds     ? { sourceOfFunds:       t.source_of_funds }     : {}),
+      ...(t?.transaction_purpose ? { transactionPurpose: t.transaction_purpose } : {}),
+    },
   };
 }

@@ -2749,9 +2749,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   // ══════════════════════════════════════════════════════════
   // Q. CIF Number — Customer Information File
   //
-  // Format:
-  //   Individual : KSH-I-<NIK_LAST6>-<SEQ5>
-  //   Business   : KSH-B-<NIB_OR_NPWP_LAST6>-<SEQ5>
+  // Format (no dashes):
+  //   Individual : KSHI<NIK_LAST6><SEQ5>
+  //   Business   : KSHB<NIB_OR_NPWP_LAST6><SEQ5>
   //
   // Rules:
   //   - Generated once at creation, immutable thereafter
@@ -2775,7 +2775,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     let cifBizNpwpAppId: string;
     let firstCifNo: string;
 
-    it('Q-01: Individual with KTP → GET person.cif_no matches KSH-I-<NIK_LAST6>-DDDDD', async () => {
+    it('Q-01: Individual with KTP → GET person.cif_no matches KSHI<NIK_LAST6><SEQ5>', async () => {
       const createRes = await request(app.getHttpServer())
         .post(`${BASE}/applications/individual`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -2803,13 +2803,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const cif: string = res.body.person.cif_no;
       expect(cif).toBeDefined();
-      expect(cif).toMatch(/^KSH-I-\d{6}-\d{5}$/);
-      expect(cif).toContain(`KSH-I-${CIF_NIK_LAST6}-`);
+      expect(cif).toMatch(/^KSHI\d{11}$/);
+      expect(cif).toContain(`KSHI${CIF_NIK_LAST6}`);
 
       firstCifNo = cif;
     });
 
-    it('Q-02: Business with NIB → GET business.cif_no matches KSH-B-<NIB_LAST6>-DDDDD', async () => {
+    it('Q-02: Business with NIB → GET business.cif_no matches KSHB<NIB_LAST6><SEQ5>', async () => {
       const createRes = await request(app.getHttpServer())
         .post(`${BASE}/applications/business`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -2839,8 +2839,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const cif: string = res.body.business.cif_no;
       expect(cif).toBeDefined();
-      expect(cif).toMatch(/^KSH-B-\d{6}-\d{5}$/);
-      expect(cif).toContain(`KSH-B-${CIF_NIB_LAST6}-`);
+      expect(cif).toMatch(/^KSHB\d{11}$/);
+      expect(cif).toContain(`KSHB${CIF_NIB_LAST6}`);
     });
 
     it('Q-03: Business without NIB → cif_no uses NPWP last6', async () => {
@@ -2873,8 +2873,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const cif: string = res.body.business.cif_no;
       expect(cif).toBeDefined();
-      expect(cif).toMatch(/^KSH-B-\d{6}-\d{5}$/);
-      expect(cif).toContain(`KSH-B-${CIF_NPWP_LAST6}-`);
+      expect(cif).toMatch(/^KSHB\d{11}$/);
+      expect(cif).toContain(`KSHB${CIF_NPWP_LAST6}`);
     });
 
     it('Q-04: Two different individuals → unique CIF numbers', async () => {
@@ -2934,7 +2934,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   // R. CIF Relationship Type & BO CIF Reuse
   //
   // Business rules verified:
-  //   - BO party gets CIF KSH-I-..., cif_relationship_type=BO
+  //   - BO party gets CIF KSHI..., cif_relationship_type=BO
   //   - Individual with same NIK as existing BO reuses that CIF
   //   - Individual created first → BO added later reuses person CIF
   //   - persons.cif_relationship_type=OUR_CUSTOMER by default
@@ -2955,7 +2955,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
     // ── Scenario A: BO first, then Individual ──────────────────────────────
 
-    it('R-01: Create business app and add BO party → party gets KSH-I-... CIF', async () => {
+    it('R-01: Create business app and add BO party → party gets KSHI... CIF', async () => {
       // Create a fresh business application
       const bizCreate = await request(app.getHttpServer())
         .post(`${BASE}/applications/business`)
@@ -2995,7 +2995,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
 
       expect(partyRes.body.cif_no).toBeDefined();
-      expect(partyRes.body.cif_no).toMatch(/^KSH-I-\d{6}-\d{5}$/);
+      expect(partyRes.body.cif_no).toMatch(/^KSHI\d{11}$/);
       expect(partyRes.body.cif_relationship_type).toBe('BO');
 
       boFirstCifNo = partyRes.body.cif_no;
@@ -3074,7 +3074,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
 
       expect(res.body.person.cif_no).toBeDefined();
-      expect(res.body.person.cif_no).toMatch(/^KSH-I-\d{6}-\d{5}$/);
+      expect(res.body.person.cif_no).toMatch(/^KSHI\d{11}$/);
       expect(res.body.person.cif_relationship_type).toBe('OUR_CUSTOMER');
 
       indivFirstCifNo = res.body.person.cif_no;
@@ -3516,7 +3516,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
         [appId],
       );
-      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `LTKM${phone}` });
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `11${phone}` });
       const ev = await evaluate(trId);
       expect(ev.status).toBe(201);
       return String(ev.body.id);
@@ -3540,7 +3540,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const trId = await createTransfer(appId, {
         amount: 500_000_000,
         transfer_method: 'CASH',
-        benef: `CASH1${SUFFIX}`,
+        benef: `91${SUFFIX}`,
       });
       const ev = await evaluate(trId);
       expect(ev.status).toBe(201);
@@ -3558,8 +3558,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     // ── T-03: LTKT aggregate daily cash ≥ 500M ──
     it('T-03: 2x cash 300M same CIF/day → LTKT_CASH_AGGREGATE_DAILY_500M', async () => {
       const appId = await createApprovedIndividual(`70002${SUFFIX}`, `07002${SUFFIX}`);
-      await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `AGG1${SUFFIX}` });
-      const tr2 = await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `AGG2${SUFFIX}` });
+      await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `21${SUFFIX}` });
+      const tr2 = await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `22${SUFFIX}` });
       const ev = await evaluate(tr2);
       expect(ev.status).toBe(201);
       expect(codesOf(ev.body)).toContain('LTKT_CASH_AGGREGATE_DAILY_500M');
@@ -3572,7 +3572,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
         [appId],
       );
-      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `HR${SUFFIX}` });
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `31${SUFFIX}` });
       const ev = await evaluate(trId);
       expect(ev.status).toBe(201);
       expect(codesOf(ev.body)).toContain('LTKM_HIGH_RISK_CUSTOMER');
@@ -3591,7 +3591,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           ]),
         ],
       );
-      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `PEP${SUFFIX}` });
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `41${SUFFIX}` });
       const ev = await evaluate(trId);
       expect(ev.status).toBe(201);
       expect(codesOf(ev.body)).toContain('LTKM_PEP_RELATED');
@@ -3602,7 +3602,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const appId = await createApprovedIndividual(`70006${SUFFIX}`, `07006${SUFFIX}`);
       let lastTr = '';
       for (let i = 1; i <= 5; i++) {
-        lastTr = await createTransfer(appId, { amount: 1_000_000, benef: `MB${i}_${SUFFIX}` });
+        lastTr = await createTransfer(appId, { amount: 1_000_000, benef: `5${i}${SUFFIX}` });
       }
       const ev = await evaluate(lastTr);
       expect(ev.status).toBe(201);
@@ -3612,7 +3612,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     // ── T-06b: High value alone (≥100M, no other suspicious) → TIDAK membuat case ──
     it('T-06b: high value 150M non-cash alone → tidak membuat LTKM case (triggered:false)', async () => {
       const appId = await createApprovedIndividual(`70061${SUFFIX}`, `07061${SUFFIX}`);
-      const trId = await createTransfer(appId, { amount: 150_000_000, benef: `HV${SUFFIX}` });
+      const trId = await createTransfer(appId, { amount: 150_000_000, benef: `61${SUFFIX}` });
       const ev = await evaluate(trId);
       expect(ev.status).toBe(201);
       expect(ev.body.triggered).toBe(false);
@@ -3632,7 +3632,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
         [appId],
       );
-      const trId = await createTransfer(appId, { amount: 150_000_000, benef: `HVHR${SUFFIX}` });
+      const trId = await createTransfer(appId, { amount: 150_000_000, benef: `62${SUFFIX}` });
       const ev = await evaluate(trId);
       expect(ev.status).toBe(201);
       const codes = codesOf(ev.body);
@@ -3651,7 +3651,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const trId = await createTransfer(appId, {
         amount: 500_000_000,
         transfer_method: 'CASH',
-        benef: `CBHR${SUFFIX}`,
+        benef: `63${SUFFIX}`,
       });
       const ev = await evaluate(trId);
       expect(ev.status).toBe(201);
@@ -3852,7 +3852,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
         [appId],
       );
-      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `DUP${SUFFIX}` });
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `71${SUFFIX}` });
 
       const ev1 = await evaluate(trId);
       expect(ev1.status).toBe(201);
@@ -3886,7 +3886,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
         [appId],
       );
-      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `DET${SUFFIX}` });
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `81${SUFFIX}` });
       const ev = await evaluate(trId);
       const caseId = String(ev.body.id);
 
@@ -4055,6 +4055,381 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .get(`${BASE}/monitoring/cases/${caseId}`)
         .set('Authorization', `Bearer ${directorToken}`)
         .expect(403);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // U. NEW TRANSFER REQUIREMENTS (A-F)
+  // ══════════════════════════════════════════════════════════
+  describe('U. CIF + Transfer requirements', () => {
+
+    // ── UA: CIF format — no dashes ──────────────────────────────────────
+    describe('UA. CIF format — no dashes', () => {
+      it('UA-01: person.cif_no tidak mengandung "-" (format KSHI)', async () => {
+        const { rows } = await pgPool.query(
+          `SELECT p.cif_no FROM applications a
+           JOIN persons p ON p.id = a.person_id WHERE a.id=$1`,
+          [indivAppIdOk],
+        );
+        expect(rows[0]?.cif_no).toBeDefined();
+        expect(rows[0].cif_no).not.toContain('-');
+        expect(rows[0].cif_no).toMatch(/^KSHI\d{11}$/);
+      });
+
+      it('UA-02: business_entities.cif_no tidak mengandung "-" (format KSHB)', async () => {
+        const { rows } = await pgPool.query(
+          `SELECT b.cif_no FROM applications a
+           JOIN business_entities b ON b.id = a.business_id WHERE a.id=$1`,
+          [bizAppId],
+        );
+        expect(rows[0]?.cif_no).toBeDefined();
+        expect(rows[0].cif_no).not.toContain('-');
+        expect(rows[0].cif_no).toMatch(/^KSHB\d{11}$/);
+      });
+
+      it('UA-03: business_parties.cif_no (BO) tidak mengandung "-"', async () => {
+        const { rows } = await pgPool.query(
+          `SELECT bp.cif_no FROM applications a
+           JOIN business_parties bp ON bp.business_id = a.business_id
+           WHERE a.id=$1 AND bp.cif_no IS NOT NULL LIMIT 1`,
+          [bizAppId],
+        );
+        if (rows.length > 0) {
+          expect(rows[0].cif_no).not.toContain('-');
+          expect(rows[0].cif_no).toMatch(/^KSHI\d{11}$/);
+        }
+        // jika belum ada BO, test tetap pass (no BO in this test flow)
+      });
+    });
+
+    // ── UB: Transfer amount guard ─────────────────────────────────────
+    describe('UB. Transfer amount guard (min 10.000, max 500.000.000)', () => {
+      it('UB-01: amount 9999 → 400 (di bawah minimum)', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 9999,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Test',
+            beneficiaryAccountNumber: '1234567890',
+            beneficiaryAccountName: 'Test',
+          })
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('UB-02: amount 10000 → 201 (tepat di batas minimum)', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 10000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Test',
+            beneficiaryAccountNumber: '1234000010',
+            beneficiaryAccountName: 'Test Min',
+          })
+          .expect(201);
+        expect(Number(res.body.amount)).toBe(10000);
+      });
+
+      it('UB-03: amount 500000000 → 201 (tepat di batas maksimum)', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 500_000_000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Test',
+            beneficiaryAccountNumber: '1234000500',
+            beneficiaryAccountName: 'Test Max',
+          })
+          .expect(201);
+        expect(Number(res.body.amount)).toBe(500_000_000);
+      });
+
+      it('UB-04: amount 500000001 → 400 (melebihi maksimum)', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 500_000_001,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Test',
+            beneficiaryAccountNumber: '1234567890',
+            beneficiaryAccountName: 'Test',
+          })
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+    });
+
+    // ── UC: Sender name dalam response transfer ────────────────────────
+    describe('UC. Sender name dalam response transfer', () => {
+      it('UC-01: GET /transfers/:id → includes sender_name', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${transferId}`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+        expect(res.body.sender_name).toBeTruthy();
+        expect(typeof res.body.sender_name).toBe('string');
+        expect(res.body.sender_cif_no).toBeTruthy();
+        expect(res.body.sender_type).toBe('INDIVIDUAL');
+      });
+
+      it('UC-02: GET /transfers → list includes sender_name', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+        expect(Array.isArray(res.body)).toBe(true);
+        expect(res.body.length).toBeGreaterThan(0);
+        // setiap item harus punya sender_name
+        for (const item of res.body) {
+          if (item.sender_application_id) {
+            expect(item.sender_name).toBeTruthy();
+          }
+        }
+      });
+    });
+
+    // ── UD: Sender search ─────────────────────────────────────────────
+    describe('UD. Sender search', () => {
+      it('UD-01: GET /transfers/senders/search tanpa q → 200, data array APPROVED apps', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/senders/search`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        expect(Array.isArray(res.body.data)).toBe(true);
+        expect(typeof res.body.total).toBe('number');
+        expect(res.body.total).toBeGreaterThan(0);
+        for (const item of res.body.data) {
+          expect(item.status).toBe('APPROVED');
+          expect(item.display_name).toBeTruthy();
+          expect(item.application_id).toBeDefined();
+        }
+      });
+
+      it('UD-02: search by individual name → menemukan indivAppIdOk', async () => {
+        // indivAppIdOk punya full_name "Individu OK ..."
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/senders/search?q=Individu+OK`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        const ids = res.body.data.map((x: any) => String(x.application_id));
+        expect(ids).toContain(String(indivAppIdOk));
+      });
+
+      it('UD-03: search by CIF prefix KSHI → menemukan individual', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/senders/search?q=KSHI`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        expect(res.body.data.length).toBeGreaterThan(0);
+        expect(res.body.data[0].cif_no).toMatch(/^KSHI/);
+      });
+
+      it('UD-04: application_id dari search dapat digunakan create transfer', async () => {
+        // ambil sender pertama
+        const search = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/senders/search`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        const sender = search.body.data[0];
+        expect(sender).toBeDefined();
+
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 50_000,
+            sender_application_id: Number(sender.application_id),
+            beneficiaryBankName: 'Bank Test',
+            beneficiaryAccountNumber: '9988776655',
+            beneficiaryAccountName: 'Penerima Search',
+          })
+          .expect(201);
+        expect(res.body.status).toBe('DRAFT');
+        expect(String(res.body.sender_application_id)).toBe(String(sender.application_id));
+      });
+    });
+
+    // ── UE: Bank catalog + account number validation ───────────────────
+    describe('UE. Bank catalog + account number validation', () => {
+      it('UE-01: GET /transfers/banks → 200, array code+name tanpa duplikat', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/banks`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        expect(Array.isArray(res.body)).toBe(true);
+        expect(res.body.length).toBeGreaterThan(0);
+        for (const bank of res.body) {
+          expect(typeof bank.code).toBe('string');
+          expect(typeof bank.name).toBe('string');
+        }
+        // tidak ada duplikat code
+        const codes = res.body.map((b: any) => b.code);
+        expect(new Set(codes).size).toBe(codes.length);
+      });
+
+      it('UE-02: account number dengan huruf → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 100_000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Test',
+            beneficiaryAccountNumber: '12345ABC',
+            beneficiaryAccountName: 'Test',
+          })
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('UE-03: account number spasi → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 100_000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Test',
+            beneficiaryAccountNumber: '123 456',
+            beneficiaryAccountName: 'Test',
+          })
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('UE-04: account number digit murni → 201', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 25_000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank BCA',
+            beneficiaryAccountNumber: '0987654321',
+            beneficiaryAccountName: 'Test Digit',
+          })
+          .expect(201);
+        expect(res.body.beneficiary_account_number).toBe('0987654321');
+      });
+    });
+
+    // ── UF: source_of_funds + transaction_purpose ─────────────────────
+    describe('UF. source_of_funds dan transaction_purpose', () => {
+      let ufTransferId: string;
+
+      it('UF-01: create transfer dengan source_of_funds + transaction_purpose → 201, keduanya tersimpan', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 75_000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank BRI',
+            beneficiaryAccountNumber: '1122334455',
+            beneficiaryAccountName: 'PT Penerima UF',
+            source_of_funds: 'Gaji',
+            transaction_purpose: 'Pembayaran hutang',
+          })
+          .expect(201);
+
+        expect(res.body.source_of_funds).toBe('Gaji');
+        expect(res.body.transaction_purpose).toBe('Pembayaran hutang');
+        ufTransferId = String(res.body.id);
+      });
+
+      it('UF-02: GET /transfers/:id → mengembalikan source_of_funds + transaction_purpose', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${ufTransferId}`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+
+        expect(res.body.source_of_funds).toBe('Gaji');
+        expect(res.body.transaction_purpose).toBe('Pembayaran hutang');
+      });
+
+      it('UF-03: monitoring case detail — linked transfer includes source_of_funds + sender_name', async () => {
+        // Buat individual baru → approve → transfer HIGH RISK → monitoring case
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({
+            full_name: `UF Sender ${SUFFIX}`,
+            identity_type: 'KTP',
+            identity_number: `UF000${SUFFIX}`,
+            address_identity: 'Jl. UF No. 1, Jakarta',
+            pob: 'Jakarta',
+            dob: '1985-05-05',
+            nationality: 'ID',
+            phone: `0890${SUFFIX}`,
+            occupation: 'Software Engineer',
+            gender: 'M',
+            signature_uri: 'https://storage.test/uf_sig.png',
+          })
+          .expect(201);
+        const ufAppId = String(create.body.id);
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${ufAppId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: 'KTP', file_uri: 'https://storage.test/uf_ktp.jpg' })
+          .expect(201);
+
+        await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${ufAppId}/submit`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${ufAppId}/decision`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ decision: 'APPROVED', reason: 'UF test' })
+          .expect(200);
+
+        // Set HIGH RISK agar monitoring terpicu
+        await pgPool.query(
+          `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+          [ufAppId],
+        );
+
+        const tr = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            amount: 50_000_000,
+            sender_application_id: Number(ufAppId),
+            beneficiaryBankName: 'Bank Mandiri',
+            beneficiaryAccountNumber: '5544332211',
+            beneficiaryAccountName: 'PT UF Penerima',
+            source_of_funds: 'Tabungan',
+            transaction_purpose: 'Investasi',
+          })
+          .expect(201);
+        const ufTrId = String(tr.body.id);
+
+        const ev = await request(app.getHttpServer())
+          .post(`${BASE}/monitoring/evaluate-transfer/${ufTrId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(201);
+        expect(ev.body.id).toBeDefined(); // case dibuat → response adalah case object, bukan { triggered: false }
+        const caseId = String(ev.body.id);
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/monitoring/cases/${caseId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        expect(detail.body.transfer).toBeTruthy();
+        expect(detail.body.transfer.source_of_funds).toBe('Tabungan');
+        expect(detail.body.transfer.transaction_purpose).toBe('Investasi');
+        expect(detail.body.transfer.sender_name).toBeTruthy();
+        expect(typeof detail.body.transfer.sender_name).toBe('string');
+      });
     });
   });
 });

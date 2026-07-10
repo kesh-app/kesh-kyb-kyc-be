@@ -48,6 +48,14 @@ let TransfersController = class TransfersController {
     async list(req, status) {
         return this.svc.list(req.user, status);
     }
+    // BANK CATALOG — static list for FE dropdown
+    getBanks() {
+        return this.svc.getBanks();
+    }
+    // SENDER SEARCH — cari aplikasi APPROVED sebagai calon pengirim transfer
+    async searchSenders(q = "", page = "1", limit = "20") {
+        return this.svc.searchSenders(q, Number(page), Number(limit));
+    }
     // SNAP PREVIEW — pure mapping of stored data, NO external bank/API call
     async snapPreview(req, id) {
         return this.svc.snapPreview(id, req.user);
@@ -115,6 +123,23 @@ __decorate([
     __metadata("design:paramtypes", [Object, String]),
     __metadata("design:returntype", Promise)
 ], TransfersController.prototype, "list", null);
+__decorate([
+    (0, common_1.Get)("banks"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin"),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", void 0)
+], TransfersController.prototype, "getBanks", null);
+__decorate([
+    (0, common_1.Get)("senders/search"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin"),
+    __param(0, (0, common_1.Query)("q")),
+    __param(1, (0, common_1.Query)("page")),
+    __param(2, (0, common_1.Query)("limit")),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object, Object]),
+    __metadata("design:returntype", Promise)
+], TransfersController.prototype, "searchSenders", null);
 __decorate([
     (0, common_1.Get)(":id/snap-preview"),
     (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),
