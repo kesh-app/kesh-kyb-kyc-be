@@ -28,15 +28,14 @@ export class TransfersController {
 
   // CREATE TRANSFER → sekarang termasuk sender_application_id
   @Post()
-  @Roles("FinanceStaff")
+  @Roles("FinanceStaff", "FrontDesk")
   async create(@Req() req: any, @Body() dto: CreateTransferDto) {
-    // req.user → FinanceStaff atau FinanceManager yang membuat transfer
     return this.svc.create(req.user, dto, req.ip);
   }
 
   // UPDATE DRAFT
   @Patch(":id")
-  @Roles("FinanceStaff")
+  @Roles("FinanceStaff", "FrontDesk")
   async updateDraft(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
@@ -47,7 +46,7 @@ export class TransfersController {
 
   // SUBMIT
   @Post(":id/submit")
-  @Roles("FinanceStaff")
+  @Roles("FinanceStaff", "FrontDesk")
   async submit(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.submit(id, req.user, req.ip);
   }
@@ -76,21 +75,21 @@ export class TransfersController {
 
   // LIST TRANSFERS
   @Get()
-  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")
+  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk")
   async list(@Req() req: any, @Query("status") status?: string) {
     return this.svc.list(req.user, status);
   }
 
   // BANK CATALOG — static list for FE dropdown
   @Get("banks")
-  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin")
+  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin", "FrontDesk")
   getBanks() {
     return this.svc.getBanks();
   }
 
   // SENDER SEARCH — cari aplikasi APPROVED sebagai calon pengirim transfer
   @Get("senders/search")
-  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin")
+  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin", "FrontDesk")
   async searchSenders(
     @Query("q") q = "",
     @Query("page") page = "1",
@@ -101,14 +100,14 @@ export class TransfersController {
 
   // SNAP PREVIEW — pure mapping of stored data, NO external bank/API call
   @Get(":id/snap-preview")
-  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")
+  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk")
   async snapPreview(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.snapPreview(id, req.user);
   }
 
   // GET TRANSFER DETAIL
   @Get(":id")
-  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin")
+  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk")
   async getById(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getById(id, req.user);
   }

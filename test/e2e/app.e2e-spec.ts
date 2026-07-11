@@ -2507,6 +2507,75 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(res.body.partnerReferenceNo).toBe(MANUAL_REF);
     });
+
+    // ── N-12–N-17: FrontDesk transfer permissions ──
+    let fdTransferId: string;
+
+    it('N-12: FrontDesk GET /transfers → 200 (read access)', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+    });
+
+    it('N-13: FrontDesk POST /transfers → 201 (dapat membuat transfer)', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 500000,
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank BCA',
+          beneficiaryBankCode: '014',
+          beneficiaryAccountNumber: '1234500001',
+          beneficiaryAccountName: 'PT FrontDesk Test',
+        })
+        .expect(201);
+
+      expect(res.body.status).toBe('DRAFT');
+      fdTransferId = String(res.body.id);
+    });
+
+    it('N-14: FrontDesk GET /transfers/:id → 200 (dapat baca detail)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${fdTransferId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      expect(String(res.body.id)).toBe(fdTransferId);
+    });
+
+    it('N-15: FrontDesk POST /transfers/:id/submit → 201 (dapat submit)', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${fdTransferId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+
+      expect(res.body.status).toBe('SUBMITTED');
+    });
+
+    it('N-16: FrontDesk POST /transfers/:id/decision → 403 (tidak boleh approve/reject)', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${fdTransferId}/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(403);
+    });
+
+    it('N-17: FrontDesk POST /transfers/:id/result → 403 (tidak boleh update result)', async () => {
+      // Approve dulu via manager agar status APPROVED (bukan untuk FrontDesk)
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${fdTransferId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE', decision_notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${fdTransferId}/result`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ result: 'SUCCESS' })
+        .expect(403);
+    });
   });
 
   // ══════════════════════════════════════════════════════════

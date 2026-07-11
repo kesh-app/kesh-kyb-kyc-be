@@ -25,7 +25,6 @@ let TransfersController = class TransfersController {
     }
     // CREATE TRANSFER → sekarang termasuk sender_application_id
     async create(req, dto) {
-        // req.user → FinanceStaff atau FinanceManager yang membuat transfer
         return this.svc.create(req.user, dto, req.ip);
     }
     // UPDATE DRAFT
@@ -68,7 +67,7 @@ let TransfersController = class TransfersController {
 exports.TransfersController = TransfersController;
 __decorate([
     (0, common_1.Post)(),
-    (0, roles_decorator_1.Roles)("FinanceStaff"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FrontDesk"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Body)()),
     __metadata("design:type", Function),
@@ -77,7 +76,7 @@ __decorate([
 ], TransfersController.prototype, "create", null);
 __decorate([
     (0, common_1.Patch)(":id"),
-    (0, roles_decorator_1.Roles)("FinanceStaff"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FrontDesk"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __param(2, (0, common_1.Body)()),
@@ -87,7 +86,7 @@ __decorate([
 ], TransfersController.prototype, "updateDraft", null);
 __decorate([
     (0, common_1.Post)(":id/submit"),
-    (0, roles_decorator_1.Roles)("FinanceStaff"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FrontDesk"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
@@ -116,7 +115,7 @@ __decorate([
 ], TransfersController.prototype, "setResult", null);
 __decorate([
     (0, common_1.Get)(),
-    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Query)("status")),
     __metadata("design:type", Function),
@@ -125,14 +124,14 @@ __decorate([
 ], TransfersController.prototype, "list", null);
 __decorate([
     (0, common_1.Get)("banks"),
-    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin", "FrontDesk"),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", void 0)
 ], TransfersController.prototype, "getBanks", null);
 __decorate([
     (0, common_1.Get)("senders/search"),
-    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin", "FrontDesk"),
     __param(0, (0, common_1.Query)("q")),
     __param(1, (0, common_1.Query)("page")),
     __param(2, (0, common_1.Query)("limit")),
@@ -142,7 +141,7 @@ __decorate([
 ], TransfersController.prototype, "searchSenders", null);
 __decorate([
     (0, common_1.Get)(":id/snap-preview"),
-    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),
@@ -151,7 +150,7 @@ __decorate([
 ], TransfersController.prototype, "snapPreview", null);
 __decorate([
     (0, common_1.Get)(":id"),
-    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin"),
+    (0, roles_decorator_1.Roles)("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk"),
     __param(0, (0, common_1.Req)()),
     __param(1, (0, common_1.Param)("id", common_1.ParseIntPipe)),
     __metadata("design:type", Function),

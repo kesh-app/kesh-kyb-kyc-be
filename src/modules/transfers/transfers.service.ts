@@ -83,7 +83,7 @@ export class TransfersService {
   // CREATE DRAFT
   // ---------------------------------------------------------------------------
   async create(user: AuthedUser, dto: CreateTransferDto, ip?: string) {
-    const isStaff = user.role === "FinanceStaff";
+    const isStaff = user.role === "FinanceStaff" || user.role === "FrontDesk";
     const isManager = user.role === "FinanceManager";
 
     if (!isStaff && !isManager) {
@@ -305,9 +305,9 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
-    // Hanya FinanceStaff yang boleh submit (SystemAdmin read-only).
-    if (user.role !== "FinanceStaff") {
-      throw new ForbiddenException("Only FinanceStaff can submit");
+    // FinanceStaff dan FrontDesk boleh submit (SystemAdmin read-only).
+    if (user.role !== "FinanceStaff" && user.role !== "FrontDesk") {
+      throw new ForbiddenException("Only FinanceStaff or FrontDesk can submit");
     }
 
     if (row.status !== "DRAFT") {
@@ -525,13 +525,12 @@ export class TransfersService {
     const params: any[] = [];
     let where = "WHERE 1=1";
 
-    if (role === "FinanceStaff") {
-      // 🔹 Staff → hanya transfer yang dia buat
-      // plus data lama yang belum punya created_by (NULL) supaya tetap kelihatan
+    if (role === "FinanceStaff" || role === "FrontDesk") {
+      // Staff / FrontDesk → hanya transfer yang dia buat sendiri
       params.push(resolveUserId(user));
       where += ` AND (t.created_by = $${params.length} OR t.created_by IS NULL)`;
     }
-    // 🔹 FinanceManager, SystemAdmin, dll → tidak ada filter khusus
+    // 🔹 FinanceManager, SystemAdmin → tidak ada filter khusus
 
     const normStatus = status?.toUpperCase();
     if (normStatus && normStatus !== "ALL") {

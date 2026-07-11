@@ -56,7 +56,7 @@ let TransfersService = class TransfersService {
     // CREATE DRAFT
     // ---------------------------------------------------------------------------
     async create(user, dto, ip) {
-        const isStaff = user.role === "FinanceStaff";
+        const isStaff = user.role === "FinanceStaff" || user.role === "FrontDesk";
         const isManager = user.role === "FinanceManager";
         if (!isStaff && !isManager) {
             throw new common_1.ForbiddenException("Not allowed");
@@ -240,9 +240,9 @@ let TransfersService = class TransfersService {
         if (rowCount === 0)
             throw new common_1.NotFoundException("Transfer not found");
         const row = prev.rows[0];
-        // Hanya FinanceStaff yang boleh submit (SystemAdmin read-only).
-        if (user.role !== "FinanceStaff") {
-            throw new common_1.ForbiddenException("Only FinanceStaff can submit");
+        // FinanceStaff dan FrontDesk boleh submit (SystemAdmin read-only).
+        if (user.role !== "FinanceStaff" && user.role !== "FrontDesk") {
+            throw new common_1.ForbiddenException("Only FinanceStaff or FrontDesk can submit");
         }
         if (row.status !== "DRAFT") {
             throw new common_1.BadRequestException("Only DRAFT can be submitted");
@@ -400,13 +400,12 @@ let TransfersService = class TransfersService {
         const role = user.role;
         const params = [];
         let where = "WHERE 1=1";
-        if (role === "FinanceStaff") {
-            // 🔹 Staff → hanya transfer yang dia buat
-            // plus data lama yang belum punya created_by (NULL) supaya tetap kelihatan
+        if (role === "FinanceStaff" || role === "FrontDesk") {
+            // Staff / FrontDesk → hanya transfer yang dia buat sendiri
             params.push((0, auth_util_1.resolveUserId)(user));
             where += ` AND (t.created_by = $${params.length} OR t.created_by IS NULL)`;
         }
-        // 🔹 FinanceManager, SystemAdmin, dll → tidak ada filter khusus
+        // 🔹 FinanceManager, SystemAdmin → tidak ada filter khusus
         const normStatus = status?.toUpperCase();
         if (normStatus && normStatus !== "ALL") {
             params.push(normStatus);
