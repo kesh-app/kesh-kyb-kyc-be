@@ -13,9 +13,10 @@ import { RegistrantsModule } from './modules/registrants/registrants.module';
 import { TransfersModule } from './modules/transfers/transfers.module';
 import { MonitoringModule } from './modules/monitoring/monitoring.module';
 import { ReferencesModule } from './modules/references/references.module';
+import { ComplaintsModule } from './modules/complaints/complaints.module';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule, BusinessModule, WatchlistModule, DashboardModule, RegistrantsModule, TransfersModule, MonitoringModule, ReferencesModule],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), DbModule, UsersModule, AuthModule, ApplicationsModule, UploadsModule, BusinessModule, WatchlistModule, DashboardModule, RegistrantsModule, TransfersModule, MonitoringModule, ReferencesModule, ComplaintsModule],
   controllers: [HealthController],
   providers: [],
 })

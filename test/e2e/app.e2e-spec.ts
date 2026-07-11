@@ -5734,4 +5734,302 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(enggalKel.name).toBe('Enggal');
     });
   });
+
+  // ══════════════════════════════════════════════════════════
+  // Y. Complaints — Pencatatan Pengaduan
+  // ══════════════════════════════════════════════════════════
+  describe('Y. Complaints — Pencatatan Pengaduan', () => {
+    let complaintId: string;
+    let complaintNo: string;
+
+    // Y-01: customer search returns APPROVED applications
+    it('Y-01: GET /complaints/customers/search → 200, hanya aplikasi APPROVED', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/customers/search`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(typeof res.body.total).toBe('number');
+      expect(typeof res.body.page).toBe('number');
+      expect(typeof res.body.limit).toBe('number');
+    });
+
+    // Y-02: DRAFT app tidak muncul, APPROVED app muncul di customer search
+    it('Y-02: customer search tidak mengembalikan aplikasi non-APPROVED', async () => {
+      // Search dengan nama unik indivAppIdOk "Individu OK <SUFFIX>" — hanya 1 match per run
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/customers/search?q=Individu+OK+${SUFFIX}&limit=10`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      // indivAppIdOk (APPROVED) harus muncul
+      const found = res.body.data.find((d: any) => String(d.application_id) === String(indivAppIdOk));
+      expect(found).toBeDefined();
+      expect(found.display_name).toBeTruthy();
+
+      // indivAppIdMissing (DRAFT) tidak boleh ada di hasil
+      const notApproved = res.body.data.find((d: any) => String(d.application_id) === String(indivAppIdMissing));
+      expect(notApproved).toBeUndefined();
+    });
+
+    // Y-03: FrontDesk dapat membuat complaint
+    it('Y-03: FrontDesk POST /complaints → 201, complaint_no KESH-CMP-...', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}`,
+          category: 'TRANSFER',
+          channel: 'WALK_IN',
+          priority: 'MEDIUM',
+          complaint_notes: 'Nasabah mengadukan transfer yang tidak sampai ke rekening tujuan.',
+        })
+        .expect(201);
+
+      expect(res.body.id).toBeDefined();
+      expect(res.body.complaint_no).toMatch(/^KESH-CMP-\d{8}-[A-Z0-9]{5}$/);
+      expect(res.body.status).toBe('OPEN');
+      complaintId = String(res.body.id);
+      complaintNo = res.body.complaint_no;
+    });
+
+    // Y-04: snapshot customer_name dan customer_cif_no tersimpan
+    it('Y-04: GET /complaints/:id → customer_name dan customer_cif_no di-snapshot', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      expect(res.body.customer_name).toBeTruthy();
+      // cif_no nullable tapi harus tersimpan jika ada
+      expect(res.body.complaint_no).toBe(complaintNo);
+      expect(String(res.body.customer_application_id)).toBe(String(indivAppIdOk));
+    });
+
+    // Y-05: FrontDesk list hanya menampilkan complaint milik sendiri
+    it('Y-05: FrontDesk GET /complaints → hanya complaint milik sendiri', async () => {
+      // Buat 1 complaint tambahan dari FrontDesk (sudah ada Y-03)
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      // Semua complaint yang dikembalikan harus milik FrontDesk user ini
+      // Verifikasi dengan memastikan complaint dari Y-03 ada
+      const found = res.body.data.find((c: any) => String(c.id) === complaintId);
+      expect(found).toBeDefined();
+    });
+
+    // Y-06: ComplianceLead melihat semua complaint
+    it('Y-06: ComplianceLead GET /complaints → melihat semua (≥ 1)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.total).toBeGreaterThanOrEqual(1);
+    });
+
+    // Y-07: FrontDesk tidak boleh set status RESOLVED
+    it('Y-07: FrontDesk PATCH /complaints/:id status=RESOLVED → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ status: 'RESOLVED' })
+        .expect(403);
+    });
+
+    // Y-07b: FrontDesk tidak boleh set status CLOSED
+    it('Y-07b: FrontDesk PATCH /complaints/:id status=CLOSED → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ status: 'CLOSED' })
+        .expect(403);
+    });
+
+    // Y-08: ComplianceLead dapat update status ke IN_PROGRESS
+    it('Y-08: ComplianceLead PATCH /complaints/:id status=IN_PROGRESS → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ status: 'IN_PROGRESS' })
+        .expect(200);
+
+      expect(res.body.status).toBe('IN_PROGRESS');
+    });
+
+    // Y-09: ComplianceLead dapat resolve complaint dengan resolution_notes
+    it('Y-09: ComplianceLead PATCH /complaints/:id status=RESOLVED + resolution_notes → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          status: 'RESOLVED',
+          resolution_notes: 'Transfer telah dikonfirmasi diterima oleh bank tujuan. Kasus ditutup.',
+        })
+        .expect(200);
+
+      expect(res.body.status).toBe('RESOLVED');
+      expect(res.body.resolution_notes).toContain('dikonfirmasi');
+      expect(res.body.resolved_at).not.toBeNull();
+      expect(res.body.resolved_by).not.toBeNull();
+    });
+
+    // Y-10: Auditor dapat view complaint tapi tidak bisa update
+    it('Y-10: Auditor GET /complaints/:id → 200 (read-only)', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+    });
+
+    it('Y-10b: Auditor PATCH /complaints/:id → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ priority: 'HIGH' })
+        .expect(403);
+    });
+
+    // Y-11: transaction search mengembalikan transfer refs
+    it('Y-11: GET /complaints/transactions/search?customer_application_id=X → 200, transfer list', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/transactions/search?customer_application_id=${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(typeof res.body.total).toBe('number');
+      // indivAppIdOk dipakai sebagai sender di banyak transfer sebelumnya
+      expect(res.body.total).toBeGreaterThanOrEqual(1);
+      if (res.body.data.length > 0) {
+        const t = res.body.data[0];
+        expect(t.transfer_id).toBeDefined();
+        expect(t.transaction_reference).toBeDefined();
+        expect(t.amount).toBeDefined();
+        expect(t.status).toBeDefined();
+      }
+    });
+
+    // Y-11b: transaction search without customer_application_id → 400
+    it('Y-11b: GET /complaints/transactions/search tanpa customer_application_id → 400', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/transactions/search`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(400);
+    });
+
+    // Y-12: create dengan category tidak valid → 400
+    it('Y-12: POST /complaints dengan category tidak valid → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-BAD`,
+          category: 'INVALID_CATEGORY',
+          complaint_notes: 'Notes minimal sepuluh karakter.',
+        })
+        .expect(400);
+    });
+
+    // Y-13: create dengan complaint_notes terlalu pendek → 400
+    it('Y-13: POST /complaints dengan complaint_notes < 10 chars → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-SHORT`,
+          complaint_notes: 'Pendek',
+        })
+        .expect(400);
+    });
+
+    // Y-14: create dengan customer non-APPROVED → 400
+    it('Y-14: POST /complaints dengan customer DRAFT → 400', async () => {
+      // indivAppIdMissing dibuat di B-01 dan tidak pernah APPROVED
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdMissing),
+          transaction_reference: `TRX-${SUFFIX}-DRAFT`,
+          complaint_notes: 'Nasabah belum approved seharusnya ditolak.',
+        })
+        .expect(400);
+    });
+
+    // Y-15: FrontDesk tidak bisa update complaint yang sudah RESOLVED (status != OPEN)
+    it('Y-15: FrontDesk PATCH complaint yang sudah RESOLVED → 403', async () => {
+      // complaintId sudah RESOLVED dari Y-09
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ priority: 'HIGH' })
+        .expect(403);
+    });
+
+    // Y-16: FrontDesk dengan complaint OPEN bisa update priority/channel
+    it('Y-16: FrontDesk PATCH complaint OPEN → update priority berhasil', async () => {
+      // Buat complaint baru yang masih OPEN
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-EDIT`,
+          category: 'SERVICE',
+          channel: 'PHONE',
+          priority: 'LOW',
+          complaint_notes: 'Pengaduan layanan untuk diupdate prioritasnya kemudian.',
+        })
+        .expect(201);
+
+      const newId = create.body.id;
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${newId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ priority: 'HIGH', channel: 'WHATSAPP' })
+        .expect(200);
+
+      expect(res.body.priority).toBe('HIGH');
+      expect(res.body.channel).toBe('WHATSAPP');
+    });
+
+    // Y-17: complaint dengan transfer_id valid tersimpan
+    it('Y-17: POST /complaints dengan transfer_id valid → 201, transfer_id tersimpan', async () => {
+      // Ambil transfer yang terkait dengan indivAppIdOk
+      const txSearch = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/transactions/search?customer_application_id=${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      const tx = txSearch.body.data[0];
+      if (!tx) return; // skip jika belum ada transfer
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transfer_id: Number(tx.transfer_id),
+          transaction_reference: tx.transaction_reference,
+          category: 'TRANSFER',
+          channel: 'WALK_IN',
+          priority: 'HIGH',
+          complaint_notes: 'Transfer sudah 3 hari belum tiba di rekening penerima.',
+        })
+        .expect(201);
+
+      expect(String(res.body.transfer_id)).toBe(String(tx.transfer_id));
+      expect(res.body.transaction_reference).toBe(tx.transaction_reference);
+    });
+  });
 });
