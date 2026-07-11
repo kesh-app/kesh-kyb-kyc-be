@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 export declare class AuthService {
     private users;
     private jwt;
+    private readonly logger;
     constructor(users: UsersService, jwt: JwtService);
     validateAndLogin(email: string, password: string): Promise<{
         access_token: string;

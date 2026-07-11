@@ -34,6 +34,286 @@ const CASH_THRESHOLD = 500_000_000; // LTKT cash single / aggregate
 const HIGH_VALUE_THRESHOLD = 100_000_000; // LTKM high-value alert
 const MANY_BENEFICIARIES_THRESHOLD = 5; // LTKM distinct beneficiaries/day
 
+// ── Rupiah formatter (used in alert matched_conditions) ──────────────────────
+function fmtRp(n: number): string {
+  return `Rp${Math.round(n)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ".")}`;
+}
+
+// ── Alert template registry ──────────────────────────────────────────────────
+interface AlertTemplate {
+  alert_code: string;
+  alert_name: string;
+  report_type: "LTKT" | "LTKM";
+  trigger_criteria: string;
+  parameters: string[];
+  analysis: string;
+  recommendation: string;
+  source: string;
+}
+
+const MONITORING_ALERT_TEMPLATES: Record<string, AlertTemplate> = {
+  // ── LTKM alerts ──
+  LTKM_PROFILE_ANOMALY: {
+    alert_code: "LTKM_PROFILE_ANOMALY",
+    alert_name: "Transaksi Tidak Sesuai Profil Nasabah / Anomaly Transaction",
+    report_type: "LTKM",
+    trigger_criteria:
+      "Transaksi meningkat signifikan dan tidak sesuai profil nasabah.",
+    parameters: [
+      "Lookback 90 hari",
+      "Volume transaksi naik ≥300%",
+      "Nilai transaksi > Rp500 juta/hari",
+    ],
+    analysis:
+      "Mismatch antara profil nasabah dan perilaku transaksi merupakan indikator suspicious transaction dan berpotensi placement/mule account activity.",
+    recommendation:
+      "Lakukan review profil transaksi 90 hari terakhir. Minta klarifikasi sumber dana dan tujuan transaksi kepada nasabah. Pertimbangkan eskalasi ke EDD.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_EDD_REQUIRED: {
+    alert_code: "LTKM_EDD_REQUIRED",
+    alert_name: "Transaksi Wajib EDD",
+    report_type: "LTKM",
+    trigger_criteria:
+      "Transaksi oleh nasabah/merchant kategori risiko tinggi sehingga wajib EDD.",
+    parameters: [
+      "PEP/Sanction/Adverse News",
+      "Transaksi ≥ Rp500 juta/hari",
+      "Rapid movement of funds",
+    ],
+    analysis:
+      "Nasabah high risk wajib EDD untuk memastikan sumber dana, tujuan transaksi, dan underlying activity.",
+    recommendation:
+      "Lakukan Enhanced Due Diligence (EDD). Verifikasi sumber dana, tujuan transaksi, dan underlying business activity. Pertimbangkan pelaporan LTKM ke PPATK.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_HIGH_RISK_COUNTRY: {
+    alert_code: "LTKM_HIGH_RISK_COUNTRY",
+    alert_name: "High Risk Country Transaction",
+    report_type: "LTKM",
+    trigger_criteria: "Transaksi ke/dari negara berisiko tinggi.",
+    parameters: [
+      "Negara FATF greylist/blacklist",
+      "Tax haven country",
+      "≥5 transaksi lintas negara/30 hari",
+    ],
+    analysis:
+      "Potensi cross-border laundering dan terrorist financing risk.",
+    recommendation:
+      "Verifikasi tujuan transaksi lintas negara. Periksa apakah counterpart berada di negara FATF greylist/blacklist. Pertimbangkan pelaporan ke PPATK.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_UNUSUAL_IDENTITY: {
+    alert_code: "LTKM_UNUSUAL_IDENTITY",
+    alert_name: "Penggunaan Identitas Tidak Wajar",
+    report_type: "LTKM",
+    trigger_criteria: "Indikasi manipulasi identitas.",
+    parameters: [
+      "Fake document",
+      "Multiple onboarding dengan device yang sama",
+    ],
+    analysis: "Indikasi synthetic identity dan fraud onboarding.",
+    recommendation:
+      "Lakukan verifikasi dokumen identitas secara manual. Periksa riwayat onboarding dengan device/IP yang sama. Koordinasikan dengan tim fraud.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_STRUCTURING_SMURFING: {
+    alert_code: "LTKM_STRUCTURING_SMURFING",
+    alert_name: "Structuring/Smurfing",
+    report_type: "LTKM",
+    trigger_criteria: "Transaksi dipecah untuk menghindari monitoring.",
+    parameters: [
+      "≥5 transaksi berulang",
+      "Pola nominal serupa",
+      "Lookback 7 hari",
+    ],
+    analysis: "Indikasi layering dan avoidance detection.",
+    recommendation:
+      "Analisis pola transaksi 7 hari terakhir. Verifikasi apakah ada pola pemecahan nominal untuk menghindari threshold. Pertimbangkan pelaporan LTKM.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_ABNORMAL_QRIS_ACTIVITY: {
+    alert_code: "LTKM_ABNORMAL_QRIS_ACTIVITY",
+    alert_name: "Abnormal QRIS Activity",
+    report_type: "LTKM",
+    trigger_criteria: "Aktivitas QRIS tidak sesuai profil usaha.",
+    parameters: ["Transaksi kecil repetitive ≥50x/hari"],
+    analysis:
+      "Potensi misuse of payment channel, nominee merchant, atau layering.",
+    recommendation:
+      "Review profil merchant dan frekuensi transaksi QRIS. Verifikasi underlying business activity.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_MERCHANT_CATEGORY_MISMATCH: {
+    alert_code: "LTKM_MERCHANT_CATEGORY_MISMATCH",
+    alert_name: "Merchant Category Mismatch",
+    report_type: "LTKM",
+    trigger_criteria: "Ketidaksesuaian profil merchant dan pola transaksi.",
+    parameters: [
+      "MCC mismatch",
+      "Lookback 90 hari",
+      "Volume transaksi meningkat ≥300%",
+      "Dominasi transaksi kategori berisiko tinggi",
+      "Transaksi jam abnormal 00.00–04.00",
+      "Refund/chargeback >25%",
+    ],
+    analysis:
+      "Potensi nominee merchant atau penyamaran underlying business.",
+    recommendation:
+      "Verifikasi MCC dan profil merchant. Lakukan site visit jika diperlukan. Periksa pola transaksi abnormal.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_ONLINE_GAMBLING: {
+    alert_code: "LTKM_ONLINE_GAMBLING",
+    alert_name: "Online Gambling Transaction",
+    report_type: "LTKM",
+    trigger_criteria: "Pola transaksi mengarah ke perjudian daring.",
+    parameters: [
+      "Lookback 30 hari",
+      "Frekuensi transaksi ≥50 transaksi/hari",
+      "Nominal random/repetitive Rp10 ribu–Rp500 ribu",
+      "Kode unik",
+      "Outgoing ≥80% dari incoming fund",
+      "Jam dominan 22.00–04.00",
+      "Device/IP terkait multiple account/merchant",
+    ],
+    analysis:
+      "Indikasi penggunaan payment channel untuk judi online, layering, mule account.",
+    recommendation:
+      "Analisis pola transaksi dan jam aktivitas. Verifikasi identitas counterpart. Pertimbangkan pemblokiran akun dan pelaporan.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_DORMANT_REACTIVATION: {
+    alert_code: "LTKM_DORMANT_REACTIVATION",
+    alert_name: "Dormant Account Reactivation",
+    report_type: "LTKM",
+    trigger_criteria:
+      "Rekening dormant aktif kembali dengan nominal besar/frekuensi tinggi.",
+    parameters: [
+      "Dormant days ≥180 hari",
+      "Aktivitas transaksi ≥Rp500 juta/hari",
+    ],
+    analysis: "Potensi nominee account atau rekening penampung.",
+    recommendation:
+      "Verifikasi identitas pemilik rekening. Lakukan re-KYC jika diperlukan. Review underlying activity.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKM_RAPID_MOVEMENT_FUNDS: {
+    alert_code: "LTKM_RAPID_MOVEMENT_FUNDS",
+    alert_name: "Rapid Movement of Funds",
+    report_type: "LTKM",
+    trigger_criteria:
+      "Dana diterima lalu dipindahkan cepat ke banyak rekening.",
+    parameters: [
+      "Outgoing ≥80% dari incoming fund",
+      "Perpindahan dana <1x24 jam",
+      "Transfer ke ≥10 rekening berbeda",
+      "Lookback 7 hari",
+    ],
+    analysis: "Indikasi layering/mule account.",
+    recommendation:
+      "Analisis pola aliran dana. Verifikasi tujuan transfer ke banyak beneficiary. Pertimbangkan pemblokiran sementara dan pelaporan LTKM.",
+    source: "internal_aml_alert_matrix",
+  },
+
+  // ── LTKT alerts ──
+  LTKT_CASH_DEPOSIT_PROFILE_MISMATCH: {
+    alert_code: "LTKT_CASH_DEPOSIT_PROFILE_MISMATCH",
+    alert_name: "Setoran Tunai Tidak Sesuai Profil Nasabah",
+    report_type: "LTKT",
+    trigger_criteria:
+      "Setoran tunai nominal signifikan tidak sesuai profil/histori.",
+    parameters: [
+      "Lookback 90 hari",
+      "Kenaikan transaksi ≥300%",
+      "Setoran tunai ≥Rp500 juta/hari",
+    ],
+    analysis: "Potensi placement dana hasil tindak pidana.",
+    recommendation:
+      "Verifikasi sumber dana tunai. Lakukan CDD/EDD terhadap nasabah. Laporkan sebagai LTKT ke PPATK sesuai ketentuan.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKT_CASH_DEPOSIT_STRUCTURING: {
+    alert_code: "LTKT_CASH_DEPOSIT_STRUCTURING",
+    alert_name: "Frequent Cash Deposit Structuring",
+    report_type: "LTKT",
+    trigger_criteria:
+      "Setoran tunai kecil berulang untuk menghindari threshold.",
+    parameters: [
+      "Lookback 7 hari",
+      "≥5 transaksi tunai/hari",
+      "Akumulasi ≥Rp500 juta",
+    ],
+    analysis: "Indikasi structuring/smurfing transaksi tunai.",
+    recommendation:
+      "Analisis pola setoran tunai 7 hari terakhir. Verifikasi underlying activity. Laporkan sebagai LTKT dan pertimbangkan laporan LTKM jika ada indikasi pencucian.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKT_ABNORMAL_CASH_OUT: {
+    alert_code: "LTKT_ABNORMAL_CASH_OUT",
+    alert_name: "Abnormal Cash-Out Transaction",
+    report_type: "LTKT",
+    trigger_criteria:
+      "Dana masuk lalu segera ditarik tunai tanpa underlying jelas.",
+    parameters: [
+      "Penarikan ≥80% dana masuk",
+      "≤1 hari sejak incoming transfer",
+      "Nominal ≥Rp500 juta",
+    ],
+    analysis: "Indikasi layering untuk memutus jejak transaksi.",
+    recommendation:
+      "Verifikasi tujuan penarikan tunai besar. Analisis hubungan incoming-outgoing fund. Pertimbangkan pelaporan LTKT.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKT_DORMANT_CASH_ACTIVITY: {
+    alert_code: "LTKT_DORMANT_CASH_ACTIVITY",
+    alert_name: "Dormant Cash Activity",
+    report_type: "LTKT",
+    trigger_criteria:
+      "Rekening dormant aktif dan melakukan transaksi tunai besar.",
+    parameters: [
+      "Dormant days ≥180 hari",
+      "Aktivitas tunai ≥Rp500 juta/hari",
+    ],
+    analysis:
+      "Potensi nominee account/account takeover/penampungan dana.",
+    recommendation:
+      "Lakukan re-KYC dan verifikasi identitas. Bekukan akun sementara jika diperlukan. Laporkan sebagai LTKT.",
+    source: "internal_aml_alert_matrix",
+  },
+  LTKT_FREQUENT_CASH_ACTIVITY: {
+    alert_code: "LTKT_FREQUENT_CASH_ACTIVITY",
+    alert_name: "Frequent Cash Activity",
+    report_type: "LTKT",
+    trigger_criteria:
+      "Frekuensi transaksi tunai tinggi dan nominal besar tidak sesuai kebiasaan.",
+    parameters: [
+      "≥10 transaksi tunai/3 hari",
+      "Total nominal ≥Rp1 miliar",
+    ],
+    analysis:
+      "Red flag AML-CFT karena risiko tinggi pada transaksi tunai.",
+    recommendation:
+      "Analisis frekuensi dan nominal transaksi tunai. Verifikasi underlying activity. Laporkan sebagai LTKT.",
+    source: "internal_aml_alert_matrix",
+  },
+};
+
+// ── Rule code → alert code mapping ──────────────────────────────────────────
+const RULE_TO_ALERT_CODE: Record<string, string> = {
+  LTKT_CASH_SINGLE_500M: "LTKT_CASH_DEPOSIT_PROFILE_MISMATCH",
+  LTKT_CASH_AGGREGATE_DAILY_500M: "LTKT_CASH_DEPOSIT_STRUCTURING",
+  LTKM_HIGH_RISK_CUSTOMER: "LTKM_EDD_REQUIRED",
+  LTKM_PEP_RELATED: "LTKM_EDD_REQUIRED",
+  LTKM_SANCTION_RELATED: "LTKM_EDD_REQUIRED",
+  LTKM_EDD_RECOMMEND_LTKM: "LTKM_EDD_REQUIRED",
+  LTKM_STRUCTURING_DAILY: "LTKM_STRUCTURING_SMURFING",
+  LTKM_MANY_BENEFICIARIES_DAILY: "LTKM_RAPID_MOVEMENT_FUNDS",
+  LTKM_HIGH_VALUE_TRANSFER: "LTKM_PROFILE_ANOMALY",
+};
+
 const SEVERITY_RANK: Record<Severity, number> = {
   LOW: 1,
   MEDIUM: 2,
@@ -134,6 +414,161 @@ export class MonitoringService {
       // audit tidak boleh menggagalkan operasi utama
       this.logger.warn(`audit failed: ${e?.message}`);
     }
+  }
+
+  // ── Build structured alert information from a trigger + transfer context ──
+
+  private buildAlertInfo(
+    trigger: EvalTrigger,
+    ctx: any,
+  ): {
+    alert_code: string;
+    alert_name: string;
+    alert_information: Record<string, any>;
+  } {
+    const alertCode =
+      RULE_TO_ALERT_CODE[trigger.rule_code] ?? trigger.rule_code;
+    const template = MONITORING_ALERT_TEMPLATES[alertCode];
+
+    const matched_conditions: string[] = [];
+    const limitations: string[] = [];
+    const evidence: Record<string, any> = {};
+
+    if (ctx) {
+      if (ctx.cif_no) evidence.cif_no = ctx.cif_no;
+      if (ctx.application_id) evidence.application_id = Number(ctx.application_id);
+      if (ctx.txn_at)
+        evidence.transaction_date = new Date(ctx.txn_at)
+          .toISOString()
+          .split("T")[0];
+    }
+    if (trigger.amount != null) evidence.amount = trigger.amount;
+
+    const d = trigger.details ?? {};
+
+    switch (trigger.rule_code) {
+      case "LTKT_CASH_SINGLE_500M":
+        matched_conditions.push(
+          `Transaksi tunai tunggal ${fmtRp(trigger.amount ?? 0)}`,
+          `Melebihi threshold ${fmtRp(CASH_THRESHOLD)}`,
+        );
+        if (ctx?.id) {
+          evidence.transfer_id = Number(ctx.id);
+          evidence.transaction_ids = [Number(ctx.id)];
+        }
+        evidence.lookback_days = 1;
+        limitations.push(
+          "Lookback 90 hari tidak dihitung (data riwayat tidak diambil)",
+          "Kenaikan volume transaksi ≥300% tidak dibandingkan",
+        );
+        break;
+
+      case "LTKT_CASH_AGGREGATE_DAILY_500M":
+        matched_conditions.push(
+          `Total tunai harian ${fmtRp(d.cash_total ?? 0)}`,
+          `Jumlah transaksi tunai ${d.cash_count ?? 0} dalam 1 hari`,
+          `Melebihi threshold ${fmtRp(CASH_THRESHOLD)}`,
+        );
+        evidence.total_amount = d.cash_total;
+        evidence.transaction_count = d.cash_count;
+        evidence.lookback_days = 1;
+        limitations.push(
+          "Lookback 7 hari lintas hari belum dihitung (hanya 1 hari kalender)",
+        );
+        break;
+
+      case "LTKM_HIGH_RISK_CUSTOMER":
+        matched_conditions.push("Nasabah risk_level HIGH");
+        evidence.risk_level = "HIGH";
+        break;
+
+      case "LTKM_PEP_RELATED":
+        matched_conditions.push(
+          `Nasabah terkait PEP: ${(d.risk_factors ?? []).join(", ")}`,
+        );
+        evidence.risk_factors = d.risk_factors;
+        break;
+
+      case "LTKM_SANCTION_RELATED":
+        matched_conditions.push(
+          `Nasabah terkait DTTOT/PPPSPM: ${(d.risk_factors ?? []).join(", ")}`,
+        );
+        evidence.risk_factors = d.risk_factors;
+        break;
+
+      case "LTKM_EDD_RECOMMEND_LTKM":
+        matched_conditions.push("EDD merekomendasikan pelaporan LTKM");
+        if ((d.officer_recommendations ?? []).length > 0)
+          matched_conditions.push(
+            `Rekomendasi EDD: ${d.officer_recommendations.join(", ")}`,
+          );
+        break;
+
+      case "LTKM_STRUCTURING_DAILY":
+        matched_conditions.push(
+          `Total harian ${fmtRp(d.daily_total ?? 0)}`,
+          `Jumlah transaksi ${d.transaction_count ?? 0} dalam 1 hari`,
+          `Semua nominal di bawah threshold ${fmtRp(CASH_THRESHOLD)}`,
+        );
+        evidence.total_amount = d.daily_total;
+        evidence.transaction_count = d.transaction_count;
+        evidence.lookback_days = 1;
+        limitations.push(
+          "Lookback 7 hari lintas hari belum dihitung (hanya 1 hari kalender)",
+          "Pola nominal serupa belum dianalisis",
+        );
+        break;
+
+      case "LTKM_MANY_BENEFICIARIES_DAILY":
+        matched_conditions.push(
+          `Jumlah beneficiary unik ${d.distinct_beneficiaries ?? 0} dalam 1 hari`,
+          `Melebihi threshold ${MANY_BENEFICIARIES_THRESHOLD} rekening tujuan berbeda`,
+        );
+        evidence.distinct_beneficiaries = d.distinct_beneficiaries;
+        evidence.lookback_days = 1;
+        limitations.push(
+          "Incoming fund data belum tersedia, outgoing ratio tidak dihitung",
+          "Perpindahan dana <24 jam belum diverifikasi",
+          `Threshold yang terdeteksi: ≥${MANY_BENEFICIARIES_THRESHOLD} rekening/hari (template: ≥10 rekening/7 hari)`,
+        );
+        break;
+
+      case "LTKM_HIGH_VALUE_TRANSFER":
+        matched_conditions.push(
+          `Nilai transaksi ${fmtRp(trigger.amount ?? 0)} (supporting alert)`,
+          `Melebihi threshold ${fmtRp(HIGH_VALUE_THRESHOLD)}`,
+        );
+        if (ctx?.id) evidence.transfer_id = Number(ctx.id);
+        limitations.push(
+          "Lookback 90 hari tidak dihitung",
+          "Volume transaksi ≥300% increase tidak dihitung",
+          "Alert ini bersifat supporting, tidak mengklasifikasikan kasus secara mandiri",
+        );
+        break;
+
+      default:
+        matched_conditions.push(trigger.rule_name);
+        break;
+    }
+
+    const alert_information: Record<string, any> = {
+      report_type: template?.report_type ?? trigger.trigger_type,
+      trigger_criteria: template?.trigger_criteria ?? trigger.rule_name,
+      parameters: template?.parameters ?? [],
+      analysis: template?.analysis ?? "",
+      recommendation: template?.recommendation ?? "",
+      matched_conditions,
+      evidence,
+      supported_by_system: matched_conditions.length > 0,
+      limitations,
+      source: template?.source ?? "internal_aml_alert_matrix",
+    };
+
+    return {
+      alert_code: alertCode,
+      alert_name: template?.alert_name ?? trigger.rule_name,
+      alert_information,
+    };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -439,7 +874,7 @@ export class MonitoringService {
     const existing = existingRows[0];
 
     if (existing) {
-      return this.appendTriggersToCase(existing, triggers, actorId);
+      return this.appendTriggersToCase(existing, triggers, actorId, ctx);
     }
 
     // Buat case baru
@@ -473,18 +908,25 @@ export class MonitoringService {
     );
     const created = caseRows[0];
 
-    await this.insertTriggers(created.id, triggers);
+    await this.insertTriggers(created.id, triggers, ctx);
     await this.audit(actorId, "MONITORING_CASE_DETECTED", String(created.id), null, created);
 
     return this.getCaseWithTriggers(created.id);
   }
 
-  private async insertTriggers(caseId: number, triggers: EvalTrigger[]) {
+  private async insertTriggers(
+    caseId: number,
+    triggers: EvalTrigger[],
+    ctx?: any,
+  ) {
     for (const t of triggers) {
+      const { alert_code, alert_name, alert_information } =
+        this.buildAlertInfo(t, ctx ?? null);
       await this.pool.query(
         `INSERT INTO monitoring_case_triggers
-           (case_id, trigger_type, rule_code, rule_name, severity, score, amount, details)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+           (case_id, trigger_type, rule_code, rule_name, severity, score, amount, details,
+            alert_code, alert_name, alert_information)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
         [
           caseId,
           t.trigger_type,
@@ -494,6 +936,9 @@ export class MonitoringService {
           t.score ?? null,
           t.amount ?? null,
           JSON.stringify(t.details ?? {}),
+          alert_code,
+          alert_name,
+          JSON.stringify(alert_information),
         ],
       );
     }
@@ -503,6 +948,7 @@ export class MonitoringService {
     existing: any,
     triggers: EvalTrigger[],
     actorId: number | string | null,
+    ctx?: any,
   ) {
     // Trigger yang sudah ada (hindari duplikat rule_code)
     const { rows: existTrig } = await this.pool.query(
@@ -513,7 +959,7 @@ export class MonitoringService {
     const newTriggers = triggers.filter((t) => !existingCodes.has(t.rule_code));
 
     if (newTriggers.length > 0) {
-      await this.insertTriggers(existing.id, newTriggers);
+      await this.insertTriggers(existing.id, newTriggers, ctx);
     }
 
     // Recompute case_type & severity dari seluruh trigger case, hanya yang
@@ -688,9 +1134,19 @@ export class MonitoringService {
     params.push(limit);
     params.push(offset);
     const { rows: data } = await this.pool.query(
-      `SELECT * FROM monitoring_cases
+      `SELECT mc.*,
+         COALESCE(
+           (SELECT array_agg(DISTINCT t.alert_name ORDER BY t.alert_name)
+            FROM monitoring_case_triggers t
+            WHERE t.case_id = mc.id AND t.alert_name IS NOT NULL),
+           ARRAY[]::text[]
+         ) AS alert_names,
+         (SELECT COUNT(*)::int
+          FROM monitoring_case_triggers t
+          WHERE t.case_id = mc.id AND t.alert_code IS NOT NULL) AS alert_count
+       FROM monitoring_cases mc
        WHERE ${whereSql}
-       ORDER BY id DESC
+       ORDER BY mc.id DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );

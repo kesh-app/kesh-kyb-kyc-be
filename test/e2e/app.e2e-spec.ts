@@ -268,14 +268,17 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.risk).toBeNull();
     });
 
-    it('B-03: GET /applications → 200, list berisi item', async () => {
+    it('B-03: GET /applications → 200, envelope {data, total, page, limit}', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/applications`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
-      expect(Array.isArray(res.body)).toBe(true);
-      expect(res.body.length).toBeGreaterThan(0);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(typeof res.body.total).toBe('number');
+      expect(res.body.page).toBe(1);
+      expect(res.body.limit).toBe(20);
     });
   });
 
@@ -1545,7 +1548,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${sysAdminToken}`)
         .expect(200);
 
-      expect(Array.isArray(res.body)).toBe(true);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body).toHaveProperty('total');
+      expect(res.body).toHaveProperty('page');
+      expect(res.body).toHaveProperty('limit');
     });
 
     it('J-05: GET /applications/:id dengan SystemAdmin → 200', async () => {
@@ -4025,6 +4031,167 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return caseId;
     }
 
+    // ── T-A1: LTKT single cash trigger → alert_information Setoran Tunai Tidak Sesuai Profil ──
+    it('T-A1: LTKT_CASH_SINGLE_500M trigger has alert_name Setoran Tunai Tidak Sesuai Profil Nasabah', async () => {
+      const appId = await createApprovedIndividual(`80001${SUFFIX}`, `08001${SUFFIX}`);
+      const trId = await createTransfer(appId, {
+        amount: 500_000_000,
+        transfer_method: 'CASH',
+        benef: `8801${SUFFIX}`,
+      });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      const t = ev.body.triggers.find((x: any) => x.rule_code === 'LTKT_CASH_SINGLE_500M');
+      expect(t).toBeDefined();
+      expect(t.alert_name).toBe('Setoran Tunai Tidak Sesuai Profil Nasabah');
+      expect(t.alert_code).toBe('LTKT_CASH_DEPOSIT_PROFILE_MISMATCH');
+      expect(t.alert_information).toBeDefined();
+      expect(t.alert_information.report_type).toBe('LTKT');
+      expect(Array.isArray(t.alert_information.matched_conditions)).toBe(true);
+      expect(t.alert_information.matched_conditions.length).toBeGreaterThan(0);
+      expect(t.alert_information.supported_by_system).toBe(true);
+      expect(Array.isArray(t.alert_information.limitations)).toBe(true);
+      expect(t.alert_information.evidence.amount).toBe(500_000_000);
+    });
+
+    // ── T-A2: LTKT aggregate cash trigger → alert_information Frequent Cash Deposit Structuring ──
+    it('T-A2: LTKT_CASH_AGGREGATE_DAILY_500M trigger has alert_name Frequent Cash Deposit Structuring', async () => {
+      const appId = await createApprovedIndividual(`80002${SUFFIX}`, `08002${SUFFIX}`);
+      await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `8821${SUFFIX}` });
+      const tr2 = await createTransfer(appId, { amount: 300_000_000, transfer_method: 'CASH', benef: `8822${SUFFIX}` });
+      const ev = await evaluate(tr2);
+      expect(ev.status).toBe(201);
+      const t = ev.body.triggers.find((x: any) => x.rule_code === 'LTKT_CASH_AGGREGATE_DAILY_500M');
+      expect(t).toBeDefined();
+      expect(t.alert_name).toBe('Frequent Cash Deposit Structuring');
+      expect(t.alert_code).toBe('LTKT_CASH_DEPOSIT_STRUCTURING');
+      expect(t.alert_information.report_type).toBe('LTKT');
+      expect(t.alert_information.matched_conditions.some((c: string) => c.includes('Total tunai harian'))).toBe(true);
+      expect(t.alert_information.evidence.transaction_count).toBeGreaterThanOrEqual(2);
+    });
+
+    // ── T-A3: LTKM high risk customer trigger → alert_information Transaksi Wajib EDD ──
+    it('T-A3: LTKM_HIGH_RISK_CUSTOMER trigger has alert_name Transaksi Wajib EDD', async () => {
+      const appId = await createApprovedIndividual(`80003${SUFFIX}`, `08003${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `8831${SUFFIX}` });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      const t = ev.body.triggers.find((x: any) => x.rule_code === 'LTKM_HIGH_RISK_CUSTOMER');
+      expect(t).toBeDefined();
+      expect(t.alert_name).toBe('Transaksi Wajib EDD');
+      expect(t.alert_code).toBe('LTKM_EDD_REQUIRED');
+      expect(t.alert_information.report_type).toBe('LTKM');
+      expect(t.alert_information.matched_conditions).toContain('Nasabah risk_level HIGH');
+      expect(t.alert_information.evidence.risk_level).toBe('HIGH');
+    });
+
+    // ── T-A4: LTKM structuring trigger → alert_information Structuring/Smurfing ──
+    it('T-A4: LTKM_STRUCTURING_DAILY trigger has alert_name Structuring/Smurfing', async () => {
+      const appId = await createApprovedIndividual(`80004${SUFFIX}`, `08004${SUFFIX}`);
+      // 3 transaksi non-cash < 500M, total ≥ 500M → structuring
+      await createTransfer(appId, { amount: 200_000_000, benef: `8841${SUFFIX}` });
+      await createTransfer(appId, { amount: 200_000_000, benef: `8842${SUFFIX}` });
+      await createTransfer(appId, { amount: 200_000_000, benef: `8843${SUFFIX}` });
+      const lastTr = await createTransfer(appId, { amount: 200_000_000, benef: `8844${SUFFIX}` });
+      const ev = await evaluate(lastTr);
+      expect(ev.status).toBe(201);
+      const t = ev.body.triggers.find((x: any) => x.rule_code === 'LTKM_STRUCTURING_DAILY');
+      expect(t).toBeDefined();
+      expect(t.alert_name).toBe('Structuring/Smurfing');
+      expect(t.alert_code).toBe('LTKM_STRUCTURING_SMURFING');
+      expect(t.alert_information.report_type).toBe('LTKM');
+      expect(t.alert_information.matched_conditions.some((c: string) => c.includes('Total harian'))).toBe(true);
+      expect(t.alert_information.limitations.length).toBeGreaterThan(0);
+    });
+
+    // ── T-A5: MANY_BENEFICIARIES trigger → Rapid Movement of Funds dengan limitation incoming ratio ──
+    it('T-A5: LTKM_MANY_BENEFICIARIES_DAILY has Rapid Movement of Funds + incoming ratio limitation', async () => {
+      const appId = await createApprovedIndividual(`80005${SUFFIX}`, `08005${SUFFIX}`);
+      let lastTr = '';
+      for (let i = 1; i <= 5; i++) {
+        lastTr = await createTransfer(appId, { amount: 1_000_000, benef: `885${i}${SUFFIX}` });
+      }
+      const ev = await evaluate(lastTr);
+      expect(ev.status).toBe(201);
+      const t = ev.body.triggers.find((x: any) => x.rule_code === 'LTKM_MANY_BENEFICIARIES_DAILY');
+      expect(t).toBeDefined();
+      expect(t.alert_name).toBe('Rapid Movement of Funds');
+      expect(t.alert_code).toBe('LTKM_RAPID_MOVEMENT_FUNDS');
+      expect(t.alert_information.matched_conditions.some((c: string) => c.includes('beneficiary unik'))).toBe(true);
+      const incomingLimitation = t.alert_information.limitations.some(
+        (l: string) => l.toLowerCase().includes('incoming fund'),
+      );
+      expect(incomingLimitation).toBe(true);
+      expect(t.alert_information.evidence.distinct_beneficiaries).toBeGreaterThanOrEqual(5);
+    });
+
+    // ── T-A6: HIGH_VALUE supporting alert has alert_information LTKM_PROFILE_ANOMALY ──
+    it('T-A6: LTKM_HIGH_VALUE_TRANSFER supporting alert has alert_information and still does not open case alone', async () => {
+      const appId = await createApprovedIndividual(`80006${SUFFIX}`, `08006${SUFFIX}`);
+      // high value alone → still triggered: false (no case)
+      const trIdAlone = await createTransfer(appId, { amount: 200_000_000, benef: `8861${SUFFIX}` });
+      const evAlone = await evaluate(trIdAlone);
+      expect(evAlone.body.triggered).toBe(false);
+
+      // high value + high risk → case opens, check the supporting trigger has alert info
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 200_000_000, benef: `8862${SUFFIX}` });
+      const ev = await evaluate(trId);
+      expect(ev.status).toBe(201);
+      const hvTrigger = ev.body.triggers.find((x: any) => x.rule_code === 'LTKM_HIGH_VALUE_TRANSFER');
+      expect(hvTrigger).toBeDefined();
+      expect(hvTrigger.alert_code).toBe('LTKM_PROFILE_ANOMALY');
+      expect(hvTrigger.alert_information).toBeDefined();
+      expect(hvTrigger.alert_information.limitations.some((l: string) => l.includes('supporting'))).toBe(true);
+      // case_type still LTKM (not expanded by supporting alert)
+      expect(ev.body.case_type).toBe('LTKM');
+    });
+
+    // ── T-A7: GET /monitoring/cases/:id returns alert_information on each trigger ──
+    it('T-A7: GET /monitoring/cases/:id returns triggers with alert_code, alert_name, alert_information', async () => {
+      const appId = await createApprovedIndividual(`80007${SUFFIX}`, `08007${SUFFIX}`);
+      await pgPool.query(
+        `UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`,
+        [appId],
+      );
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `8871${SUFFIX}` });
+      const ev = await evaluate(trId);
+      const caseId = String(ev.body.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases/${caseId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.triggers)).toBe(true);
+      for (const t of res.body.triggers) {
+        expect(t.alert_code).toBeDefined();
+        expect(t.alert_name).toBeDefined();
+        expect(t.alert_information).toBeDefined();
+        expect(t.alert_information.matched_conditions).toBeDefined();
+        expect(t.alert_information.evidence).toBeDefined();
+      }
+    });
+
+    // ── T-A8: GET /monitoring/cases list returns alert_names and alert_count per case ──
+    it('T-A8: GET /monitoring/cases list returns alert_names[] and alert_count per case', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases?limit=10`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      // every case item should have alert_names (array) and alert_count (number)
+      for (const c of res.body.data) {
+        expect(Array.isArray(c.alert_names)).toBe(true);
+        expect(typeof c.alert_count).toBe('number');
+      }
+    });
+
     // ── T-27: Director tidak bisa review PENDING malformed (compliance fields kosong) ──
     it('T-27: director-review pada PENDING tanpa compliance fields → 400', async () => {
       const caseId = await setupMalformedPendingCase(`70027${SUFFIX}`, `07027${SUFFIX}`);
@@ -4430,6 +4597,228 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(detail.body.transfer.sender_name).toBeTruthy();
         expect(typeof detail.body.transfer.sender_name).toBe('string');
       });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // PHASE 1: List Applications — Filters, Search, CIF, Date
+  // ══════════════════════════════════════════════════════════
+  describe('Phase 1: List Applications — filters & search', () => {
+    // Gunakan indivAppIdOk (APPROVED individual) dan bizAppId (APPROVED business)
+    // yang sudah dibuat dan di-approve di describe block D dan E sebelumnya.
+
+    const PH1_SUFFIX = `ph1${SUFFIX}`;
+    let ph1IndivAppId: string;
+    let ph1IndivCif: string;
+    let ph1IndivName: string;
+    let ph1BizAppId: string;
+    let ph1BizCif: string;
+    let ph1BizName: string;
+    let ph1CreatedAt: string;
+
+    beforeAll(async () => {
+      ph1IndivName = `PH1 Individu ${PH1_SUFFIX}`;
+      const indivRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: ph1IndivName,
+          identity_type: 'KTP',
+          identity_number: `31750000${PH1_SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. Phase1 No. 1',
+          pob: 'Jakarta',
+          dob: '1988-04-12',
+          nationality: 'ID',
+          phone: `08199${PH1_SUFFIX}`.slice(0, 13),
+          occupation: 'Karyawan Swasta',
+          gender: 'F',
+          signature_uri: 'https://storage.test/ph1_sig.png',
+        })
+        .expect(201);
+      ph1IndivAppId = String(indivRes.body.id);
+
+      // CIF digenerate saat create
+      const indivDetail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${ph1IndivAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      ph1IndivCif = indivDetail.body.person.cif_no;
+      ph1CreatedAt = indivDetail.body.application.created_at.slice(0, 10);
+
+      ph1BizName = `PT Phase1 Biz ${PH1_SUFFIX}`;
+      const bizRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: ph1BizName,
+          legal_form: 'PT',
+          incorporation_place: 'Surabaya',
+          incorporation_date: '2019-07-01',
+          business_license_number: `BL_PH1_${PH1_SUFFIX}`,
+          nib: `99001122${PH1_SUFFIX}`.slice(0, 13),
+          npwp: `11.222.333.4-${PH1_SUFFIX.slice(0, 3)}.${PH1_SUFFIX.slice(3, 6)}`,
+          address_line: 'Jl. Bisnis No. 2',
+          city: 'Surabaya',
+          province: 'Jawa Timur',
+          postal_code: '60111',
+          business_activity: 'perdagangan ekspor',
+          phone: `0318${PH1_SUFFIX}`.slice(0, 12),
+        })
+        .expect(201);
+      ph1BizAppId = String(bizRes.body.id);
+
+      const bizDetail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${ph1BizAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      ph1BizCif = bizDetail.body.business.cif_no;
+    }, 30000);
+
+    it('PH1-01: list response includes cif_no and display_name for individual', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ cif: ph1IndivCif })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+
+      const item = res.body.data[0];
+      expect(item.cif_no).toBe(ph1IndivCif);
+      expect(item.display_name).toBe(ph1IndivName);
+      expect(item.application_type).toBe('INDIVIDUAL');
+      expect(item.display_type).toBe('Individual');
+      expect(item.id).toBeDefined();
+      expect(item.status).toBeDefined();
+      expect(item.created_at).toBeDefined();
+    });
+
+    it('PH1-02: list response includes cif_no and display_name for business', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ cif: ph1BizCif })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+
+      const item = res.body.data[0];
+      expect(item.cif_no).toBe(ph1BizCif);
+      expect(item.display_name).toBe(ph1BizName);
+      expect(item.application_type).toBe('BUSINESS');
+      expect(item.display_type).toBe('Badan Usaha');
+    });
+
+    it('PH1-03: q search by name finds individual', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ q: ph1IndivName })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.some((r: any) => r.display_name === ph1IndivName)).toBe(true);
+    });
+
+    it('PH1-04: q search by name finds business', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ q: ph1BizName })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.some((r: any) => r.display_name === ph1BizName)).toBe(true);
+    });
+
+    it('PH1-05: cif query without dash matches individual CIF', async () => {
+      const noDash = ph1IndivCif.replace(/-/g, '');
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ cif: noDash })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(res.body.data[0].cif_no).toBe(ph1IndivCif);
+    });
+
+    it('PH1-06: cif query with legacy dash input matches individual CIF', async () => {
+      // Simulasikan input bergaya legacy: KSHI → KSH-I- (meski CIF modern tidak punya dash)
+      // Normalisasi pada kedua sisi (strip dash) memastikan ini tetap match
+      const withDashes = ph1IndivCif.replace(/^(KSH)([IB])/, '$1-$2-');
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ cif: withDashes })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(res.body.data[0].cif_no).toBe(ph1IndivCif);
+    });
+
+    it('PH1-07: date_from and date_to filter by created_at (application exists on its own created date)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ date_from: ph1CreatedAt, date_to: ph1CreatedAt })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.length).toBeGreaterThan(0);
+      // Semua hasil harus berada dalam rentang tanggal
+      for (const item of res.body.data) {
+        const createdDate = item.created_at.slice(0, 10);
+        expect(createdDate >= ph1CreatedAt).toBe(true);
+        expect(createdDate <= ph1CreatedAt).toBe(true);
+      }
+    });
+
+    it('PH1-08: date_from format invalid returns 400', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ date_from: '15/07/2026' })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+    });
+
+    it('PH1-09: date_to format invalid returns 400', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ date_to: '2026-7-10' })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+    });
+
+    it('PH1-10: q search by CIF string finds application', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ q: ph1IndivCif })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.some((r: any) => r.cif_no === ph1IndivCif)).toBe(true);
+    });
+
+    it('PH1-11: application_type filter returns only INDIVIDUAL results', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ application_type: 'INDIVIDUAL', limit: 50 })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(res.body.data.every((r: any) => r.application_type === 'INDIVIDUAL')).toBe(true);
+    });
+
+    it('PH1-12: application_type filter returns only BUSINESS results', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .query({ application_type: 'BUSINESS', limit: 50 })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(res.body.data.every((r: any) => r.application_type === 'BUSINESS')).toBe(true);
     });
   });
 });

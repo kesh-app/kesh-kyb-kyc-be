@@ -24,6 +24,7 @@ import {
   AddDocumentDto,
   CreatePartyDto,
   DecisionDto,
+  ListApplicationsQueryDto,
 } from "./dto";
 import { JwtAuthGuard } from "../auth/jwt.guard";
 import { Roles } from "../auth/roles.decorator";
@@ -39,8 +40,11 @@ export class ApplicationsController {
   ) {}
 
   @Get()
-  async list(@Query("limit") limit = 20, @Query("offset") offset = 0) {
-    return this.svc.list(Number(limit), Number(offset));
+  async list(
+    @Query(new ValidationPipe({ whitelist: true, transform: true }))
+    query: ListApplicationsQueryDto,
+  ) {
+    return this.svc.list(query);
   }
 
   @Get(":id")

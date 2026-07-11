@@ -2,10 +2,14 @@ import {
   IsDateString,
   IsEmail,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
+  Min,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 /**
  * INDIVIDUAL (KYC)
@@ -122,6 +126,32 @@ export class DecisionDto {
 
   @IsOptional() @IsString()
   reason?: string;
+}
+
+export class ListApplicationsQueryDto {
+  @IsOptional() @IsString()
+  q?: string;
+
+  @IsOptional() @IsString()
+  cif?: string;
+
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'date_from must be YYYY-MM-DD' })
+  date_from?: string;
+
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'date_to must be YYYY-MM-DD' })
+  date_to?: string;
+
+  @IsOptional() @IsIn(['INDIVIDUAL', 'BUSINESS'])
+  application_type?: 'INDIVIDUAL' | 'BUSINESS';
+
+  @IsOptional() @IsIn(['DRAFT', 'SUBMITTED', 'IN_REVIEW', 'ESCALATED', 'APPROVED', 'REJECTED'])
+  status?: string;
+
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1)
+  page?: number;
+
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1)
+  limit?: number;
 }
 
 export class CreatePartyDto {

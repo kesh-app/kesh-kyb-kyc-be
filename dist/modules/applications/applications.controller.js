@@ -26,8 +26,8 @@ let ApplicationsController = class ApplicationsController {
         this.svc = svc;
         this.uploads = uploads;
     }
-    async list(limit = 20, offset = 0) {
-        return this.svc.list(Number(limit), Number(offset));
+    async list(query) {
+        return this.svc.list(query);
     }
     async detail(appId) {
         return this.svc.getDetail(appId);
@@ -139,10 +139,9 @@ let ApplicationsController = class ApplicationsController {
 exports.ApplicationsController = ApplicationsController;
 __decorate([
     (0, common_1.Get)(),
-    __param(0, (0, common_1.Query)("limit")),
-    __param(1, (0, common_1.Query)("offset")),
+    __param(0, (0, common_1.Query)(new common_1.ValidationPipe({ whitelist: true, transform: true }))),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:paramtypes", [dto_1.ListApplicationsQueryDto]),
     __metadata("design:returntype", Promise)
 ], ApplicationsController.prototype, "list", null);
 __decorate([

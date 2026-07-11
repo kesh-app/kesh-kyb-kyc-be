@@ -891,15 +891,81 @@ let ApplicationsService = ApplicationsService_1 = class ApplicationsService {
          updated_by    = $3,
          updated_at    = now()`, [appId, JSON.stringify(snapshot), reviewerId]);
     }
-    async list(limit = 20, offset = 0) {
-        const { rows } = await this.pool.query(`SELECT a.id, a.type, a.status, a.created_at,
-              p.full_name as person_name, b.legal_name as business_name
-       FROM applications a
-       LEFT JOIN persons p ON p.id = a.person_id
-       LEFT JOIN business_entities b ON b.id = a.business_id
-       ORDER BY a.created_at DESC
-       LIMIT $1 OFFSET $2`, [limit, offset]);
-        return rows;
+    async list(query = {}) {
+        const { q, cif, date_from, date_to, application_type, status, page = 1, limit = 20, } = query;
+        const offset = (page - 1) * limit;
+        const params = [];
+        const conditions = [];
+        if (status) {
+            params.push(status);
+            conditions.push(`a.status = $${params.length}`);
+        }
+        if (application_type) {
+            params.push(application_type);
+            conditions.push(`a.type = $${params.length}`);
+        }
+        if (date_from) {
+            params.push(date_from);
+            conditions.push(`a.created_at >= $${params.length}::date`);
+        }
+        if (date_to) {
+            params.push(date_to);
+            conditions.push(`a.created_at < ($${params.length}::date + interval '1 day')`);
+        }
+        if (cif) {
+            const normalizedCif = cif.replace(/-/g, '').toUpperCase();
+            params.push(normalizedCif);
+            const idx = params.length;
+            conditions.push(`(UPPER(REPLACE(COALESCE(p.cif_no, ''), '-', '')) = $${idx} OR UPPER(REPLACE(COALESCE(b.cif_no, ''), '-', '')) = $${idx})`);
+        }
+        if (q) {
+            const pattern = `%${q}%`;
+            const cifPattern = `%${q.replace(/-/g, '')}%`;
+            params.push(pattern);
+            const pi = params.length;
+            params.push(cifPattern);
+            const ci = params.length;
+            conditions.push(`(
+        p.full_name ILIKE $${pi}
+        OR b.legal_name ILIKE $${pi}
+        OR p.email ILIKE $${pi}
+        OR p.identity_number ILIKE $${pi}
+        OR b.nib ILIKE $${pi}
+        OR b.npwp ILIKE $${pi}
+        OR REPLACE(COALESCE(p.cif_no, ''), '-', '') ILIKE $${ci}
+        OR REPLACE(COALESCE(b.cif_no, ''), '-', '') ILIKE $${ci}
+      )`);
+        }
+        const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+        const baseJoin = `
+      FROM applications a
+      LEFT JOIN persons p ON p.id = a.person_id
+      LEFT JOIN business_entities b ON b.id = a.business_id
+      LEFT JOIN application_risk ar ON ar.application_id = a.id
+      ${where}
+    `;
+        const [{ rows }, { rows: countRows }] = await Promise.all([
+            this.pool.query(`SELECT
+          a.id,
+          a.type AS application_type,
+          a.status,
+          a.created_at,
+          a.updated_at,
+          COALESCE(ar.override_level, ar.risk_level) AS risk_level,
+          CASE WHEN a.type = 'INDIVIDUAL' THEN p.cif_no ELSE b.cif_no END AS cif_no,
+          CASE WHEN a.type = 'INDIVIDUAL' THEN p.full_name ELSE b.legal_name END AS display_name,
+          CASE WHEN a.type = 'INDIVIDUAL' THEN 'Individual' ELSE 'Badan Usaha' END AS display_type
+        ${baseJoin}
+        ORDER BY a.created_at DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, limit, offset]),
+            this.pool.query(`SELECT COUNT(*) AS total ${baseJoin}`, params),
+        ]);
+        return {
+            data: rows,
+            total: Number(countRows[0].total),
+            page,
+            limit,
+        };
     }
     async listDocuments(appId) {
         const { rows: apps } = await this.pool.query(`SELECT id FROM applications WHERE id=$1`, [appId]);

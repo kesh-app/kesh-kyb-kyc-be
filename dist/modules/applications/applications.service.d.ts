@@ -82,7 +82,21 @@ export declare class ApplicationsService {
         };
     }>;
     private initEddForHighRisk;
-    list(limit?: number, offset?: number): Promise<any[]>;
+    list(query?: {
+        q?: string;
+        cif?: string;
+        date_from?: string;
+        date_to?: string;
+        application_type?: 'INDIVIDUAL' | 'BUSINESS';
+        status?: string;
+        page?: number;
+        limit?: number;
+    }): Promise<{
+        data: any[];
+        total: number;
+        page: number;
+        limit: number;
+    }>;
     listDocuments(appId: number): Promise<any[]>;
     getScreening(appId: number): Promise<{
         results: any[];

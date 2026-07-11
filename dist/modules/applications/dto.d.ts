@@ -47,6 +47,16 @@ export declare class DecisionDto {
     decision: 'APPROVED' | 'REJECTED';
     reason?: string;
 }
+export declare class ListApplicationsQueryDto {
+    q?: string;
+    cif?: string;
+    date_from?: string;
+    date_to?: string;
+    application_type?: 'INDIVIDUAL' | 'BUSINESS';
+    status?: string;
+    page?: number;
+    limit?: number;
+}
 export declare class CreatePartyDto {
     role: 'DIRECTOR' | 'COMMISSIONER' | 'MANAGER' | 'BO' | 'AUTHORIZED_REP';
     full_name: string;

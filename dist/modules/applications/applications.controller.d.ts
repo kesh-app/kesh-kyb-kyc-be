@@ -1,11 +1,16 @@
 import { ApplicationsService } from "./applications.service";
-import { CreateIndividualDto, CreateBusinessDto, AddDocumentDto, CreatePartyDto, DecisionDto } from "./dto";
+import { CreateIndividualDto, CreateBusinessDto, AddDocumentDto, CreatePartyDto, DecisionDto, ListApplicationsQueryDto } from "./dto";
 import { UploadsService } from "../uploads/uploads.service";
 export declare class ApplicationsController {
     private readonly svc;
     private readonly uploads;
     constructor(svc: ApplicationsService, uploads: UploadsService);
-    list(limit?: number, offset?: number): Promise<any[]>;
+    list(query: ListApplicationsQueryDto): Promise<{
+        data: any[];
+        total: number;
+        page: number;
+        limit: number;
+    }>;
     detail(appId: number): Promise<{
         application: any;
         person: any;
