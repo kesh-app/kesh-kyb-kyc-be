@@ -17,9 +17,14 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request = require('supertest');
+import * as path from 'path';
+import * as express from 'express';
 import { AppModule } from '../../src/app.module';
 
 const BASE = '/api';
+
+// KTP test — 16 digit, dipakai oleh semua individual create yang tidak spesifik test KTP validation
+const TEST_KTP_NUMBER = '3175001234567890';
 
 // Suffix 7 digit akhir epoch — unik per test run, hindari konflik unique constraint
 const SUFFIX = Date.now().toString().slice(-7);
@@ -56,6 +61,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     app = moduleFixture.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     app.setGlobalPrefix('api');
+
+    // Mirror main.ts bootstrap: must be before app.init() so it sits ahead of the NestJS router
+    const uploadDir = path.resolve(process.cwd(), process.env.UPLOAD_DIR || 'uploads');
+    app.use('/api/uploads', express.static(uploadDir, { index: false, dotfiles: 'deny' }));
+
     await app.init();
 
     // Ambil pool yang sama dengan aplikasi untuk verifikasi data tersimpan
@@ -160,6 +170,31 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     await app.close();
   });
 
+  // Helper: upload semua 3 dokumen foto wajib untuk INDIVIDUAL
+  async function uploadIndivDocs(appId: string | number) {
+    for (const dt of ['INDIVIDUAL_KTP_PHOTO', 'INDIVIDUAL_FACE_PHOTO', 'INDIVIDUAL_FACE_WITH_KTP_PHOTO']) {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: dt, file_uri: `https://storage.test/${dt.toLowerCase()}.jpg` })
+        .expect(201);
+    }
+  }
+
+  // Helper: upload hanya 2 foto wajah (saat KTP/legacy sudah terupload)
+  async function uploadFacePhotoDocs(appId: string | number) {
+    await request(app.getHttpServer())
+      .post(`${BASE}/applications/${appId}/documents`)
+      .set('Authorization', `Bearer ${complianceToken}`)
+      .send({ doc_type: 'INDIVIDUAL_FACE_PHOTO', file_uri: 'https://storage.test/individual_face_photo.jpg' })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`${BASE}/applications/${appId}/documents`)
+      .set('Authorization', `Bearer ${complianceToken}`)
+      .send({ doc_type: 'INDIVIDUAL_FACE_WITH_KTP_PHOTO', file_uri: 'https://storage.test/individual_face_with_ktp_photo.jpg' })
+      .expect(201);
+  }
+
   // ══════════════════════════════════════════════════════════
   // A. AUTH
   // ══════════════════════════════════════════════════════════
@@ -217,6 +252,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `Test Individu ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `317500${SUFFIX}`,
           address_identity: 'Jl. Test No. 1, Jakarta',
@@ -286,7 +322,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   // C. SUBMIT FAILS WHEN DOCS MISSING
   // ══════════════════════════════════════════════════════════
   describe('C. Submit fails when docs missing', () => {
-    it('C-01: PATCH /submit tanpa sig & doc → 400, missing array berisi keduanya', async () => {
+    it('C-01: PATCH /submit tanpa foto doc → 400, missing berisi 3 tipe dokumen foto', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${indivAppIdMissing}/submit`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -294,11 +330,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(res.body.message).toContain('belum lengkap');
       const missing: string[] = res.body.missing;
-      expect(missing.some((m) => m.includes('signature_uri'))).toBe(true);
-      expect(missing.some((m) => m.includes('dokumen identitas'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_KTP_PHOTO') || m.includes('foto KTP'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_PHOTO') || m.includes('foto wajah'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_WITH_KTP_PHOTO') || m.includes('wajah dengan KTP'))).toBe(true);
     });
 
-    it('C-02: GET /precheck tanpa sig & doc → 400, missing array berisi info', async () => {
+    it('C-02: GET /precheck tanpa foto doc → 400, missing array berisi info', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/applications/${indivAppIdMissing}/precheck`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -306,6 +343,96 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(Array.isArray(res.body.missing)).toBe(true);
       expect(res.body.missing.length).toBeGreaterThan(0);
+    });
+
+    it('C-03: submit tanpa INDIVIDUAL_KTP_PHOTO → 400, missing berisi foto KTP', async () => {
+      const cr = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Missing KTP Photo ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP', identity_number: `310001${SUFFIX}`,
+          address_identity: 'Jl. Test No. 3', pob: 'Jakarta', dob: '1990-01-01',
+          nationality: 'ID', phone: `0897001${SUFFIX}`, occupation: 'Karyawan', gender: 'M',
+        })
+        .expect(201);
+      const appId = String(cr.body.id);
+      for (const dt of ['INDIVIDUAL_FACE_PHOTO', 'INDIVIDUAL_FACE_WITH_KTP_PHOTO']) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: dt, file_uri: `https://storage.test/${dt}.jpg` })
+          .expect(201);
+      }
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('INDIVIDUAL_KTP_PHOTO') || m.includes('foto KTP'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_PHOTO'))).toBe(false);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_WITH_KTP_PHOTO'))).toBe(false);
+    });
+
+    it('C-04: submit tanpa INDIVIDUAL_FACE_PHOTO → 400, missing berisi foto wajah', async () => {
+      const cr = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Missing Face Photo ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP', identity_number: `310002${SUFFIX}`,
+          address_identity: 'Jl. Test No. 4', pob: 'Jakarta', dob: '1990-01-01',
+          nationality: 'ID', phone: `0897002${SUFFIX}`, occupation: 'Karyawan', gender: 'M',
+        })
+        .expect(201);
+      const appId = String(cr.body.id);
+      for (const dt of ['INDIVIDUAL_KTP_PHOTO', 'INDIVIDUAL_FACE_WITH_KTP_PHOTO']) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: dt, file_uri: `https://storage.test/${dt}.jpg` })
+          .expect(201);
+      }
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_PHOTO') || m.includes('foto wajah'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_KTP_PHOTO'))).toBe(false);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_WITH_KTP_PHOTO'))).toBe(false);
+    });
+
+    it('C-05: submit tanpa INDIVIDUAL_FACE_WITH_KTP_PHOTO → 400, missing berisi wajah+KTP', async () => {
+      const cr = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Missing FaceKTP Photo ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP', identity_number: `310003${SUFFIX}`,
+          address_identity: 'Jl. Test No. 5', pob: 'Jakarta', dob: '1990-01-01',
+          nationality: 'ID', phone: `0897003${SUFFIX}`, occupation: 'Karyawan', gender: 'M',
+        })
+        .expect(201);
+      const appId = String(cr.body.id);
+      for (const dt of ['INDIVIDUAL_KTP_PHOTO', 'INDIVIDUAL_FACE_PHOTO']) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: dt, file_uri: `https://storage.test/${dt}.jpg` })
+          .expect(201);
+      }
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_WITH_KTP_PHOTO') || m.includes('wajah dengan KTP'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_KTP_PHOTO'))).toBe(false);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_PHOTO'))).toBe(false);
     });
   });
 
@@ -319,6 +446,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `Individu OK ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `317600${SUFFIX}`,
           address_identity: 'Jl. Merdeka No. 10, Bandung',
@@ -337,22 +465,50 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       indivAppIdOk = String(res.body.id);
     });
 
-    it('D-02: POST /documents (KTP) → 201, status UPLOADED', async () => {
+    it('D-02: POST /documents (INDIVIDUAL_KTP_PHOTO) → 201, status UPLOADED', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/applications/${indivAppIdOk}/documents`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
-          doc_type: 'KTP',
-          file_uri: 'https://storage.test/docs/ktp.jpg',
+          doc_type: 'INDIVIDUAL_KTP_PHOTO',
+          file_uri: 'https://storage.test/docs/ktp_photo.jpg',
         })
         .expect(201);
 
-      expect(res.body.doc_type).toBe('KTP');
+      expect(res.body.doc_type).toBe('INDIVIDUAL_KTP_PHOTO');
       expect(res.body.status).toBe('UPLOADED');
       expect(String(res.body.application_id)).toBe(String(indivAppIdOk));
     });
 
-    it('D-03: GET /precheck setelah doc + sig → 200 ok', async () => {
+    it('D-02b: POST /documents (INDIVIDUAL_FACE_PHOTO) → 201, status UPLOADED', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${indivAppIdOk}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          doc_type: 'INDIVIDUAL_FACE_PHOTO',
+          file_uri: 'https://storage.test/docs/face_photo.jpg',
+        })
+        .expect(201);
+
+      expect(res.body.doc_type).toBe('INDIVIDUAL_FACE_PHOTO');
+      expect(res.body.status).toBe('UPLOADED');
+    });
+
+    it('D-02c: POST /documents (INDIVIDUAL_FACE_WITH_KTP_PHOTO) → 201, status UPLOADED', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${indivAppIdOk}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          doc_type: 'INDIVIDUAL_FACE_WITH_KTP_PHOTO',
+          file_uri: 'https://storage.test/docs/face_ktp_photo.jpg',
+        })
+        .expect(201);
+
+      expect(res.body.doc_type).toBe('INDIVIDUAL_FACE_WITH_KTP_PHOTO');
+      expect(res.body.status).toBe('UPLOADED');
+    });
+
+    it('D-03: GET /precheck setelah 3 foto doc → 200 ok', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/applications/${indivAppIdOk}/precheck`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -405,6 +561,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${complianceToken}`)
           .send({
             full_name: `Doc Owner ${suffix}`,
+            ktp_number: TEST_KTP_NUMBER,
             identity_type: 'KTP',
             identity_number: `319900${suffix}`,
             address_identity: 'Jl. Dokumen No. 1, Jakarta',
@@ -516,6 +673,81 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   });
 
   // ══════════════════════════════════════════════════════════
+  // D3. LOCAL STORAGE — upload file + signed URL + serve
+  // ══════════════════════════════════════════════════════════
+  describe('D3. Local storage file upload — signed URL & serve', () => {
+    let d3AppId: string;
+    let d3DocId: string;
+    let d3SignedUrl: string;
+
+    beforeAll(async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `D3 Upload ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `317600${SUFFIX}`,
+          address_identity: 'Jl. D3 No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1992-03-10',
+          nationality: 'ID',
+          phone: `0813${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          email: `d3upload${SUFFIX}@test.com`,
+        })
+        .expect(201);
+      d3AppId = String(res.body.id);
+    });
+
+    it('D3-01: POST /documents/upload (multipart JPEG) → 201, returns doc id + file_url', async () => {
+      // 1x1 JPEG minimal valid buffer
+      const jpegBuf = Buffer.from(
+        'ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b08000100010101110000ffc4001f0000010501010101010100000000000000000102030405060708090a0bffda00080101000000010aff00ffd9',
+        'hex',
+      );
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${d3AppId}/documents/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', jpegBuf, { filename: 'ktp_photo.jpg', contentType: 'image/jpeg' })
+        .expect(201);
+
+      expect(res.body.id).toBeDefined();
+      expect(res.body.doc_type).toBeDefined();
+      // file_url returned by upload endpoint (signed URL or static URL)
+      expect(typeof res.body.file_url).toBe('string');
+      expect(res.body.file_url.length).toBeGreaterThan(0);
+      d3DocId = String(res.body.id);
+    });
+
+    it('D3-02: GET /documents/:docId/url → signed_url contains /api/uploads/', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${d3AppId}/documents/${d3DocId}/url`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(typeof res.body.signed_url).toBe('string');
+      expect(res.body.signed_url).toContain('/api/uploads/');
+      expect(res.body.expires_in).toBe(300);
+      d3SignedUrl = res.body.signed_url;
+    });
+
+    it('D3-03: GET signed_url path → 200, content-type image/jpeg', async () => {
+      // Extract path from absolute URL (e.g. https://host/api/uploads/...)
+      const urlPath = new URL(d3SignedUrl).pathname;
+      expect(urlPath).toMatch(/^\/api\/uploads\//);
+
+      const res = await request(app.getHttpServer())
+        .get(urlPath)
+        .expect(200);
+
+      expect(res.headers['content-type']).toMatch(/image\/jpeg/);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
   // E. DECISION — hanya setelah SUBMITTED / IN_REVIEW
   // ══════════════════════════════════════════════════════════
   describe('E. Decision flow', () => {
@@ -559,6 +791,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `Reject Test ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `317700${SUFFIX}`,
           address_identity: 'Jl. Ditolak No. 1',
@@ -577,6 +810,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .post(`${BASE}/applications/${rejectAppId}/documents`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/ktp2.jpg' });
+
+      await uploadFacePhotoDocs(rejectAppId);
 
       await request(app.getHttpServer())
         .patch(`${BASE}/applications/${rejectAppId}/submit`)
@@ -1648,6 +1883,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `Individu Sig Doc ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `317800${SUFFIX}`,
           address_identity: 'Jl. Signature No. 1, Surabaya',
@@ -1665,56 +1901,56 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       sigAppId = String(res.body.id);
     });
 
-    it('K-02: GET /precheck tanpa KTP dan tanpa SIGNATURE doc → 400, keduanya missing', async () => {
+    it('K-02: GET /precheck tanpa doc → 400, semua 3 foto doc missing', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/applications/${sigAppId}/precheck`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(400);
 
       const missing: string[] = res.body.missing;
-      expect(missing.some((m) => m.includes('signature_uri'))).toBe(true);
-      expect(missing.some((m) => m.includes('dokumen identitas'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_KTP_PHOTO') || m.includes('foto KTP'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_PHOTO') || m.includes('foto wajah'))).toBe(true);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_WITH_KTP_PHOTO') || m.includes('wajah dengan KTP'))).toBe(true);
     });
 
-    it('K-03: POST /documents KTP → 201', async () => {
+    it('K-03: POST /documents INDIVIDUAL_KTP_PHOTO → 201', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/applications/${sigAppId}/documents`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
-          doc_type: 'KTP',
-          file_uri: 'https://storage.test/docs/ktp_sig.jpg',
+          doc_type: 'INDIVIDUAL_KTP_PHOTO',
+          file_uri: 'https://storage.test/docs/ktp_photo_sig.jpg',
         })
         .expect(201);
 
-      expect(res.body.doc_type).toBe('KTP');
+      expect(res.body.doc_type).toBe('INDIVIDUAL_KTP_PHOTO');
     });
 
-    it('K-04: GET /precheck setelah KTP tapi belum ada SIGNATURE → 400, signature missing', async () => {
+    it('K-04: GET /precheck setelah INDIVIDUAL_KTP_PHOTO saja → 400, masih kurang 2 foto wajah', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/applications/${sigAppId}/precheck`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(400);
 
       const missing: string[] = res.body.missing;
-      expect(missing.some((m) => m.includes('signature_uri'))).toBe(true);
-      // dokumen identitas sudah ada, tidak boleh muncul lagi
-      expect(missing.some((m) => m.includes('dokumen identitas'))).toBe(false);
+      // KTP_PHOTO sudah ada — tidak boleh muncul
+      expect(missing.some((m) => m.includes('INDIVIDUAL_KTP_PHOTO'))).toBe(false);
+      // Dua foto wajah masih kurang
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_PHOTO') || m.includes('foto wajah'))).toBe(true);
     });
 
-    it('K-05: POST /documents SIGNATURE → 201', async () => {
-      const res = await request(app.getHttpServer())
-        .post(`${BASE}/applications/${sigAppId}/documents`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({
-          doc_type: 'SIGNATURE',
-          file_uri: 'https://storage.test/signatures/ttd.png',
-        })
-        .expect(201);
-
-      expect(res.body.doc_type).toBe('SIGNATURE');
+    it('K-05: POST /documents INDIVIDUAL_FACE_PHOTO + INDIVIDUAL_FACE_WITH_KTP_PHOTO → 201', async () => {
+      for (const dt of ['INDIVIDUAL_FACE_PHOTO', 'INDIVIDUAL_FACE_WITH_KTP_PHOTO']) {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/${sigAppId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: dt, file_uri: `https://storage.test/docs/${dt.toLowerCase()}.jpg` })
+          .expect(201);
+        expect(res.body.doc_type).toBe(dt);
+      }
     });
 
-    it('K-06: GET /precheck setelah KTP + SIGNATURE doc → 200 ok', async () => {
+    it('K-06: GET /precheck setelah 3 foto doc lengkap → 200 ok', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/applications/${sigAppId}/precheck`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -1723,7 +1959,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.ok).toBe(true);
     });
 
-    it('K-07: PATCH /submit dengan KTP + SIGNATURE doc → 200 SUBMITTED', async () => {
+    it('K-07: PATCH /submit dengan 3 foto doc → 200 SUBMITTED', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${sigAppId}/submit`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -1841,6 +2077,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `RBA Casino Test ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `317950${SUFFIX}`,
           address_identity: 'Jl. RBA No. 1, Jakarta',
@@ -1860,6 +2097,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/ktp_rba.jpg' })
         .expect(201);
+
+      await uploadFacePhotoDocs(rbaIndivId);
 
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${rbaIndivId}/submit`)
@@ -2291,6 +2530,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: EDD_PERSON_NAME,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: identNum,
           address_identity: 'Jl. EDD No. 1, Jakarta',
@@ -2324,6 +2564,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await pgPool.query(
         'UPDATE documents SET status=$1 WHERE id=$2', ['REJECTED', docRes.body.id],
       );
+
+      // Upload 2 foto wajah (tidak REJECTED) agar submit 3-doc requirement terpenuhi
+      await uploadFacePhotoDocs(appId);
 
       // Score: 15+40+15 = 70 → HIGH
       return appId;
@@ -2484,6 +2727,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: 'Budi Santoso Murni',
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `31890002${SUFFIX}`,
           address_identity: 'Jl. Murni No. 1, Bandung',
@@ -2504,6 +2748,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/low_ktp.jpg' })
         .expect(201);
+
+      await uploadFacePhotoDocs(lowId);
 
       const submitRes = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${lowId}/submit`)
@@ -2638,6 +2884,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: PEP_WL_NAME,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `31899000${SUFFIX}`,
           address_identity: 'Jl. PEP No. 1, Jakarta',
@@ -2658,6 +2905,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/pep_fh_ktp.jpg' })
         .expect(201);
+
+      await uploadFacePhotoDocs(pepWlAppId);
 
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${pepWlAppId}/submit`)
@@ -2699,6 +2948,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `PEP Self Declared ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `31899001${SUFFIX}`,
           address_identity: 'Jl. PEP SD No. 2, Bandung',
@@ -2727,6 +2977,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/pep_sd_ktp.jpg' })
         .expect(201);
+
+      await uploadFacePhotoDocs(pepSelfAppId);
 
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${pepSelfAppId}/submit`)
@@ -2787,6 +3039,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `CIF Test Individual ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: CIF_NIK,
           address_identity: 'Jl. CIF No. 1, Jakarta',
@@ -2889,6 +3142,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `CIF Test Individual 2 ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `32000098${SUFFIX}`,
           address_identity: 'Jl. CIF No. 2, Jakarta',
@@ -2915,12 +3169,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     it('Q-05: CIF tidak berubah setelah submit', async () => {
-      // Add KTP document first so precheck passes
+      // Add required photo docs so precheck passes
       await request(app.getHttpServer())
         .post(`${BASE}/applications/${cifIndivAppId}/documents`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/cif_ktp.jpg' })
         .expect(201);
+
+      await uploadFacePhotoDocs(cifIndivAppId);
 
       await request(app.getHttpServer())
         .patch(`${BASE}/applications/${cifIndivAppId}/submit`)
@@ -3025,6 +3281,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `BO Person First ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: BO_FIRST_NIK,
           address_identity: 'Jl. BO NIK No. 1, Jakarta',
@@ -3059,6 +3316,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `Indiv First ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: INDIV_FIRST_NIK,
           address_identity: 'Jl. Indiv First No. 2, Jakarta',
@@ -3148,6 +3406,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `WIC Customer ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `3299300${SUFFIX}`,
           address_identity: 'Jl. WIC No. 3, Bandung',
@@ -3207,7 +3466,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   });
 
   // ══════════════════════════════════════════════════════════
-  // S. RBA Occupation & Geography scoring (internal RBA mapping)
+  // S. RBA Occupation & Geography scoring (disabled — watchlist-only mode)
   // ══════════════════════════════════════════════════════════
   describe('S. RBA Occupation & Geography scoring', () => {
     // Helper: create individual, upload KTP, submit → return submit response body
@@ -3222,6 +3481,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `RBA Test ${opts.identNum}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: opts.identNum,
           address_identity: opts.address,
@@ -3243,6 +3503,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/rba_ktp.jpg' })
         .expect(201);
 
+      await uploadFacePhotoDocs(appId);
+
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/submit`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -3251,7 +3513,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return res.body;
     }
 
-    it('S-01: Occupation "PNS" → INDIVIDUAL_OCCUPATION_HIGH_RBA, score +20, severity HIGH', async () => {
+    // ── RBA disabled: no occupation/geography factors, risk_level LOW ──
+
+    it('S-01: Occupation "PNS" without watchlist → risk_level LOW, no INDIVIDUAL_OCCUPATION_HIGH_RBA', async () => {
       const body = await createAndSubmit({
         identNum: `3299501${SUFFIX}`,
         phone: `09001${SUFFIX}`,
@@ -3260,15 +3524,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const f = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_HIGH_RBA');
-      expect(f).toBeDefined();
-      expect(f.score).toBe(20);
-      expect(f.severity).toBe('HIGH');
-      expect(f.metadata?.matched).toBe('pns');
-      expect(body.risk.risk_score).toBeGreaterThanOrEqual(20);
+      expect(factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_HIGH_RBA')).toBeUndefined();
+      expect(body.risk.risk_level).toBe('LOW');
     });
 
-    it('S-02: Occupation "Pegawai BUMN" → INDIVIDUAL_OCCUPATION_MEDIUM_RBA, score +10, severity MEDIUM', async () => {
+    it('S-02: Occupation "Pegawai BUMN" without watchlist → risk_level LOW, no INDIVIDUAL_OCCUPATION_MEDIUM_RBA', async () => {
       const body = await createAndSubmit({
         identNum: `3299502${SUFFIX}`,
         phone: `09002${SUFFIX}`,
@@ -3277,15 +3537,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const f = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_MEDIUM_RBA');
-      expect(f).toBeDefined();
-      expect(f.score).toBe(10);
-      expect(f.severity).toBe('MEDIUM');
-      expect(f.metadata?.matched).toBe('pegawai bumn');
-      expect(body.risk.risk_score).toBeGreaterThanOrEqual(10);
+      expect(factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_MEDIUM_RBA')).toBeUndefined();
+      expect(body.risk.risk_level).toBe('LOW');
     });
 
-    it('S-03: Occupation "Pegawai Bank" → INDIVIDUAL_OCCUPATION_LOW_RBA, score 0 (info only)', async () => {
+    it('S-03: Occupation "Pegawai Bank" without watchlist → risk_level LOW, no INDIVIDUAL_OCCUPATION_LOW_RBA', async () => {
       const body = await createAndSubmit({
         identNum: `3299503${SUFFIX}`,
         phone: `09003${SUFFIX}`,
@@ -3294,14 +3550,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const f = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_LOW_RBA');
-      expect(f).toBeDefined();
-      expect(f.score).toBe(0);
-      expect(f.severity).toBe('LOW');
-      expect(f.metadata?.matched).toBe('pegawai bank');
+      expect(factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_LOW_RBA')).toBeUndefined();
+      expect(body.risk.risk_level).toBe('LOW');
     });
 
-    it('S-04: Address "DKI Jakarta" → GEOGRAPHY_HIGH_RBA, score +15, severity HIGH, metadata matched', async () => {
+    it('S-04: Address "DKI Jakarta" without watchlist → risk_level LOW, no GEOGRAPHY_HIGH_RBA', async () => {
       const body = await createAndSubmit({
         identNum: `3299504${SUFFIX}`,
         phone: `09004${SUFFIX}`,
@@ -3310,16 +3563,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const f = factors.find((x: any) => x.code === 'GEOGRAPHY_HIGH_RBA');
-      expect(f).toBeDefined();
-      expect(f.score).toBe(15);
-      expect(f.severity).toBe('HIGH');
-      expect(f.metadata?.matched).toBe('dki jakarta');
-      expect(f.metadata?.source).toBe('address_identity');
-      expect(body.risk.risk_score).toBeGreaterThanOrEqual(15);
+      expect(factors.find((x: any) => x.code === 'GEOGRAPHY_HIGH_RBA')).toBeUndefined();
+      expect(body.risk.risk_level).toBe('LOW');
     });
 
-    it('S-05: Address "DI Yogyakarta" → GEOGRAPHY_MEDIUM_RBA, score +7, severity MEDIUM', async () => {
+    it('S-05: Address "DI Yogyakarta" without watchlist → risk_level LOW, no GEOGRAPHY_MEDIUM_RBA', async () => {
       const body = await createAndSubmit({
         identNum: `3299505${SUFFIX}`,
         phone: `09005${SUFFIX}`,
@@ -3328,15 +3576,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const f = factors.find((x: any) => x.code === 'GEOGRAPHY_MEDIUM_RBA');
-      expect(f).toBeDefined();
-      expect(f.score).toBe(7);
-      expect(f.severity).toBe('MEDIUM');
-      expect(f.metadata?.matched).toBe('di yogyakarta');
-      expect(body.risk.risk_score).toBeGreaterThanOrEqual(7);
+      expect(factors.find((x: any) => x.code === 'GEOGRAPHY_MEDIUM_RBA')).toBeUndefined();
+      expect(body.risk.risk_level).toBe('LOW');
     });
 
-    it('S-06: Address "Papua" → GEOGRAPHY_LOW_RBA, score 0 (info only)', async () => {
+    it('S-06: Address "Papua" without watchlist → risk_level LOW, no GEOGRAPHY_LOW_RBA', async () => {
       const body = await createAndSubmit({
         identNum: `3299506${SUFFIX}`,
         phone: `09006${SUFFIX}`,
@@ -3345,14 +3589,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const f = factors.find((x: any) => x.code === 'GEOGRAPHY_LOW_RBA');
-      expect(f).toBeDefined();
-      expect(f.score).toBe(0);
-      expect(f.severity).toBe('LOW');
-      expect(f.metadata?.matched).toBe('papua');
+      expect(factors.find((x: any) => x.code === 'GEOGRAPHY_LOW_RBA')).toBeUndefined();
+      expect(body.risk.risk_level).toBe('LOW');
     });
 
-    it('S-07: HIGH occupation (Pegawai Negeri Sipil) + HIGH geography (Jakarta) → combined score ≥35', async () => {
+    it('S-07: Pegawai Negeri Sipil + Jakarta without watchlist → risk_level LOW, no RBA factors', async () => {
       const body = await createAndSubmit({
         identNum: `3299507${SUFFIX}`,
         phone: `09007${SUFFIX}`,
@@ -3361,21 +3602,21 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const occF = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_HIGH_RBA');
-      const geoF = factors.find((x: any) => x.code === 'GEOGRAPHY_HIGH_RBA');
-      expect(occF).toBeDefined();
-      expect(geoF).toBeDefined();
-      expect(occF.score).toBe(20);
-      expect(geoF.score).toBe(15);
-      expect(body.risk.risk_score).toBeGreaterThanOrEqual(35);
+      const rbaFactors = factors.filter((x: any) =>
+        x.code.endsWith('_RBA') || x.code.startsWith('GEOGRAPHY_'),
+      );
+      expect(rbaFactors).toHaveLength(0);
+      expect(body.risk.risk_level).toBe('LOW');
+      expect(body.risk.risk_score).toBe(0);
     });
 
-    it('S-08: PEP self-declared forces HIGH even with LOW occupation + LOW geography', async () => {
+    it('S-08: PEP self-declared forces HIGH even with LOW occupation + LOW geography (no RBA factors)', async () => {
       const create = await request(app.getHttpServer())
         .post(`${BASE}/applications/individual`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `RBA PEP Force ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `3299508${SUFFIX}`,
           address_identity: 'Jl. Arfak No. 99, Papua 98399',
@@ -3404,6 +3645,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/rba_pep_ktp.jpg' })
         .expect(201);
 
+      await uploadFacePhotoDocs(appId);
+
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/submit`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -3413,28 +3656,25 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.risk.risk_score).toBeGreaterThanOrEqual(70);
       const codes = res.body.risk.risk_factors.map((f: any) => f.code);
       expect(codes).toContain('INDIVIDUAL_PEP_SELF_DECLARED');
-      // LOW RBA factors still recorded
-      expect(codes).toContain('INDIVIDUAL_OCCUPATION_LOW_RBA');
-      expect(codes).toContain('GEOGRAPHY_LOW_RBA');
+      // RBA disabled — occupation/geography factors must NOT appear
+      expect(codes).not.toContain('INDIVIDUAL_OCCUPATION_LOW_RBA');
+      expect(codes).not.toContain('GEOGRAPHY_LOW_RBA');
     });
 
-    it('S-09: Risk factors include metadata.matched for RBA factors', async () => {
+    it('S-09: Pegawai Swasta + Jawa Barat without watchlist → risk_level LOW, no RBA factors', async () => {
       const body = await createAndSubmit({
         identNum: `3299509${SUFFIX}`,
         phone: `09009${SUFFIX}`,
-        occupation: 'Wiraswasta',
-        address: 'Jl. Niaga No. 2, Surabaya, Jawa Timur 60271',
+        occupation: 'Pegawai Swasta',
+        address: 'Jl. Merdeka No. 10, Bandung, Jawa Barat 40111',
       });
 
       const factors: any[] = body.risk.risk_factors;
-      const occF = factors.find((x: any) => x.code === 'INDIVIDUAL_OCCUPATION_HIGH_RBA');
-      const geoF = factors.find((x: any) => x.code === 'GEOGRAPHY_HIGH_RBA');
-
-      expect(occF?.metadata?.matched).toBeDefined();
-      expect(typeof occF?.metadata?.matched).toBe('string');
-      expect(geoF?.metadata?.matched).toBeDefined();
-      expect(typeof geoF?.metadata?.matched).toBe('string');
-      expect(geoF?.metadata?.source).toBe('address_identity');
+      const rbaFactors = factors.filter((x: any) =>
+        x.code.endsWith('_RBA') || (x.code.startsWith('GEOGRAPHY_') && x.source === 'rba_geography'),
+      );
+      expect(rbaFactors).toHaveLength(0);
+      expect(body.risk.risk_level).toBe('LOW');
     });
   });
 
@@ -3450,6 +3690,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: `MON Sender ${nik}`,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: nik,
           address_identity: 'Jl. Cendana No. 1, Bandung',
@@ -3469,6 +3710,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ doc_type: 'KTP', file_uri: 'https://storage.test/mon_ktp.jpg' })
         .expect(201);
+
+      await uploadFacePhotoDocs(appId);
 
       const submit = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/submit`)
@@ -4527,6 +4770,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${complianceToken}`)
           .send({
             full_name: `UF Sender ${SUFFIX}`,
+            ktp_number: TEST_KTP_NUMBER,
             identity_type: 'KTP',
             identity_number: `UF000${SUFFIX}`,
             address_identity: 'Jl. UF No. 1, Jakarta',
@@ -4546,6 +4790,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${complianceToken}`)
           .send({ doc_type: 'KTP', file_uri: 'https://storage.test/uf_ktp.jpg' })
           .expect(201);
+
+        await uploadFacePhotoDocs(ufAppId);
 
         await request(app.getHttpServer())
           .patch(`${BASE}/applications/${ufAppId}/submit`)
@@ -4623,6 +4869,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           full_name: ph1IndivName,
+          ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
           identity_number: `31750000${PH1_SUFFIX}`.slice(0, 16),
           address_identity: 'Jl. Phase1 No. 1',
@@ -4819,6 +5066,603 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(res.body.data.length).toBeGreaterThan(0);
       expect(res.body.data.every((r: any) => r.application_type === 'BUSINESS')).toBe(true);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // V. Individual CDD Extended — ktp_number, region, industry
+  // ══════════════════════════════════════════════════════════
+  describe('V. Individual CDD Extended', () => {
+
+    // ── V1. ktp_number validation ──────────────────────────
+    describe('V1. ktp_number validation', () => {
+      const baseIndivBody = (overrides: Record<string, any> = {}) => ({
+        full_name: `V KTP Test ${SUFFIX}`,
+        ktp_number: TEST_KTP_NUMBER,
+        identity_type: 'KTP',
+        identity_number: `321000${SUFFIX}`,
+        address_identity: 'Jl. KTP Test No. 1, Jakarta',
+        pob: 'Jakarta',
+        dob: '1990-01-01',
+        nationality: 'ID',
+        phone: `08200${SUFFIX}`,
+        occupation: 'Karyawan Swasta',
+        gender: 'M',
+        ...overrides,
+      });
+
+      it('V1-01: create tanpa ktp_number → 400', async () => {
+        const body = baseIndivBody();
+        delete (body as any).ktp_number;
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(body)
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('V1-02: ktp_number non-digit → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({ ktp_number: 'ABCDEFGHIJKLMNOP', identity_number: `321001${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('V1-03: ktp_number 17 digit (>16) → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({ ktp_number: '31750012345678901', identity_number: `321002${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('V1-04: ktp_number 14 digit (<15) → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({ ktp_number: '31750012345678', identity_number: `321003${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('V1-05: ktp_number 15 digit (valid) → 201', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({ ktp_number: '317500123456789', identity_number: `321004${SUFFIX}` }))
+          .expect(201);
+        expect(res.body.status).toBe('DRAFT');
+      });
+
+      it('V1-06: ktp_number 16 digit (valid) → 201', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({ ktp_number: '3175001234567890', identity_number: `321005${SUFFIX}` }))
+          .expect(201);
+        expect(res.body.status).toBe('DRAFT');
+      });
+
+      it('V1-07: sim_number and passport_number optional → 201', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({
+            sim_number: 'A12345678',
+            passport_number: 'C1234567',
+            identity_number: `321006${SUFFIX}`,
+          }))
+          .expect(201);
+        expect(res.body.status).toBe('DRAFT');
+      });
+
+      it('V1-08: sim_number > 20 chars → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({ sim_number: 'A'.repeat(21), identity_number: `321007${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toBeDefined();
+      });
+
+      it('V1-09: GET /applications/:id setelah create → person berisi ktp_number', async () => {
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseIndivBody({
+            ktp_number: '3175009876543210',
+            sim_number: 'B9999999',
+            passport_number: 'P123456',
+            alias: 'Alias Test',
+            identity_number: `321008${SUFFIX}`,
+          }))
+          .expect(201);
+        const id = String(create.body.id);
+
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${id}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        expect(res.body.person.ktp_number).toBe('3175009876543210');
+        expect(res.body.person.sim_number).toBe('B9999999');
+        expect(res.body.person.passport_number).toBe('P123456');
+        expect(res.body.person.alias).toBe('Alias Test');
+      });
+    });
+
+    // ── V2. Region cascade validation ──────────────────────
+    describe('V2. Region cascade validation', () => {
+      const baseBody = (overrides: Record<string, any> = {}) => ({
+        full_name: `V Region Test ${SUFFIX}`,
+        ktp_number: TEST_KTP_NUMBER,
+        identity_type: 'KTP',
+        identity_number: `322000${SUFFIX}`,
+        address_identity: 'Jl. Region No. 1',
+        pob: 'Jakarta',
+        dob: '1991-01-01',
+        nationality: 'ID',
+        phone: `08300${SUFFIX}`,
+        occupation: 'Karyawan',
+        gender: 'M',
+        ...overrides,
+      });
+
+      it('V2-01: valid full region chain → 201, GET returns names', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            province_code: '31',
+            city_code: '3171',
+            district_code: '3171010',
+            village_code: '3171010001',
+            identity_number: `322001${SUFFIX}`,
+          }))
+          .expect(201);
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${String(res.body.id)}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        expect(detail.body.person.province_code).toBe('31');
+        expect(detail.body.person.province_name).toBe('DKI Jakarta');
+        expect(detail.body.person.city_code).toBe('3171');
+        expect(detail.body.person.city_name).toBe('Kota Jakarta Pusat');
+        expect(detail.body.person.district_code).toBe('3171010');
+        expect(detail.body.person.district_name).toBe('Gambir');
+        expect(detail.body.person.village_code).toBe('3171010001');
+        expect(detail.body.person.village_name).toBe('Gambir');
+      });
+
+      it('V2-02: city_code tidak di bawah province_code → 400', async () => {
+        // 3273 = Kota Bandung, milik province 32 (Jawa Barat), bukan 31 (DKI Jakarta)
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            province_code: '31',
+            city_code: '3273',
+            identity_number: `322002${SUFFIX}`,
+          }))
+          .expect(400);
+        expect(res.body.message).toContain('province_code');
+      });
+
+      it('V2-03: district_code tidak di bawah city_code → 400', async () => {
+        // 3273010 = Astana Anyar, milik kota 3273 (Bandung), bukan 3171 (Jakarta Pusat)
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            province_code: '31',
+            city_code: '3171',
+            district_code: '3273010',
+            identity_number: `322003${SUFFIX}`,
+          }))
+          .expect(400);
+        expect(res.body.message).toContain('city_code');
+      });
+
+      it('V2-04: village_code tidak di bawah district_code → 400', async () => {
+        // 3273010001 = milik district 3273010 (Bandung), bukan 3171010 (Gambir)
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            province_code: '31',
+            city_code: '3171',
+            district_code: '3171010',
+            village_code: '3273010001',
+            identity_number: `322004${SUFFIX}`,
+          }))
+          .expect(400);
+        expect(res.body.message).toContain('district_code');
+      });
+
+      it('V2-05: province_code tidak ada → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({ province_code: '99', identity_number: `322005${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toContain('province_code');
+      });
+    });
+
+    // ── V3. industry_category & monthly_income_range ───────
+    describe('V3. industry_category and monthly_income_range', () => {
+      const baseBody = (overrides: Record<string, any> = {}) => ({
+        full_name: `V Cat Test ${SUFFIX}`,
+        ktp_number: TEST_KTP_NUMBER,
+        identity_type: 'KTP',
+        identity_number: `323000${SUFFIX}`,
+        address_identity: 'Jl. Cat No. 1',
+        pob: 'Bandung',
+        dob: '1993-01-01',
+        nationality: 'ID',
+        phone: `08400${SUFFIX}`,
+        occupation: 'Wiraswasta',
+        gender: 'F',
+        ...overrides,
+      });
+
+      it('V3-01: industry_category valid → 201', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            industry_category: 'Makanan dan Minuman',
+            monthly_income_range: 'Rata-rata Rp5 juta sampai Rp10 juta per bulan',
+            company_name: 'PT Test',
+            identity_number: `323001${SUFFIX}`,
+          }))
+          .expect(201);
+        expect(res.body.status).toBe('DRAFT');
+      });
+
+      it('V3-02: industry_category tidak valid → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({ industry_category: 'Invalid Kategori XYZ', identity_number: `323002${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toContain('industry_category');
+      });
+
+      it('V3-03: monthly_income_range tidak valid → 400', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({ monthly_income_range: 'Sangat Kaya', identity_number: `323003${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toContain('monthly_income_range');
+      });
+
+      it('V3-04: GET /applications/:id setelah create → industry_category dan monthly_income_range tersimpan', async () => {
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            industry_category: 'Elektronik',
+            monthly_income_range: 'Rata-rata lebih dari Rp20 juta sampai Rp50 juta per bulan',
+            company_name: 'PT Elektronik Test',
+            company_address: 'Jl. Elektronik No. 1',
+            identity_number: `323004${SUFFIX}`,
+          }))
+          .expect(201);
+        const id = String(create.body.id);
+
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${id}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        expect(res.body.person.industry_category).toBe('Elektronik');
+        expect(res.body.person.monthly_income_range).toBe('Rata-rata lebih dari Rp20 juta sampai Rp50 juta per bulan');
+        expect(res.body.person.company_name).toBe('PT Elektronik Test');
+      });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // X. address_identity — optional + auto-derive dari structured address
+  // ══════════════════════════════════════════════════════════
+  describe('X. address_identity derivation', () => {
+    it('X-01: create Individual dengan structured address (tanpa address_identity) → 201', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Structured Addr ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `317600X1${SUFFIX}`,
+          // no address_identity — use structured fields
+          province_code: '31',
+          city_code: '3171',
+          district_code: '3171010',
+          village_code: '3171010001',
+          street_address: 'Jl. Gambir Raya',
+          house_number: '12A',
+          rt_rw: '003/007',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0812X1${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+        })
+        .expect(201);
+
+      expect(res.body.status).toBe('DRAFT');
+    });
+
+    it('X-02: GET /applications/:id → address_identity tersimpan (derived dari structured)', async () => {
+      // Create fresh application with structured address
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Derived Addr ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `317600X2${SUFFIX}`,
+          province_code: '31',
+          city_code: '3171',
+          district_code: '3171010',
+          village_code: '3171010001',
+          street_address: 'Jl. Medan Merdeka',
+          house_number: '5',
+          rt_rw: '001/002',
+          pob: 'Jakarta',
+          dob: '1988-05-10',
+          nationality: 'ID',
+          phone: `0812X2${SUFFIX}`,
+          occupation: 'PNS',
+          gender: 'F',
+        })
+        .expect(201);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${create.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const addr = detail.body.person.address_identity as string;
+      expect(typeof addr).toBe('string');
+      expect(addr.length).toBeGreaterThan(0);
+      // derived harus mengandung street_address
+      expect(addr).toContain('Jl. Medan Merdeka');
+      // derived harus mengandung house_number
+      expect(addr).toContain('No. 5');
+      // derived harus mengandung RT/RW
+      expect(addr).toContain('RT/RW 001/002');
+      // derived harus mengandung nama wilayah (Gambir kecamatan)
+      expect(addr).toContain('Gambir');
+    });
+
+    it('X-03: create Individual legacy dengan address_identity → 201, tersimpan apa adanya', async () => {
+      const legacyAddr = 'Jl. Veteran No. 88 RT 001/002, Menteng, Jakarta Pusat 10310';
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Legacy Addr ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `317600X3${SUFFIX}`,
+          address_identity: legacyAddr,
+          pob: 'Jakarta',
+          dob: '1975-12-25',
+          nationality: 'ID',
+          phone: `0812X3${SUFFIX}`,
+          occupation: 'Wiraswasta',
+          gender: 'M',
+        })
+        .expect(201);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${create.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.person.address_identity).toBe(legacyAddr);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // W. References endpoints
+  // ══════════════════════════════════════════════════════════
+  describe('W. References endpoints', () => {
+    it('W-01: GET /references/provinces → 200, minimal 38 provinsi (termasuk 4 pemekaran Papua)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/provinces`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThanOrEqual(38);
+      const jakarta = res.body.data.find((p: any) => p.code === '31');
+      expect(jakarta).toBeDefined();
+      expect(jakarta.name).toBe('DKI Jakarta');
+    });
+
+    it('W-02: GET /references/provinces?q=Jakarta → filter by name', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/provinces?q=Jakarta`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.every((p: any) => p.name.toLowerCase().includes('jakarta'))).toBe(true);
+    });
+
+    it('W-03: GET /references/regencies?province_code=31 → hanya kota/kab DKI Jakarta', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/regencies?province_code=31`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+      expect(res.body.data.every((r: any) => r.province_code === '31')).toBe(true);
+    });
+
+    it('W-04: GET /references/districts?regency_code=3171 → kecamatan Jakarta Pusat', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/districts?regency_code=3171`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+      const gambir = res.body.data.find((d: any) => d.code === '3171010');
+      expect(gambir).toBeDefined();
+      expect(gambir.name).toBe('Gambir');
+    });
+
+    it('W-05: GET /references/villages?district_code=3171010 → kelurahan di Gambir', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/villages?district_code=3171010`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+      const gambir = res.body.data.find((v: any) => v.code === '3171010001');
+      expect(gambir).toBeDefined();
+      expect(gambir.name).toBe('Gambir');
+    });
+
+    it('W-06: GET /references/nationalities → data array dengan code ID', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/nationalities`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      const id = res.body.data.find((n: any) => n.code === 'ID');
+      expect(id).toBeDefined();
+      expect(id.name).toBe('Indonesia');
+    });
+
+    it('W-07: GET /references/nationalities?q=Indo → filter', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/nationalities?q=Indo`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.data.some((n: any) => n.code === 'ID')).toBe(true);
+    });
+
+    it('W-08: GET /references/industry-categories → 200, semua kategori tersedia', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/industry-categories`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThanOrEqual(45);
+      expect(res.body.data.some((c: any) => c.code === 'Elektronik')).toBe(true);
+    });
+
+    it('W-09: GET /references/monthly-income-ranges → 200, 6 range tersedia', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/monthly-income-ranges`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data).toHaveLength(6);
+    });
+
+    it('W-10: GET /references/provinces → semua 4 provinsi pemekaran Papua ada', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/provinces`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const provinces = res.body.data as Array<{ code: string; name: string }>;
+      const expected = [
+        { code: '92', name: 'Papua Barat Daya' },
+        { code: '95', name: 'Papua Selatan' },
+        { code: '96', name: 'Papua Tengah' },
+        { code: '97', name: 'Papua Pegunungan' },
+      ];
+      for (const exp of expected) {
+        const found = provinces.find((p) => p.code === exp.code);
+        expect(found).toBeDefined();
+        expect(found!.name).toBe(exp.name);
+      }
+    });
+
+    it('W-11: GET /references/provinces?q=Papua Barat Daya → returns data', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/provinces?q=Papua Barat Daya`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThanOrEqual(1);
+      const pbd = res.body.data.find((p: any) => p.code === '92');
+      expect(pbd).toBeDefined();
+      expect(pbd.name).toBe('Papua Barat Daya');
+    });
+
+    it('W-12: GET /references/provinces?q=Lampung → menemukan provinsi Lampung (code 18)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/provinces?q=Lampung`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      const lampung = res.body.data.find((p: any) => p.code === '18');
+      expect(lampung).toBeDefined();
+      expect(lampung.name).toBe('Lampung');
+    });
+
+    it('W-13: GET /references/regencies?province_code=18 → 15 kab/kota Lampung', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/regencies?province_code=18`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThanOrEqual(15);
+      const bandarLampung = res.body.data.find((r: any) => r.code === '1871');
+      expect(bandarLampung).toBeDefined();
+      expect(bandarLampung.name).toBe('Kota Bandar Lampung');
+    });
+
+    it('W-14: GET /references/districts?regency_code=1871 → kecamatan Bandar Lampung', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/districts?regency_code=1871`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThanOrEqual(20);
+      const enggal = res.body.data.find((d: any) => d.code === '1871170');
+      expect(enggal).toBeDefined();
+      expect(enggal.name).toBe('Enggal');
+    });
+
+    it('W-15: GET /references/villages?district_code=1871170 → kelurahan Kec. Enggal', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/villages?district_code=1871170`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThanOrEqual(6);
+      const enggalKel = res.body.data.find((v: any) => v.code === '1871170001');
+      expect(enggalKel).toBeDefined();
+      expect(enggalKel.name).toBe('Enggal');
     });
   });
 });

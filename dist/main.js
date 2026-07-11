@@ -68,9 +68,18 @@ async function bootstrap() {
     });
     app.useGlobalPipes(new common_1.ValidationPipe({ whitelist: true, transform: true }));
     app.setGlobalPrefix('api');
-    // serve file upload
+    // Serve uploaded files for LOCAL storage under /api/uploads.
+    // Must be under /api/ to match signed URLs generated from BASE_URL (which includes /api).
     const uploadDir = path.resolve(process.cwd(), process.env.UPLOAD_DIR || 'uploads');
-    app.use('/uploads', express.static(uploadDir));
+    app.use('/api/uploads', express.static(uploadDir, {
+        fallthrough: false,
+        index: false,
+        dotfiles: 'deny',
+        setHeaders: (res) => {
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+        },
+    }));
+    console.log(`[STORAGE] Local uploads static route enabled: /api/uploads -> ${uploadDir}`);
     // Warn early if OBS is configured but env vars are missing
     if ((process.env.STORAGE_PROVIDER || '').toUpperCase() === 'HUAWEI_OBS') {
         const obsRequired = [

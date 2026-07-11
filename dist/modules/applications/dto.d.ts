@@ -3,15 +3,32 @@
  */
 export declare class CreateIndividualDto {
     full_name: string;
+    alias?: string;
+    ktp_number: string;
+    sim_number?: string;
+    passport_number?: string;
     identity_type: 'KTP' | 'SIM' | 'PASPOR' | 'LAINNYA';
     identity_number: string;
-    address_identity: string;
+    address_identity?: string;
     address_residential?: string;
+    province_code?: string;
+    city_code?: string;
+    district_code?: string;
+    village_code?: string;
+    street_address?: string;
+    house_number?: string;
+    rt_rw?: string;
+    apartment_block?: string;
+    address_landmark?: string;
     pob: string;
     dob: string;
     nationality: string;
     phone: string;
     occupation: string;
+    industry_category?: string;
+    company_name?: string;
+    company_address?: string;
+    monthly_income_range?: string;
     gender: 'M' | 'F' | 'O';
     email?: string;
     signature_uri?: string;

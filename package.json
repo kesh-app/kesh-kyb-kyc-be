@@ -9,6 +9,7 @@
     "build": "nest build",
     "db:migrate": "node scripts/run-sql.cjs",
     "db:seed": "node scripts/seed.cjs",
+    "db:seed:regions": "node scripts/seed-regions.cjs",
     "test:unit": "jest --testEnvironment node --testRegex \"src/.*\\.spec\\.ts$\" --transform \"{\\\"^.+\\\\.ts$\\\":\\\"ts-jest\\\"}\" --forceExit",
     "test:e2e": "jest --config test/e2e/jest-e2e.json --forceExit --detectOpenHandles",
     "pm2:start": "pm2 start ecosystem.config.cjs --env development",

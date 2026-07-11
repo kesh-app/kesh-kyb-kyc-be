@@ -56,6 +56,10 @@ const HIGH_RISK_LEGAL_FORMS = ['YAYASAN', 'FOUNDATION', 'NONPROFIT', 'KOPERASI']
 // Placeholder daftar negara berisiko tinggi — dipelihara oleh compliance (FATF/BI)
 const HIGH_RISK_COUNTRIES: string[] = [];
 
+// ── RBA Occupation/Geography temporarily disabled ────────────────────────────
+// Set true to re-enable once compliance confirms the scoring parameters.
+const RBA_OCCUPATION_GEOGRAPHY_ENABLED = false;
+
 // ── RBA Occupation mapping — profil pekerjaan (RBA internal)
 const RBA_OCCUPATION_MAP = ([
   // HIGH (+20)
@@ -286,11 +290,113 @@ export class ApplicationsService {
     );
   }
 
+  // ── Region validation helpers ─────────────────────────────────────────────
+
+  private async validateRegionHierarchy(dto: any) {
+    const { province_code, city_code, district_code, village_code } = dto;
+
+    if (province_code) {
+      const { rows } = await this.pool.query(
+        `SELECT code FROM ref_provinces WHERE code=$1`, [province_code]);
+      if (!rows[0]) throw new BadRequestException(`province_code '${province_code}' tidak ditemukan`);
+    }
+
+    if (city_code) {
+      const q: any[] = [city_code];
+      let sql = `SELECT code, province_code FROM ref_regencies WHERE code=$1`;
+      const { rows } = await this.pool.query(sql, q);
+      if (!rows[0]) throw new BadRequestException(`city_code '${city_code}' tidak ditemukan`);
+      if (province_code && rows[0].province_code !== province_code) {
+        throw new BadRequestException(`city_code '${city_code}' bukan bagian dari province_code '${province_code}'`);
+      }
+    }
+
+    if (district_code) {
+      const { rows } = await this.pool.query(
+        `SELECT code, regency_code FROM ref_districts WHERE code=$1`, [district_code]);
+      if (!rows[0]) throw new BadRequestException(`district_code '${district_code}' tidak ditemukan`);
+      if (city_code && rows[0].regency_code !== city_code) {
+        throw new BadRequestException(`district_code '${district_code}' bukan bagian dari city_code '${city_code}'`);
+      }
+    }
+
+    if (village_code) {
+      const { rows } = await this.pool.query(
+        `SELECT code, district_code FROM ref_villages WHERE code=$1`, [village_code]);
+      if (!rows[0]) throw new BadRequestException(`village_code '${village_code}' tidak ditemukan`);
+      if (district_code && rows[0].district_code !== district_code) {
+        throw new BadRequestException(`village_code '${village_code}' bukan bagian dari district_code '${district_code}'`);
+      }
+    }
+  }
+
+  private async resolveRegionNames(dto: any) {
+    const names: Record<string, string | null> = {
+      province_name: null, city_name: null, district_name: null, village_name: null,
+    };
+    if (dto.province_code) {
+      const { rows } = await this.pool.query(
+        `SELECT name FROM ref_provinces WHERE code=$1`, [dto.province_code]);
+      names.province_name = rows[0]?.name ?? null;
+    }
+    if (dto.city_code) {
+      const { rows } = await this.pool.query(
+        `SELECT name FROM ref_regencies WHERE code=$1`, [dto.city_code]);
+      names.city_name = rows[0]?.name ?? null;
+    }
+    if (dto.district_code) {
+      const { rows } = await this.pool.query(
+        `SELECT name FROM ref_districts WHERE code=$1`, [dto.district_code]);
+      names.district_name = rows[0]?.name ?? null;
+    }
+    if (dto.village_code) {
+      const { rows } = await this.pool.query(
+        `SELECT name FROM ref_villages WHERE code=$1`, [dto.village_code]);
+      names.village_name = rows[0]?.name ?? null;
+    }
+    return names;
+  }
+
   // applications.service.ts
   async createIndividual(dto: any, userId: number, branchId?: number) {
     const norm = (s: string) => (s || "").replace(/\D+/g, "").trim(); // buang non-digit untuk KTP
     if (dto.identity_type === "KTP")
       dto.identity_number = norm(dto.identity_number);
+
+    // Validate region hierarchy if any region codes are provided
+    await this.validateRegionHierarchy(dto);
+
+    // Validate industry_category if provided
+    if (dto.industry_category) {
+      const { INDUSTRY_CATEGORIES } = await import('../references/references.service');
+      if (!INDUSTRY_CATEGORIES.includes(dto.industry_category)) {
+        throw new BadRequestException(`industry_category tidak valid: ${dto.industry_category}`);
+      }
+    }
+
+    // Validate monthly_income_range if provided
+    if (dto.monthly_income_range) {
+      const { MONTHLY_INCOME_RANGES } = await import('../references/references.service');
+      if (!MONTHLY_INCOME_RANGES.includes(dto.monthly_income_range)) {
+        throw new BadRequestException(`monthly_income_range tidak valid: ${dto.monthly_income_range}`);
+      }
+    }
+
+    // Resolve region names from codes
+    const regionNames = await this.resolveRegionNames(dto);
+
+    // Derive address_identity from structured fields if not explicitly provided
+    const effectiveAddressIdentity: string | null = dto.address_identity || [
+      dto.street_address,
+      dto.house_number ? `No. ${dto.house_number}` : null,
+      dto.rt_rw ? `RT/RW ${dto.rt_rw}` : null,
+      dto.apartment_block,
+      regionNames.village_name,
+      regionNames.district_name,
+      regionNames.city_name,
+      regionNames.province_name,
+      dto.address_landmark ? `Patokan: ${dto.address_landmark}` : null,
+    ].filter(Boolean).join(', ') || null;
 
     const client = await this.pool.connect();
     try {
@@ -311,21 +417,52 @@ export class ApplicationsService {
       // 2) kalau belum ada, insert person baru
       if (!personId) {
         const ins = await client.query(
-          `INSERT INTO persons (full_name, identity_type, identity_number, address_identity, address_residential,
-                              pob, dob, nationality, phone, occupation, gender, email, signature_uri)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-         RETURNING id`,
+          `INSERT INTO persons (
+            full_name, alias, identity_type, identity_number,
+            ktp_number, sim_number, passport_number,
+            address_identity, address_residential,
+            province_code, province_name, city_code, city_name,
+            district_code, district_name, village_code, village_name,
+            street_address, house_number, rt_rw, apartment_block, address_landmark,
+            pob, dob, nationality, phone, occupation,
+            industry_category, company_name, company_address, monthly_income_range,
+            gender, email, signature_uri
+          ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
+          ) RETURNING id`,
           [
             dto.full_name,
+            dto.alias || null,
             dto.identity_type,
             dto.identity_number,
-            dto.address_identity,
+            dto.ktp_number || null,
+            dto.sim_number || null,
+            dto.passport_number || null,
+            effectiveAddressIdentity,
             dto.address_residential || null,
+            dto.province_code || null,
+            regionNames.province_name || null,
+            dto.city_code || null,
+            regionNames.city_name || null,
+            dto.district_code || null,
+            regionNames.district_name || null,
+            dto.village_code || null,
+            regionNames.village_name || null,
+            dto.street_address || null,
+            dto.house_number || null,
+            dto.rt_rw || null,
+            dto.apartment_block || null,
+            dto.address_landmark || null,
             dto.pob,
             dto.dob,
             dto.nationality,
             dto.phone,
             dto.occupation,
+            dto.industry_category || null,
+            dto.company_name || null,
+            dto.company_address || null,
+            dto.monthly_income_range || null,
             dto.gender,
             dto.email || null,
             dto.signature_uri || null,
@@ -489,10 +626,15 @@ export class ApplicationsService {
     let person: any = null;
     if (app.person_id) {
       const { rows: pr } = await this.pool.query(
-        `SELECT id, full_name, identity_type, identity_number,
+        `SELECT id, full_name, alias, identity_type, identity_number,
+                ktp_number, sim_number, passport_number,
                 pob, dob, nationality, phone, email, gender,
-                occupation, address_identity, address_residential, signature_uri,
-                pep_self_declared, cif_no, cif_relationship_type
+                occupation, industry_category, company_name, company_address, monthly_income_range,
+                address_identity, address_residential,
+                province_code, province_name, city_code, city_name,
+                district_code, district_name, village_code, village_name,
+                street_address, house_number, rt_rw, apartment_block, address_landmark,
+                signature_uri, pep_self_declared, cif_no, cif_relationship_type
          FROM persons WHERE id=$1`,
         [app.person_id],
       );
@@ -575,19 +717,17 @@ export class ApplicationsService {
     const docSet = new Set(docs.map((d) => d.doc_type));
 
     if (app.type === "INDIVIDUAL") {
-      const { rows: pr } = await this.pool.query(
-        `SELECT signature_uri FROM persons WHERE id=$1`,
-        [app.person_id],
-      );
-      const person = pr[0];
-
       const missing: string[] = [];
-      // signature valid jika persons.signature_uri terisi ATAU ada dokumen SIGNATURE
-      const hasSignature = !!person?.signature_uri || docSet.has("SIGNATURE");
-      if (!hasSignature) missing.push("signature_uri (tanda tangan)");
-      if (!(docSet.has("KTP") || docSet.has("SIM") || docSet.has("PASPOR"))) {
-        missing.push("dokumen identitas (KTP/SIM/PASPOR)");
-      }
+      const hasPhotoKtp =
+        docSet.has("INDIVIDUAL_KTP_PHOTO") ||
+        docSet.has("KTP") ||
+        docSet.has("SIM") ||
+        docSet.has("PASPOR");
+      if (!hasPhotoKtp) missing.push("dokumen foto KTP (INDIVIDUAL_KTP_PHOTO)");
+      if (!docSet.has("INDIVIDUAL_FACE_PHOTO"))
+        missing.push("dokumen foto wajah (INDIVIDUAL_FACE_PHOTO)");
+      if (!docSet.has("INDIVIDUAL_FACE_WITH_KTP_PHOTO"))
+        missing.push("dokumen foto wajah dengan KTP (INDIVIDUAL_FACE_WITH_KTP_PHOTO)");
 
       if (missing.length) {
         throw new BadRequestException({
@@ -772,41 +912,43 @@ export class ApplicationsService {
         riskFactors.push({ code: "INDIVIDUAL_HIGH_RISK_OCCUPATION", label: "Pekerjaan berisiko tinggi", score: W.HIGH_RISK_OCCUPATION, severity: "MEDIUM", source: "profile", details: `Pekerjaan: ${p.occupation}` });
       }
 
-      // ── RBA: profil pekerjaan (occupation risk) ──
-      const occNorm = (p.occupation || "").trim().toLowerCase();
-      const rbaOcc = RBA_OCCUPATION_MAP.find(e => occNorm.includes(e.name));
-      if (rbaOcc) {
-        const pts = rbaOcc.risk === "HIGH" ? W.RBA_OCC_HIGH : rbaOcc.risk === "MEDIUM" ? W.RBA_OCC_MEDIUM : 0;
-        score += pts;
-        riskFactors.push({
-          code: `INDIVIDUAL_OCCUPATION_${rbaOcc.risk}_RBA`,
-          label: `Profil pekerjaan ${rbaOcc.risk.toLowerCase()} risk (RBA)`,
-          score: pts,
-          severity: rbaOcc.risk === "HIGH" ? "HIGH" : rbaOcc.risk === "MEDIUM" ? "MEDIUM" : "LOW",
-          source: "rba_occupation",
-          metadata: { matched: rbaOcc.name, source: "occupation" },
-        });
-      }
+      if (RBA_OCCUPATION_GEOGRAPHY_ENABLED) {
+        // ── RBA: profil pekerjaan (occupation risk) ──
+        const occNorm = (p.occupation || "").trim().toLowerCase();
+        const rbaOcc = RBA_OCCUPATION_MAP.find(e => occNorm.includes(e.name));
+        if (rbaOcc) {
+          const pts = rbaOcc.risk === "HIGH" ? W.RBA_OCC_HIGH : rbaOcc.risk === "MEDIUM" ? W.RBA_OCC_MEDIUM : 0;
+          score += pts;
+          riskFactors.push({
+            code: `INDIVIDUAL_OCCUPATION_${rbaOcc.risk}_RBA`,
+            label: `Profil pekerjaan ${rbaOcc.risk.toLowerCase()} risk (RBA)`,
+            score: pts,
+            severity: rbaOcc.risk === "HIGH" ? "HIGH" : rbaOcc.risk === "MEDIUM" ? "MEDIUM" : "LOW",
+            source: "rba_occupation",
+            metadata: { matched: rbaOcc.name, source: "occupation" },
+          });
+        }
 
-      // ── RBA: area geografis domisili (address risk) ──
-      const addrIdent = (p.address_identity || "").trim().toLowerCase();
-      const addrResi  = (p.address_residential || "").trim().toLowerCase();
-      const addrText  = `${addrIdent} ${addrResi}`.trim();
-      const rbaGeo = RBA_GEOGRAPHY_MAP.find(e => addrText.includes(e.name));
-      if (rbaGeo) {
-        const pts = rbaGeo.risk === "HIGH" ? W.RBA_GEO_HIGH : rbaGeo.risk === "MEDIUM" ? W.RBA_GEO_MEDIUM : 0;
-        score += pts;
-        const geoSource = addrIdent.includes(rbaGeo.name) ? "address_identity"
-          : addrResi.includes(rbaGeo.name) ? "address_residential"
-          : "address";
-        riskFactors.push({
-          code: `GEOGRAPHY_${rbaGeo.risk}_RBA`,
-          label: `Area geografis ${rbaGeo.risk.toLowerCase()} risk berdasarkan RBA`,
-          score: pts,
-          severity: rbaGeo.risk === "HIGH" ? "HIGH" : rbaGeo.risk === "MEDIUM" ? "MEDIUM" : "LOW",
-          source: "rba_geography",
-          metadata: { matched: rbaGeo.name, source: geoSource },
-        });
+        // ── RBA: area geografis domisili (address risk) ──
+        const addrIdent = (p.address_identity || "").trim().toLowerCase();
+        const addrResi  = (p.address_residential || "").trim().toLowerCase();
+        const addrText  = `${addrIdent} ${addrResi}`.trim();
+        const rbaGeo = RBA_GEOGRAPHY_MAP.find(e => addrText.includes(e.name));
+        if (rbaGeo) {
+          const pts = rbaGeo.risk === "HIGH" ? W.RBA_GEO_HIGH : rbaGeo.risk === "MEDIUM" ? W.RBA_GEO_MEDIUM : 0;
+          score += pts;
+          const geoSource = addrIdent.includes(rbaGeo.name) ? "address_identity"
+            : addrResi.includes(rbaGeo.name) ? "address_residential"
+            : "address";
+          riskFactors.push({
+            code: `GEOGRAPHY_${rbaGeo.risk}_RBA`,
+            label: `Area geografis ${rbaGeo.risk.toLowerCase()} risk berdasarkan RBA`,
+            score: pts,
+            severity: rbaGeo.risk === "HIGH" ? "HIGH" : rbaGeo.risk === "MEDIUM" ? "MEDIUM" : "LOW",
+            source: "rba_geography",
+            metadata: { matched: rbaGeo.name, source: geoSource },
+          });
+        }
       }
 
       const nat = (p.nationality || "").toUpperCase();
@@ -861,9 +1003,9 @@ export class ApplicationsService {
     const docTypes = new Set(docRows.map((d: any) => d.doc_type as string));
 
     if (app.type === "INDIVIDUAL") {
-      if (!["KTP", "SIM", "PASPOR"].some((d) => docTypes.has(d))) {
+      if (!["INDIVIDUAL_KTP_PHOTO", "KTP", "SIM", "PASPOR"].some((d) => docTypes.has(d))) {
         score += W.DOC_MISSING;
-        riskFactors.push({ code: "DOC_IDENTITY_MISSING", label: "Dokumen identitas belum diunggah (KTP/SIM/PASPOR)", score: W.DOC_MISSING, severity: "MEDIUM", source: "document" });
+        riskFactors.push({ code: "DOC_IDENTITY_MISSING", label: "Dokumen identitas belum diunggah", score: W.DOC_MISSING, severity: "MEDIUM", source: "document" });
       }
     } else {
       for (const req of ["AKTA_PENDIRIAN", "NIB_SIUP", "NPWP_BADAN"]) {

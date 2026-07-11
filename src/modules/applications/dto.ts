@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsString,
   Matches,
+  MaxLength,
   Min,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -18,17 +19,59 @@ export class CreateIndividualDto {
   @IsString() @IsNotEmpty()
   full_name!: string;
 
+  @IsOptional() @IsString()
+  alias?: string;
+
+  // Nomor KTP (NIK) — 15 atau 16 digit, hanya angka
+  @IsString() @IsNotEmpty() @Matches(/^\d{15,16}$/, { message: 'ktp_number harus 15-16 digit angka' })
+  ktp_number!: string;
+
+  @IsOptional() @IsString() @MaxLength(20)
+  sim_number?: string;
+
+  @IsOptional() @IsString() @MaxLength(20)
+  passport_number?: string;
+
   @IsIn(['KTP', 'SIM', 'PASPOR', 'LAINNYA'])
   identity_type!: 'KTP' | 'SIM' | 'PASPOR' | 'LAINNYA';
 
   @IsString() @IsNotEmpty()
   identity_number!: string;
 
-  @IsString() @IsNotEmpty()
-  address_identity!: string;
+  // Legacy: wajib untuk client lama. Bisa dikosongkan jika structured address dikirim.
+  @IsOptional() @IsString()
+  address_identity?: string;
 
   @IsOptional() @IsString()
   address_residential?: string;
+
+  // Alamat terstruktur (opsional)
+  @IsOptional() @IsString()
+  province_code?: string;
+
+  @IsOptional() @IsString()
+  city_code?: string;
+
+  @IsOptional() @IsString()
+  district_code?: string;
+
+  @IsOptional() @IsString()
+  village_code?: string;
+
+  @IsOptional() @IsString()
+  street_address?: string;
+
+  @IsOptional() @IsString() @MaxLength(50)
+  house_number?: string;
+
+  @IsOptional() @IsString() @MaxLength(20)
+  rt_rw?: string;
+
+  @IsOptional() @IsString() @MaxLength(100)
+  apartment_block?: string;
+
+  @IsOptional() @IsString()
+  address_landmark?: string;
 
   @IsString() @IsNotEmpty()
   pob!: string;
@@ -44,6 +87,19 @@ export class CreateIndividualDto {
 
   @IsString() @IsNotEmpty()
   occupation!: string;
+
+  // Pekerjaan tambahan (opsional)
+  @IsOptional() @IsString()
+  industry_category?: string;
+
+  @IsOptional() @IsString()
+  company_name?: string;
+
+  @IsOptional() @IsString()
+  company_address?: string;
+
+  @IsOptional() @IsString()
+  monthly_income_range?: string;
 
   @IsIn(['M', 'F', 'O'])
   gender!: 'M' | 'F' | 'O';

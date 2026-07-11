@@ -249,7 +249,7 @@ __decorate([
             fileSize: Number(process.env.MAX_UPLOAD_MB || 10) * 1024 * 1024,
         },
         fileFilter: (req, file, cb) => {
-            const allowed = ["image/png", "image/jpeg", "application/pdf"];
+            const allowed = ["image/png", "image/jpeg", "image/webp", "application/pdf"];
             if (!allowed.includes(file.mimetype)) {
                 return cb(new common_1.BadRequestException("File type not allowed"), false);
             }
@@ -320,12 +320,20 @@ function mimeToExt(mime) {
         return "png";
     if (mime === "image/jpeg")
         return "jpg";
+    if (mime === "image/webp")
+        return "webp";
     if (mime === "application/pdf")
         return "pdf";
     return "";
 }
 function inferDocType(name) {
     const n = (name || "").toUpperCase();
+    if (n.includes("FACE_WITH_KTP") || n.includes("WAJAH_KTP"))
+        return "INDIVIDUAL_FACE_WITH_KTP_PHOTO";
+    if (n.includes("INDIVIDUAL_KTP") || n.includes("KTP_PHOTO"))
+        return "INDIVIDUAL_KTP_PHOTO";
+    if (n.includes("FACE_PHOTO") || n.includes("FACE") || n.includes("WAJAH"))
+        return "INDIVIDUAL_FACE_PHOTO";
     if (n.includes("KTP"))
         return "KTP";
     if (n.includes("PASPOR"))
