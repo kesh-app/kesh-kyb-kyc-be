@@ -1,9 +1,29 @@
-import { IsDateString, IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import {
+  IsDateString,
+  IsIn,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+
+const PARTY_ROLES = [
+  'DIRECTOR',
+  'COMMISSIONER',
+  'MANAGER',
+  'BO',
+  'AUTHORIZED_REP',
+  'SHAREHOLDER',
+] as const;
+type PartyRole = (typeof PARTY_ROLES)[number];
 
 export class CreateBusinessPartyWithPersonDto {
   // role di entitas
-  @IsIn(['DIRECTOR','COMMISSIONER','MANAGER','BO','AUTHORIZED_REP'])
-  role!: 'DIRECTOR'|'COMMISSIONER'|'MANAGER'|'BO'|'AUTHORIZED_REP';
+  @IsIn(PARTY_ROLES as unknown as string[])
+  role!: PartyRole;
 
   // data person minimal (KYC individu ringkas)
   @IsString() @IsNotEmpty() full_name!: string;
@@ -19,11 +39,20 @@ export class CreateBusinessPartyWithPersonDto {
 
   @IsOptional() @IsString() occupation?: string;
   @IsOptional() @IsString() email?: string;
+
+  // ── Detail pemegang saham & Beneficial Owner (form terbaru) ──────────
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(100)
+  ownership_percentage?: number;
+
+  @IsOptional() @IsString() address?: string;
+  @IsOptional() @IsString() identity_document_type?: string;
+  @IsOptional() @IsString() source_of_funds?: string;
+  @IsOptional() @IsString() source_of_wealth?: string;
 }
 
 export class LinkExistingPersonDto {
-  @IsIn(['DIRECTOR','COMMISSIONER','MANAGER','BO','AUTHORIZED_REP'])
-  role!: 'DIRECTOR'|'COMMISSIONER'|'MANAGER'|'BO'|'AUTHORIZED_REP';
+  @IsIn(PARTY_ROLES as unknown as string[])
+  role!: PartyRole;
 
   @IsNotEmpty() person_id!: number;
 }

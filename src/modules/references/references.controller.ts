@@ -51,4 +51,14 @@ export class ReferencesController {
   getMonthlyIncomeRanges() {
     return this.svc.getMonthlyIncomeRanges();
   }
+
+  @Get('occupations')
+  getOccupations() {
+    return this.svc.getOccupations();
+  }
+
+  @Get('business-document-types')
+  getBusinessDocumentTypes() {
+    return this.svc.getBusinessDocumentTypes();
+  }
 }

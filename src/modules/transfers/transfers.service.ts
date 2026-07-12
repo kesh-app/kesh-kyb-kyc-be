@@ -79,6 +79,41 @@ export class TransfersService {
     );
   }
 
+  /**
+   * Hard guard: pengirim (sender_application_id) wajib ada dan berstatus
+   * APPROVED. Dipakai saat create, update draft, dan submit agar draft lama
+   * dengan pengirim non-APPROVED tidak bisa lolos ke pencatatan transfer.
+   */
+  private async assertSenderApproved(
+    applicationId: number | string | null | undefined,
+  ) {
+    if (applicationId === null || applicationId === undefined) {
+      throw new BadRequestException(
+        "Pengguna jasa harus berstatus APPROVED untuk pencatatan transfer.",
+      );
+    }
+
+    const { rows } = await this.pool.query(
+      `SELECT id, person_id, business_id, status
+         FROM applications
+        WHERE id = $1`,
+      [applicationId],
+    );
+
+    const senderApp = rows[0];
+    if (!senderApp) {
+      throw new BadRequestException("Sender application not found");
+    }
+
+    if (senderApp.status !== "APPROVED") {
+      throw new BadRequestException(
+        "Pengguna jasa harus berstatus APPROVED untuk pencatatan transfer.",
+      );
+    }
+
+    return senderApp;
+  }
+
   // ---------------------------------------------------------------------------
   // CREATE DRAFT
   // ---------------------------------------------------------------------------
@@ -91,21 +126,7 @@ export class TransfersService {
     }
 
     // ✅ validasi sender_application_id — harus ada & KYC/KYB APPROVED
-    const { rows: senderRows } = await this.pool.query(
-      `SELECT person_id, status
-     FROM applications
-     WHERE id = $1`,
-      [dto.sender_application_id],
-    );
-
-    if (!senderRows[0]) {
-      throw new BadRequestException("Sender application not found");
-    }
-
-    const senderApp = senderRows[0];
-    if (senderApp.status !== "APPROVED") {
-      throw new BadRequestException("Sender is not KYC/KYB approved");
-    }
+    await this.assertSenderApproved(dto.sender_application_id);
 
     // ── SNAP-ready derivations ──────────────────────────────────────────
     const partnerRef = await this.resolvePartnerReferenceNo(
@@ -219,6 +240,10 @@ export class TransfersService {
       throw new BadRequestException("Only DRAFT can be updated");
     }
 
+    // Hard guard: pengirim draft harus tetap APPROVED. Mencegah update draft
+    // lama yang pengirimnya sudah tidak APPROVED lagi.
+    await this.assertSenderApproved(row.sender_application_id);
+
     // partner_reference_no tidak pernah di-regenerate setelah create.
     const amountCurrency = normalizeCurrency(dto.currency ?? row.amount_currency);
     const amountValue = formatAmountValue(dto.amount);
@@ -313,6 +338,10 @@ export class TransfersService {
     if (row.status !== "DRAFT") {
       throw new BadRequestException("Only DRAFT can be submitted");
     }
+
+    // Hard guard: pengirim wajib tetap APPROVED saat submit. Mencegah draft
+    // lama dengan pengirim non-APPROVED lolos ke tahap SUBMITTED.
+    await this.assertSenderApproved(row.sender_application_id);
 
     // Jangan izinkan submit jika field transfer wajib belum lengkap.
     const missing: string[] = [];

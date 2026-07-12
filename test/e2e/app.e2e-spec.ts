@@ -844,13 +844,106 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('REJECTED');
       expect(res.body.decision_reason).toBe('Data tidak sesuai');
     });
+
+    // Helper: create → submit individual, return appId siap di-decide.
+    async function createSubmittedIndividual(tag: number): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Decide Role ${tag} ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3155${tag}${SUFFIX}`,
+          address_identity: 'Jl. Keputusan No. 1',
+          pob: 'Jakarta',
+          dob: '1990-05-05',
+          nationality: 'ID',
+          phone: `0813${tag}${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/decide_sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/decide_ktp.jpg' })
+        .expect(201);
+      await uploadFacePhotoDocs(appId);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      return appId;
+    }
+
+    it('E-04: FrontDesk approve KYC → 403 (tidak boleh memutuskan)', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdMissing}/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+    });
+
+    it('E-05: FrontDesk reject KYC → 403 (tidak boleh memutuskan)', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdMissing}/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'REJECTED', reason: 'test' })
+        .expect(403);
+    });
+
+    it('E-06: ComplianceStaff approve KYC → 200 APPROVED', async () => {
+      const appId = await createSubmittedIndividual(6);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .send({ decision: 'APPROVED', reason: 'lengkap' })
+        .expect(200);
+      expect(res.body.status).toBe('APPROVED');
+    });
+
+    it('E-07: ComplianceStaff reject KYC → 200 REJECTED', async () => {
+      const appId = await createSubmittedIndividual(7);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .send({ decision: 'REJECTED', reason: 'tidak sesuai' })
+        .expect(200);
+      expect(res.body.status).toBe('REJECTED');
+    });
+
+    it('E-08: ComplianceLead reject KYC → 200 REJECTED', async () => {
+      const appId = await createSubmittedIndividual(8);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'REJECTED', reason: 'tidak sesuai' })
+        .expect(200);
+      expect(res.body.status).toBe('REJECTED');
+    });
+
+    it('E-09: SystemAdmin approve KYC → 200 APPROVED', async () => {
+      const appId = await createSubmittedIndividual(9);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .send({ decision: 'APPROVED', reason: 'lengkap' })
+        .expect(200);
+      expect(res.body.status).toBe('APPROVED');
+    });
   });
 
   // ══════════════════════════════════════════════════════════
   // F. TRANSFER — blocked jika application belum APPROVED
   // ══════════════════════════════════════════════════════════
   describe('F. Transfer blocked before APPROVED', () => {
-    it('F-01: POST /transfers dengan DRAFT app → 400 "not KYC/KYB approved"', async () => {
+    it('F-01: POST /transfers dengan DRAFT app → 400 "harus berstatus APPROVED"', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
         .set('Authorization', `Bearer ${financeStaffToken}`)
@@ -863,7 +956,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         })
         .expect(400);
 
-      expect(res.body.message).toContain('not KYC/KYB approved');
+      expect(res.body.message).toBe(
+        'Pengguna jasa harus berstatus APPROVED untuk pencatatan transfer.',
+      );
     });
 
     it('F-02: POST /transfers dengan APPROVED app → 201 DRAFT + created_by terisi', async () => {
@@ -904,6 +999,138 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   });
 
   // ══════════════════════════════════════════════════════════
+  // FZ. TRANSFER — hard guard pengirim wajib APPROVED
+  //   Guard di create, update draft, dan submit. Status pengirim
+  //   dimanipulasi langsung via DB agar skenario terisolasi.
+  // ══════════════════════════════════════════════════════════
+  describe('FZ. Transfer approved-customer hard guard', () => {
+    const GUARD_MSG =
+      'Pengguna jasa harus berstatus APPROVED untuk pencatatan transfer.';
+
+    // Buat individual DRAFT lalu set status apa pun langsung via DB.
+    async function createAppWithStatus(status: string, n: number): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Guard ${n} ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3144${n}${SUFFIX}`,
+          address_identity: 'Jl. Guard No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0819${n}${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/guard_sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status=$2 WHERE id=$1`, [appId, status]);
+      return appId;
+    }
+
+    function transferBody(appId: string, amount = 100_000) {
+      return {
+        amount,
+        sender_application_id: Number(appId),
+        beneficiaryBankName: 'Bank Test',
+        beneficiaryAccountNumber: '1234567890',
+        beneficiaryAccountName: 'Penerima Guard',
+      };
+    }
+
+    it('FZ-01: create transfer dengan sender IN_REVIEW → 400', async () => {
+      const appId = await createAppWithStatus('IN_REVIEW', 1);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(transferBody(appId))
+        .expect(400);
+      expect(res.body.message).toBe(GUARD_MSG);
+    });
+
+    it('FZ-02: create transfer dengan sender REJECTED → 400', async () => {
+      const appId = await createAppWithStatus('REJECTED', 2);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(transferBody(appId))
+        .expect(400);
+      expect(res.body.message).toBe(GUARD_MSG);
+    });
+
+    it('FZ-03: update draft → 400 jika pengirim tidak lagi APPROVED', async () => {
+      const appId = await createAppWithStatus('APPROVED', 3);
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(transferBody(appId))
+        .expect(201);
+      const txId = String(create.body.id);
+
+      // Pengirim di-downgrade → update draft harus gagal.
+      await pgPool.query(`UPDATE applications SET status='REJECTED' WHERE id=$1`, [appId]);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(transferBody(appId, 150_000))
+        .expect(400);
+      expect(res.body.message).toBe(GUARD_MSG);
+    });
+
+    it('FZ-04: submit draft lama → 400 jika pengirim tidak lagi APPROVED', async () => {
+      const appId = await createAppWithStatus('APPROVED', 4);
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(transferBody(appId))
+        .expect(201);
+      const txId = String(create.body.id);
+
+      // Draft lama; pengirim jatuh ke DRAFT → submit harus gagal.
+      await pgPool.query(`UPDATE applications SET status='DRAFT' WHERE id=$1`, [appId]);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(400);
+      expect(res.body.message).toBe(GUARD_MSG);
+    });
+
+    it('FZ-05: sender search hanya mengembalikan aplikasi APPROVED', async () => {
+      const appId = await createAppWithStatus('APPROVED', 5);
+      // muncul saat APPROVED
+      const inRes = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/senders/search?q=Guard+5+${SUFFIX}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(inRes.body.data.map((x: any) => String(x.application_id))).toContain(String(appId));
+
+      // downgrade → hilang dari hasil search
+      await pgPool.query(`UPDATE applications SET status='REJECTED' WHERE id=$1`, [appId]);
+      const outRes = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/senders/search?q=Guard+5+${SUFFIX}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(outRes.body.data.map((x: any) => String(x.application_id))).not.toContain(String(appId));
+    });
+
+    it('FZ-06: create transfer dengan sender APPROVED → 201 (regression tetap sukses)', async () => {
+      const appId = await createAppWithStatus('APPROVED', 6);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(transferBody(appId))
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
   // G. KYB BUSINESS FLOW
   // ══════════════════════════════════════════════════════════
   describe('G. KYB Business flow', () => {
@@ -939,12 +1166,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(400);
 
       const missing: string[] = res.body.missing;
-      expect(missing.some((m) => m.includes('dokumen korporasi'))).toBe(true);
+      expect(missing.some((m) => m.includes('Dokumen wajib belum lengkap'))).toBe(true);
       expect(missing.some((m) => m.includes('party'))).toBe(true);
     });
 
     it('G-03: Submit dengan docs lengkap tapi tanpa party → 400 missing party', async () => {
-      for (const docType of ['AKTA_PENDIRIAN', 'NIB_SIUP', 'NPWP_BADAN']) {
+      for (const docType of ['AKTA_PENDIRIAN', 'NIB_SIUP', 'NPWP_BADAN', 'BUSINESS_MANAGEMENT_IDENTITY']) {
         await request(app.getHttpServer())
           .post(`${BASE}/applications/${bizAppId}/documents`)
           .set('Authorization', `Bearer ${complianceToken}`)
@@ -1011,6 +1238,483 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
 
       expect(res.body.status).toBe('APPROVED');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // GB. Business CDD — penyelarasan form terbaru (0040)
+  // ══════════════════════════════════════════════════════════
+  describe('GB. Business CDD form alignment', () => {
+    let cddAppId: string;
+
+    function baseBusinessBody(tag: string) {
+      return {
+        legal_name: `PT CDD ${tag} ${SUFFIX}`,
+        legal_form: 'PT',
+        incorporation_place: 'Jakarta',
+        incorporation_date: '2019-06-01',
+        business_license_number: `IZN${tag}${SUFFIX}`,
+        nib: `NIB${tag}${SUFFIX}`,
+        npwp: `NPWP${tag}${SUFFIX}`,
+        address_line: 'Jl. Kedudukan No. 10',
+        city: 'Jakarta',
+        province: 'DKI Jakarta',
+        postal_code: '10110',
+        business_activity: 'Perdagangan Umum',
+        phone: `021${tag}${SUFFIX}`,
+      };
+    }
+
+    it('GB-01: create business dengan field CDD baru → 201 + detail mengembalikan field baru', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          ...baseBusinessBody('A'),
+          deed_number: `AKTA-${SUFFIX}`,
+          company_email: `cdd${SUFFIX}@perusahaan.co.id`,
+          pic_name: `PIC Utama ${SUFFIX}`,
+          pic_position: 'Direktur Utama',
+          pic_identity_number: `317600${SUFFIX}`,
+          pic_identity_type: 'KTP',
+          representative_signature_name: `PIC Utama ${SUFFIX}`,
+          verification_officer: `Officer ${SUFFIX}`,
+          supervisor: `Supervisor ${SUFFIX}`,
+        })
+        .expect(201);
+      cddAppId = String(create.body.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${cddAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const b = detail.body.business;
+      expect(b.deed_number).toBe(`AKTA-${SUFFIX}`);
+      expect(b.company_email).toBe(`cdd${SUFFIX}@perusahaan.co.id`);
+      expect(b.pic_name).toBe(`PIC Utama ${SUFFIX}`);
+      expect(b.pic_position).toBe('Direktur Utama');
+      expect(b.pic_identity_number).toBe(`317600${SUFFIX}`);
+      expect(b.pic_identity_type).toBe('KTP');
+      expect(b.verification_officer).toBe(`Officer ${SUFFIX}`);
+      expect(b.supervisor).toBe(`Supervisor ${SUFFIX}`);
+      // business_form alias = legal_form
+      expect(b.business_form).toBe('PT');
+      // Nama Dagang tidak diekspos
+      expect(Object.prototype.hasOwnProperty.call(b, 'trade_name')).toBe(false);
+      // status watchlist per kategori default CLEAR
+      expect(b.company_watchlist_status).toBe('CLEAR');
+      expect(b.management_watchlist_status).toBe('CLEAR');
+      expect(b.shareholder_watchlist_status).toBe('CLEAR');
+    });
+
+    it('GB-02: "Nama Dagang" tidak wajib — create tanpa trade_name tetap 201', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        // sengaja tanpa trade_name; kirim trade_name pun akan di-strip whitelist
+        .send({ ...baseBusinessBody('B'), trade_name: 'Harusnya diabaikan' })
+        .expect(201);
+      expect(create.body.status).toBe('DRAFT');
+    });
+
+    it('GB-03: shareholder — address & ownership_percentage tersimpan/terkembalikan', async () => {
+      const party = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${cddAppId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'SHAREHOLDER',
+          full_name: `Pemegang Saham ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `328100${SUFFIX}`,
+          address: 'Jl. Saham No. 25, Jakarta',
+          ownership_percentage: 30,
+          identity_document_type: 'KTP',
+        })
+        .expect(201);
+      expect(party.body.role).toBe('SHAREHOLDER');
+      expect(party.body.address).toBe('Jl. Saham No. 25, Jakarta');
+      expect(Number(party.body.ownership_percentage)).toBe(30);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${cddAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const sh = detail.body.parties.find((p: any) => p.role === 'SHAREHOLDER');
+      expect(sh).toBeDefined();
+      expect(sh.address).toBe('Jl. Saham No. 25, Jakarta');
+      expect(Number(sh.ownership_percentage)).toBe(30);
+    });
+
+    it('GB-04: BO — source_of_funds & source_of_wealth tersimpan/terkembalikan', async () => {
+      const party = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${cddAppId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'BO',
+          full_name: `Beneficial Owner ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `329100${SUFFIX}`,
+          address: 'Jl. BO No. 1, Jakarta',
+          ownership_percentage: 55,
+          identity_document_type: 'KTP',
+          source_of_funds: 'Gaji dan dividen usaha',
+          source_of_wealth: 'Akumulasi kepemilikan saham perusahaan',
+        })
+        .expect(201);
+      expect(party.body.source_of_funds).toBe('Gaji dan dividen usaha');
+      expect(party.body.source_of_wealth).toBe('Akumulasi kepemilikan saham perusahaan');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${cddAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const bo = detail.body.parties.find((p: any) => p.role === 'BO');
+      expect(bo).toBeDefined();
+      expect(bo.source_of_funds).toBe('Gaji dan dividen usaha');
+      expect(bo.source_of_wealth).toBe('Akumulasi kepemilikan saham perusahaan');
+      expect(bo.address).toBe('Jl. BO No. 1, Jakarta');
+    });
+
+    it('GB-05: BUSINESS_BO_DOCUMENT diterima sebagai dokumen', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${cddAppId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          doc_type: 'BUSINESS_BO_DOCUMENT',
+          file_uri: 'https://storage.test/docs/bo.pdf',
+        })
+        .expect(201);
+      expect(res.body.doc_type).toBe('BUSINESS_BO_DOCUMENT');
+    });
+
+    it('GB-06: GET /references/business-document-types → 6 tipe termasuk Dokumen BO', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/business-document-types`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      const codes = res.body.data.map((x: any) => x.code);
+      for (const code of [
+        'BUSINESS_DEED_ESTABLISHMENT_AMENDMENT',
+        'BUSINESS_LICENSE',
+        'BUSINESS_NPWP',
+        'BUSINESS_MANAGEMENT_IDENTITY',
+        'BUSINESS_SHAREHOLDER_IDENTITY_25',
+        'BUSINESS_BO_DOCUMENT',
+      ]) {
+        expect(codes).toContain(code);
+      }
+      const bo = res.body.data.find((x: any) => x.code === 'BUSINESS_BO_DOCUMENT');
+      expect(bo.name).toBe('Dokumen BO');
+    });
+
+    it('GB-07: FrontDesk approve/reject business CDD → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${cddAppId}/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${cddAppId}/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'REJECTED', reason: 'x' })
+        .expect(403);
+    });
+
+    it('GB-08: submit business memakai nama dokumen BUSINESS_* baru → SUBMITTED', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBusinessBody('C'))
+        .expect(201);
+      const appId = String(create.body.id);
+
+      for (const docType of [
+        'BUSINESS_DEED_ESTABLISHMENT_AMENDMENT',
+        'BUSINESS_LICENSE',
+        'BUSINESS_NPWP',
+        'BUSINESS_MANAGEMENT_IDENTITY',
+      ]) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: docType, file_uri: `https://storage.test/docs/${docType}.pdf` })
+          .expect(201);
+      }
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'DIRECTOR',
+          full_name: `Direktur CDD ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `330100${SUFFIX}`,
+          dob: '1980-01-01',
+          nationality: 'ID',
+          phone: `0817${SUFFIX}`,
+        })
+        .expect(201);
+
+      const submit = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(submit.body.status);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // GC. Business required documents — wajib selalu + kondisional (0041)
+  // ══════════════════════════════════════════════════════════
+  describe('GC. Business required documents (conditional)', () => {
+    let seq = 0;
+
+    // Buat business DRAFT baru dengan identitas unik.
+    async function createBiz(tag: string): Promise<string> {
+      seq += 1;
+      const u = `${SUFFIX}${seq}`;
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: `PT ReqDoc ${tag} ${u}`,
+          legal_form: 'PT',
+          incorporation_place: 'Jakarta',
+          incorporation_date: '2020-03-03',
+          business_license_number: `IZN${tag}${u}`,
+          nib: `NIB${tag}${u}`,
+          npwp: `NPWP${tag}${u}`,
+          address_line: 'Jl. ReqDoc No. 7',
+          city: 'Jakarta',
+          province: 'DKI Jakarta',
+          postal_code: '10120',
+          business_activity: 'Perdagangan Umum',
+          phone: `021${tag}${u}`.slice(0, 15),
+        })
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    async function addDoc(appId: string, docType: string) {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: docType, file_uri: `https://storage.test/docs/${docType}.pdf` })
+        .expect(201);
+    }
+
+    // Upload 4 dokumen wajib-selalu (pakai nama BUSINESS_* baru).
+    async function addAlwaysDocs(appId: string) {
+      for (const dt of [
+        'BUSINESS_DEED_ESTABLISHMENT_AMENDMENT',
+        'BUSINESS_LICENSE',
+        'BUSINESS_NPWP',
+        'BUSINESS_MANAGEMENT_IDENTITY',
+      ]) {
+        await addDoc(appId, dt);
+      }
+    }
+
+    async function addParty(appId: string, body: Record<string, unknown>) {
+      seq += 1;
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          identity_type: 'KTP',
+          identity_number: `33${seq}00${SUFFIX}`,
+          dob: '1980-01-01',
+          nationality: 'ID',
+          phone: `08${seq}00${SUFFIX}`.slice(0, 15),
+          ...body,
+        })
+        .expect(201);
+    }
+
+    const submit = (appId: string) =>
+      request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`);
+
+    it('GC-01: submit tanpa Dokumen Identitas Pengurus → 400', async () => {
+      const appId = await createBiz('MGMT');
+      // hanya 3 core, tanpa management identity
+      for (const dt of ['BUSINESS_DEED_ESTABLISHMENT_AMENDMENT', 'BUSINESS_LICENSE', 'BUSINESS_NPWP']) {
+        await addDoc(appId, dt);
+      }
+      await addParty(appId, { role: 'DIRECTOR', full_name: `Dir MGMT ${SUFFIX}` });
+
+      const res = await submit(appId).expect(400);
+      expect(res.body.message).toContain('Dokumen wajib belum lengkap');
+      expect(res.body.message).toContain('Dokumen Identitas Pengurus');
+    });
+
+    it('GC-02: SHAREHOLDER ≥25 tanpa dokumen pemegang saham → 400', async () => {
+      const appId = await createBiz('SH25');
+      await addAlwaysDocs(appId);
+      await addParty(appId, { role: 'DIRECTOR', full_name: `Dir SH25 ${SUFFIX}` });
+      await addParty(appId, {
+        role: 'SHAREHOLDER',
+        full_name: `Shareholder Besar ${SUFFIX}`,
+        ownership_percentage: 30,
+      });
+
+      const res = await submit(appId).expect(400);
+      expect(res.body.message).toContain('Dokumen wajib belum lengkap');
+      expect(res.body.message).toContain('Pemegang Saham');
+    });
+
+    it('GC-03: party BO tanpa Dokumen BO → 400', async () => {
+      const appId = await createBiz('BO');
+      await addAlwaysDocs(appId);
+      await addParty(appId, {
+        role: 'BO',
+        full_name: `BO Wajib Dok ${SUFFIX}`,
+        ownership_percentage: 60,
+      });
+
+      const res = await submit(appId).expect(400);
+      expect(res.body.message).toContain('Dokumen wajib belum lengkap');
+      expect(res.body.message).toContain('Dokumen BO');
+    });
+
+    it('GC-04: SHAREHOLDER <25 → tidak butuh dokumen pemegang saham → SUBMITTED', async () => {
+      const appId = await createBiz('SH10');
+      await addAlwaysDocs(appId);
+      await addParty(appId, { role: 'DIRECTOR', full_name: `Dir SH10 ${SUFFIX}` });
+      await addParty(appId, {
+        role: 'SHAREHOLDER',
+        full_name: `Shareholder Kecil ${SUFFIX}`,
+        ownership_percentage: 10,
+      });
+
+      const res = await submit(appId).expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+
+    it('GC-05: tanpa BO & tanpa shareholder ≥25 → dokumen kondisional tidak wajib → SUBMITTED', async () => {
+      const appId = await createBiz('NOBO');
+      await addAlwaysDocs(appId);
+      await addParty(appId, { role: 'DIRECTOR', full_name: `Dir NoBO ${SUFFIX}` });
+
+      const res = await submit(appId).expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+
+    it('GC-06: dokumen wajib + kondisional lengkap (SHAREHOLDER ≥25 & BO) → SUBMITTED', async () => {
+      const appId = await createBiz('FULL');
+      await addAlwaysDocs(appId);
+      await addDoc(appId, 'BUSINESS_SHAREHOLDER_IDENTITY_25');
+      await addDoc(appId, 'BUSINESS_BO_DOCUMENT');
+      await addParty(appId, { role: 'DIRECTOR', full_name: `Dir Full ${SUFFIX}` });
+      await addParty(appId, {
+        role: 'SHAREHOLDER',
+        full_name: `Shareholder Full ${SUFFIX}`,
+        ownership_percentage: 40,
+      });
+      await addParty(appId, {
+        role: 'BO',
+        full_name: `BO Full ${SUFFIX}`,
+        ownership_percentage: 51,
+      });
+
+      const res = await submit(appId).expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // GD. Business — Nomor Izin Usaha: license_number OR nib (0042)
+  // ══════════════════════════════════════════════════════════
+  describe('GD. Business license/NIB flexibility', () => {
+    let seq = 0;
+
+    // Buat business DRAFT dengan kontrol atas business_license_number & nib.
+    async function createBiz(
+      tag: string,
+      opts: { license?: string | null; nib?: string | null },
+    ): Promise<string> {
+      seq += 1;
+      const u = `${SUFFIX}${seq}`;
+      const body: Record<string, unknown> = {
+        legal_name: `PT Izin ${tag} ${u}`,
+        legal_form: 'PT',
+        incorporation_place: 'Jakarta',
+        incorporation_date: '2020-04-04',
+        npwp: `NPWP${tag}${u}`,
+        address_line: 'Jl. Izin No. 9',
+        city: 'Jakarta',
+        province: 'DKI Jakarta',
+        postal_code: '10130',
+        business_activity: 'Perdagangan Umum',
+        phone: `021${tag}${u}`.slice(0, 15),
+      };
+      if (opts.license !== undefined && opts.license !== null) body.business_license_number = opts.license;
+      if (opts.nib !== undefined && opts.nib !== null) body.nib = opts.nib;
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(body)
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    async function prepareForSubmit(appId: string) {
+      for (const dt of [
+        'BUSINESS_DEED_ESTABLISHMENT_AMENDMENT',
+        'BUSINESS_LICENSE',
+        'BUSINESS_NPWP',
+        'BUSINESS_MANAGEMENT_IDENTITY',
+      ]) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: dt, file_uri: `https://storage.test/docs/${dt}.pdf` })
+          .expect(201);
+      }
+      seq += 1;
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'DIRECTOR',
+          full_name: `Dir Izin ${seq} ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `34${seq}00${SUFFIX}`,
+          dob: '1980-01-01',
+          nationality: 'ID',
+          phone: `087${seq}0${SUFFIX}`.slice(0, 15),
+        })
+        .expect(201);
+    }
+
+    const submit = (appId: string) =>
+      request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`);
+
+    it('GD-01: submit dengan business_license_number saja (tanpa nib) → SUBMITTED', async () => {
+      const appId = await createBiz('LIC', { license: `IZN-ONLY-${SUFFIX}`, nib: null });
+      await prepareForSubmit(appId);
+      const res = await submit(appId).expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+
+    it('GD-02: submit dengan nib saja (tanpa business_license_number) → SUBMITTED', async () => {
+      const appId = await createBiz('NIB', { license: null, nib: `NIB-ONLY-${SUFFIX}` });
+      await prepareForSubmit(appId);
+      const res = await submit(appId).expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+
+    it('GD-03: submit dengan keduanya kosong → 400 "Nomor Izin Usaha ... wajib diisi."', async () => {
+      const appId = await createBiz('NONE', { license: null, nib: null });
+      await prepareForSubmit(appId);
+      const res = await submit(appId).expect(400);
+      expect(res.body.message).toBe('Nomor Izin Usaha (NIB/OSS/SIUP/dll) wajib diisi.');
     });
   });
 
@@ -2063,9 +2767,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       ]) {
         expect(b[field]).toBeDefined();
       }
-      // field opsional — key harus ada
-      expect(Object.prototype.hasOwnProperty.call(b, 'trade_name')).toBe(true);
+      // Nama Dagang (trade_name) tidak lagi diekspos pada CDD form terbaru
+      expect(Object.prototype.hasOwnProperty.call(b, 'trade_name')).toBe(false);
+      // field baru & opsional — key harus ada
       expect(Object.prototype.hasOwnProperty.call(b, 'industry_code')).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(b, 'deed_number')).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(b, 'company_email')).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(b, 'business_form')).toBe(true);
 
       // parties
       expect(Array.isArray(res.body.parties)).toBe(true);
@@ -2169,7 +2877,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
       rbaBizId = String(createRes.body.id);
 
-      for (const dt of ['AKTA_PENDIRIAN', 'NIB_SIUP', 'NPWP_BADAN']) {
+      for (const dt of ['AKTA_PENDIRIAN', 'NIB_SIUP', 'NPWP_BADAN', 'BUSINESS_MANAGEMENT_IDENTITY']) {
         await request(app.getHttpServer())
           .post(`${BASE}/applications/${rbaBizId}/documents`)
           .set('Authorization', `Bearer ${complianceToken}`)
@@ -5692,6 +6400,69 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.data).toHaveLength(6);
+    });
+
+    it('W-09b: GET /references/monthly-income-ranges → semua nilai persis tersedia', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/monthly-income-ranges`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const expected = [
+        'Kurang dari Rp5 juta per bulan',
+        'Rata-rata Rp5 juta sampai Rp10 juta per bulan',
+        'Rata-rata lebih dari Rp10 juta sampai Rp20 juta per bulan',
+        'Rata-rata lebih dari Rp20 juta sampai Rp50 juta per bulan',
+        'Rata-rata lebih dari Rp50 juta sampai Rp100 juta per bulan',
+        'Rata-rata di atas Rp100 juta per bulan',
+      ];
+      const names = res.body.data.map((x: any) => x.name);
+      for (const exp of expected) {
+        expect(names).toContain(exp);
+      }
+      // setiap item punya code & name non-kosong
+      for (const item of res.body.data) {
+        expect(item.code).toBeTruthy();
+        expect(item.name).toBeTruthy();
+      }
+    });
+
+    it('W-09c: GET /references/occupations → 200, semua pekerjaan tersedia', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/occupations`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(Array.isArray(res.body.data)).toBe(true);
+      const expected = [
+        'Karyawan Swasta',
+        'Pejabat Negara',
+        'Wirausaha/Wiraswasta',
+        'TNI/POLRI',
+        'Pegawai BUMN/BUMD',
+        'Profesional',
+        'Pegawai Negeri Sipil (PNS)',
+        'Pensiunan',
+        'Pengurus atau Pegawai LSM atau Organisasi Tidak Berbadan Hukum Lainnya',
+        'Ibu Rumah Tangga',
+        'Pelajar/Mahasiswa',
+        'Sopir',
+        'Asisten Rumah Tangga',
+        'Atlet/Olahragawan',
+        'Buruh',
+        'Pengajar',
+        'Pemuka Agama',
+        'Tenaga Keamanan',
+      ];
+      expect(res.body.data).toHaveLength(expected.length);
+      const names = res.body.data.map((x: any) => x.name);
+      for (const exp of expected) {
+        expect(names).toContain(exp);
+      }
+      for (const item of res.body.data) {
+        expect(item.code).toBeTruthy();
+        expect(item.name).toBeTruthy();
+      }
     });
 
     it('W-10: GET /references/provinces → semua 4 provinsi pemekaran Papua ada', async () => {

@@ -550,16 +550,19 @@ export class ApplicationsService {
 
       const q = await client.query(
         `INSERT INTO business_entities (legal_name, legal_form, incorporation_place, incorporation_date,
-          business_license_number, nib, npwp, address_line, city, province, postal_code, business_activity, industry_code, phone)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          business_license_number, nib, npwp, address_line, city, province, postal_code, business_activity, industry_code, phone,
+          deed_number, company_email,
+          pic_name, pic_position, pic_identity_number, pic_identity_type,
+          representative_signature_name, verification_officer, supervisor)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
          RETURNING id`,
         [
           dto.legal_name,
           dto.legal_form,
           dto.incorporation_place,
           dto.incorporation_date,
-          dto.business_license_number,
-          dto.nib,
+          dto.business_license_number ?? null,
+          dto.nib ?? null,
           dto.npwp,
           dto.address_line,
           dto.city,
@@ -568,6 +571,17 @@ export class ApplicationsService {
           dto.business_activity,
           dto.industry_code || null,
           dto.phone,
+          // deed_number default ke business_license_number bila tidak dikirim
+          // (nilai lama "Nomor Lisensi" kini menjadi Nomor Akta).
+          dto.deed_number ?? dto.business_license_number ?? null,
+          dto.company_email ?? null,
+          dto.pic_name ?? null,
+          dto.pic_position ?? null,
+          dto.pic_identity_number ?? null,
+          dto.pic_identity_type ?? null,
+          dto.representative_signature_name ?? null,
+          dto.verification_officer ?? null,
+          dto.supervisor ?? null,
         ],
       );
       const businessId = q.rows[0].id;
@@ -614,6 +628,59 @@ export class ApplicationsService {
     return res.rows[0];
   }
 
+  /**
+   * Ringkasan status watchlist Business per kategori: perusahaan, pengurus,
+   * pemegang saham. Murni baca dari screening_results yang sudah ada (tidak
+   * mengubah perhitungan risk). Default CLEAR bila belum ada screening.
+   *   MATCH      → ada hit CONFIRMED
+   *   NEAR_MATCH → ada hit yang belum di-clear (bukan FALSE_POSITIVE/DISMISSED)
+   *   CLEAR      → tidak ada hit relevan
+   */
+  private async getBusinessWatchlistStatuses(appId: number) {
+    const result = {
+      company_watchlist_status: 'CLEAR',
+      management_watchlist_status: 'CLEAR',
+      shareholder_watchlist_status: 'CLEAR',
+    };
+
+    const { rows } = await this.pool.query(
+      `SELECT sr.subject_type,
+              COALESCE(sr.review_status::text, 'UNREVIEWED') AS review_status,
+              bp.role
+         FROM screening_results sr
+         LEFT JOIN business_parties bp
+           ON sr.subject_type = 'PARTY' AND bp.id = sr.subject_ref
+        WHERE sr.application_id = $1`,
+      [appId],
+    );
+
+    const rank: Record<string, number> = { CLEAR: 0, NEAR_MATCH: 1, MATCH: 2 };
+    const classify = (review_status: string) => {
+      if (['FALSE_POSITIVE', 'DISMISSED'].includes(review_status)) return 'CLEAR';
+      return review_status === 'CONFIRMED' ? 'MATCH' : 'NEAR_MATCH';
+    };
+    const bump = (key: keyof typeof result, status: string) => {
+      if (rank[status] > rank[result[key]]) result[key] = status;
+    };
+
+    const MGMT = ['DIRECTOR', 'COMMISSIONER', 'MANAGER', 'AUTHORIZED_REP'];
+    const SHAREHOLDERS = ['SHAREHOLDER', 'BO'];
+
+    for (const r of rows) {
+      const status = classify(r.review_status);
+      if (status === 'CLEAR') continue;
+      if (r.subject_type === 'BUSINESS') {
+        bump('company_watchlist_status', status);
+      } else if (r.subject_type === 'PARTY') {
+        if (MGMT.includes(r.role)) bump('management_watchlist_status', status);
+        else if (SHAREHOLDERS.includes(r.role)) bump('shareholder_watchlist_status', status);
+        else bump('management_watchlist_status', status);
+      }
+    }
+
+    return result;
+  }
+
   async getDetail(appId: number) {
     const { rows: apps } = await this.pool.query(
       `SELECT * FROM applications WHERE id=$1`,
@@ -642,17 +709,30 @@ export class ApplicationsService {
     }
 
     // business — semua field yang dibutuhkan FE
+    // Catatan: trade_name (Nama Dagang) sengaja tidak diekspos lagi pada CDD form terbaru.
     let business: any = null;
     if (app.business_id) {
       const { rows: biz } = await this.pool.query(
-        `SELECT id, legal_name, trade_name, legal_form,
+        `SELECT id, legal_name, legal_form,
                 incorporation_place, incorporation_date,
+                deed_number, business_license_number, company_email,
                 nib, npwp, address_line, city, province, postal_code,
-                phone, industry_code, business_activity, cif_no
+                phone, industry_code, business_activity, cif_no,
+                pic_name, pic_position, pic_identity_number, pic_identity_type,
+                representative_signature_name, verification_officer, supervisor
          FROM business_entities WHERE id=$1`,
         [app.business_id],
       );
       business = biz[0] ?? null;
+      if (business) {
+        // Alias label form terbaru (tanpa menduplikasi kolom fisik).
+        business.business_form = business.legal_form;
+        // Ringkasan status watchlist per kategori (opsional; default CLEAR).
+        const wl = await this.getBusinessWatchlistStatuses(appId);
+        business.company_watchlist_status = wl.company_watchlist_status;
+        business.management_watchlist_status = wl.management_watchlist_status;
+        business.shareholder_watchlist_status = wl.shareholder_watchlist_status;
+      }
     }
 
     // documents
@@ -668,6 +748,8 @@ export class ApplicationsService {
       const { rows } = await this.pool.query(
         `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
                 bp.cif_no, bp.cif_relationship_type,
+                bp.ownership_percentage, bp.address,
+                bp.identity_document_type, bp.source_of_funds, bp.source_of_wealth,
                 p.id as person_id, p.full_name, p.identity_type, p.identity_number
          FROM business_parties bp
          JOIN persons p ON p.id = bp.person_id
@@ -739,25 +821,70 @@ export class ApplicationsService {
     }
 
     if (app.type === "BUSINESS") {
-      // dokumen wajib korporasi
-      const needDocs = ["AKTA_PENDIRIAN", "NIB_SIUP", "NPWP_BADAN"];
-      const missingDocs = needDocs.filter((d) => !docSet.has(d));
+      // Dokumen wajib Business. Terima nama baru (BUSINESS_*) maupun legacy.
+      // Legacy alias hanya ada untuk 3 core doc; management/shareholder/BO adalah
+      // tipe dokumen baru sehingga tidak punya alias lama.
+      const hasAny = (aliases: string[]) => aliases.some((a) => docSet.has(a));
+      const hasDeed = hasAny(["AKTA_PENDIRIAN", "BUSINESS_DEED_ESTABLISHMENT_AMENDMENT"]);
+      const hasLicense = hasAny(["NIB_SIUP", "BUSINESS_LICENSE"]);
+      const hasNpwp = hasAny(["NPWP_BADAN", "BUSINESS_NPWP"]);
+      const hasManagement = hasAny(["BUSINESS_MANAGEMENT_IDENTITY"]);
+      const hasShareholderDoc = hasAny(["BUSINESS_SHAREHOLDER_IDENTITY_25"]);
+      const hasBoDoc = hasAny(["BUSINESS_BO_DOCUMENT"]);
 
-      // parties wajib
+      // parties — untuk cek keberadaan pengurus & kondisi dokumen kondisional
       const { rows: parties } = await this.pool.query(
-        `SELECT role FROM business_parties WHERE business_id=$1 AND is_active = TRUE`,
+        `SELECT role, ownership_percentage FROM business_parties WHERE business_id=$1 AND is_active = TRUE`,
         [app.business_id],
       );
       const roles = new Set(parties.map((p) => p.role));
       const hasPengurus = roles.has("DIRECTOR") || roles.has("COMMISSIONER");
-      const hasBO = roles.has("BO");
+      const hasBO = roles.has("BO") || roles.has("BENEFICIAL_OWNER");
       const hasAuthRep = roles.has("AUTHORIZED_REP");
-
       const hasAnyRequiredParty = hasPengurus || hasBO || hasAuthRep;
 
+      // Dokumen kondisional:
+      //  - Identitas Pemegang Saham ≥25% wajib bila ada SHAREHOLDER dgn ownership ≥25
+      //  - Dokumen BO wajib bila ada party BO
+      const needsShareholderDoc = parties.some(
+        (p) =>
+          p.role === "SHAREHOLDER" && Number(p.ownership_percentage ?? 0) >= 25,
+      );
+      const needsBoDoc = hasBO;
+
+      // Susun daftar dokumen wajib yang belum lengkap (label yang jelas).
+      const missingDocs: string[] = [];
+      if (!hasDeed) missingDocs.push("Akta Pendirian & Perubahan");
+      if (!hasLicense) missingDocs.push("NIB / Izin Usaha");
+      if (!hasNpwp) missingDocs.push("NPWP Badan Usaha");
+      if (!hasManagement) missingDocs.push("Dokumen Identitas Pengurus");
+      if (needsShareholderDoc && !hasShareholderDoc)
+        missingDocs.push("Dokumen Identitas Pemegang Saham ≥25%");
+      if (needsBoDoc && !hasBoDoc) missingDocs.push("Dokumen BO");
+
+      const docMessage =
+        missingDocs.length > 0
+          ? `Dokumen wajib belum lengkap: ${missingDocs.join(", ")}`
+          : null;
+
+      // Nomor Izin Usaha (NIB/OSS/SIUP/dll): cukup salah satu dari
+      // business_license_number ATAU nib yang terisi — tidak wajib keduanya.
+      const { rows: bizRows } = await this.pool.query(
+        `SELECT business_license_number, nib FROM business_entities WHERE id=$1`,
+        [app.business_id],
+      );
+      const biz = bizRows[0] ?? {};
+      const notEmpty = (v: unknown) =>
+        v !== null && v !== undefined && String(v).trim().length > 0;
+      const hasLicenseOrNib =
+        notEmpty(biz.business_license_number) || notEmpty(biz.nib);
+      const licenseMessage = hasLicenseOrNib
+        ? null
+        : "Nomor Izin Usaha (NIB/OSS/SIUP/dll) wajib diisi.";
+
       const missing: string[] = [];
-      if (missingDocs.length)
-        missing.push(`dokumen korporasi: ${missingDocs.join(", ")}`);
+      if (docMessage) missing.push(docMessage);
+      if (licenseMessage) missing.push(licenseMessage);
       if (!hasAnyRequiredParty)
         missing.push(
           "minimal 1 party: (DIRECTOR/COMMISSIONER) atau BO atau AUTHORIZED_REP",
@@ -765,7 +892,10 @@ export class ApplicationsService {
 
       if (missing.length) {
         throw new BadRequestException({
-          message: "BUSINESS belum lengkap untuk submit",
+          message:
+            docMessage ??
+            licenseMessage ??
+            "BUSINESS belum lengkap untuk submit",
           missing,
         });
       }
@@ -1183,13 +1313,33 @@ export class ApplicationsService {
 
     // insert ke business_parties (unique per business/person/role)
     const party = await this.pool.query(
-      `INSERT INTO business_parties (business_id, person_id, role, is_active, cif_no, cif_relationship_type)
-     VALUES ($1,$2,$3,TRUE,$4,$5)
+      `INSERT INTO business_parties (
+         business_id, person_id, role, is_active, cif_no, cif_relationship_type,
+         ownership_percentage, address, identity_document_type, source_of_funds, source_of_wealth
+       )
+     VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10)
      ON CONFLICT (business_id, person_id, role) DO UPDATE
        SET is_active = TRUE,
-           cif_no = COALESCE(business_parties.cif_no, EXCLUDED.cif_no)
-     RETURNING id, business_id, person_id, role, is_active, created_at, cif_no, cif_relationship_type`,
-      [app.business_id, personId, dto.role, partyCif, dto.role === "BO" ? "BO" : null],
+           cif_no = COALESCE(business_parties.cif_no, EXCLUDED.cif_no),
+           ownership_percentage = COALESCE(EXCLUDED.ownership_percentage, business_parties.ownership_percentage),
+           address = COALESCE(EXCLUDED.address, business_parties.address),
+           identity_document_type = COALESCE(EXCLUDED.identity_document_type, business_parties.identity_document_type),
+           source_of_funds = COALESCE(EXCLUDED.source_of_funds, business_parties.source_of_funds),
+           source_of_wealth = COALESCE(EXCLUDED.source_of_wealth, business_parties.source_of_wealth)
+     RETURNING id, business_id, person_id, role, is_active, created_at, cif_no, cif_relationship_type,
+               ownership_percentage, address, identity_document_type, source_of_funds, source_of_wealth`,
+      [
+        app.business_id,
+        personId,
+        dto.role,
+        partyCif,
+        dto.role === "BO" ? "BO" : null,
+        dto.ownership_percentage ?? null,
+        dto.address ?? null,
+        dto.identity_document_type ?? null,
+        dto.source_of_funds ?? null,
+        dto.source_of_wealth ?? null,
+      ],
     );
 
     return party.rows[0];

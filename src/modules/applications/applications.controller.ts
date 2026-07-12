@@ -246,7 +246,9 @@ export class ApplicationsController {
     return this.svc.submit(appId, req.user.sub);
   }
 
-  @Roles("FrontDesk", "ComplianceLead")
+  // KYC/KYB decision (approve/reject) hanya untuk Compliance (Staff/Lead) &
+  // SystemAdmin (via RolesGuard). FrontDesk/Frontliner TIDAK boleh memutuskan.
+  @Roles("ComplianceStaff", "ComplianceLead")
   @Patch(":id/decision")
   async decide(
     @Param("id", ParseIntPipe) appId: number,

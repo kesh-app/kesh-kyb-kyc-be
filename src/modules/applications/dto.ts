@@ -4,9 +4,11 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
@@ -133,8 +135,10 @@ export class CreateBusinessDto {
   @IsDateString()
   incorporation_date!: string;
 
-  @IsString() @IsNotEmpty()
-  business_license_number!: string;
+  // Nomor Izin Usaha (NIB/OSS/SIUP/dll) — cukup salah satu dari
+  // business_license_number ATAU nib yang terisi. Divalidasi saat submit.
+  @IsOptional() @IsString()
+  business_license_number?: string;
 
   @IsOptional() @IsString()
   nib?: string;
@@ -162,6 +166,39 @@ export class CreateBusinessDto {
 
   @IsString() @IsNotEmpty()
   phone!: string;
+
+  // ── Form terbaru — Informasi Identitas Badan Usaha ──────────────────
+  // deed_number / nomor_akta_pendirian_perubahan_terakhir (menggantikan label
+  // lama "Nomor Lisensi"). Terpisah dari business_license_number (nomor izin usaha).
+  @IsOptional() @IsString()
+  deed_number?: string;
+
+  // email_perusahaan
+  @IsOptional() @IsEmail()
+  company_email?: string;
+
+  // ── Pengurus Utama / Main PIC (menggantikan istilah Authorized/Representative) ─
+  @IsOptional() @IsString()
+  pic_name?: string;
+
+  @IsOptional() @IsString()
+  pic_position?: string;
+
+  @IsOptional() @IsString()
+  pic_identity_number?: string;
+
+  @IsOptional() @IsIn(['KTP', 'PASPOR'])
+  pic_identity_type?: 'KTP' | 'PASPOR';
+
+  // ── Signature / verification (opsional) ─────────────────────────────
+  @IsOptional() @IsString()
+  representative_signature_name?: string;
+
+  @IsOptional() @IsString()
+  verification_officer?: string;
+
+  @IsOptional() @IsString()
+  supervisor?: string;
 }
 
 /**
@@ -211,8 +248,8 @@ export class ListApplicationsQueryDto {
 }
 
 export class CreatePartyDto {
-  @IsIn(['DIRECTOR','COMMISSIONER','MANAGER','BO','AUTHORIZED_REP'])
-  role!: 'DIRECTOR'|'COMMISSIONER'|'MANAGER'|'BO'|'AUTHORIZED_REP';
+  @IsIn(['DIRECTOR','COMMISSIONER','MANAGER','BO','AUTHORIZED_REP','SHAREHOLDER'])
+  role!: 'DIRECTOR'|'COMMISSIONER'|'MANAGER'|'BO'|'AUTHORIZED_REP'|'SHAREHOLDER';
 
   @IsString() @IsNotEmpty()
   full_name!: string;
@@ -234,4 +271,24 @@ export class CreatePartyDto {
 
   @IsOptional() @IsEmail()
   email?: string;
+
+  // ── Detail pemegang saham & Beneficial Owner (form terbaru) ─────────
+  // Persentase kepemilikan (0–100). Dipakai shareholder & BO.
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(100)
+  ownership_percentage?: number;
+
+  // Alamat party (shareholder/BO address)
+  @IsOptional() @IsString()
+  address?: string;
+
+  // Jenis dokumen identitas (mis. KTP/PASPOR) untuk shareholder/BO
+  @IsOptional() @IsString()
+  identity_document_type?: string;
+
+  // BO — sumber dana & sumber kekayaan
+  @IsOptional() @IsString()
+  source_of_funds?: string;
+
+  @IsOptional() @IsString()
+  source_of_wealth?: string;
 }

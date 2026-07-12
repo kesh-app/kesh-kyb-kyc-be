@@ -59,6 +59,38 @@ export const MONTHLY_INCOME_RANGES = [
   'Rata-rata di atas Rp100 juta per bulan',
 ];
 
+// Dokumen wajib Business (KYB) — form terbaru. code = doc_type yang dipakai
+// saat upload dokumen, name = label yang ditampilkan di FE.
+export const BUSINESS_DOCUMENT_TYPES = [
+  { code: 'BUSINESS_DEED_ESTABLISHMENT_AMENDMENT', name: 'Akta Pendirian & Perubahan' },
+  { code: 'BUSINESS_LICENSE', name: 'NIB / Izin Usaha' },
+  { code: 'BUSINESS_NPWP', name: 'NPWP Badan Usaha' },
+  { code: 'BUSINESS_MANAGEMENT_IDENTITY', name: 'Dokumen Identitas Pengurus' },
+  { code: 'BUSINESS_SHAREHOLDER_IDENTITY_25', name: 'Dokumen Identitas Pemegang Saham ≥25%' },
+  { code: 'BUSINESS_BO_DOCUMENT', name: 'Dokumen BO' },
+];
+
+export const OCCUPATIONS = [
+  'Karyawan Swasta',
+  'Pejabat Negara',
+  'Wirausaha/Wiraswasta',
+  'TNI/POLRI',
+  'Pegawai BUMN/BUMD',
+  'Profesional',
+  'Pegawai Negeri Sipil (PNS)',
+  'Pensiunan',
+  'Pengurus atau Pegawai LSM atau Organisasi Tidak Berbadan Hukum Lainnya',
+  'Ibu Rumah Tangga',
+  'Pelajar/Mahasiswa',
+  'Sopir',
+  'Asisten Rumah Tangga',
+  'Atlet/Olahragawan',
+  'Buruh',
+  'Pengajar',
+  'Pemuka Agama',
+  'Tenaga Keamanan',
+];
+
 const NATIONALITIES = [
   { code: 'ID', name: 'Indonesia' },
   { code: 'SG', name: 'Singapura' },
@@ -175,5 +207,13 @@ export class ReferencesService {
 
   getMonthlyIncomeRanges() {
     return { data: MONTHLY_INCOME_RANGES.map((v) => ({ code: v, name: v })) };
+  }
+
+  getOccupations() {
+    return { data: OCCUPATIONS.map((v) => ({ code: v, name: v })) };
+  }
+
+  getBusinessDocumentTypes() {
+    return { data: BUSINESS_DOCUMENT_TYPES };
   }
 }
