@@ -42,6 +42,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   let frontDeskToken: string;
   let directorToken: string;
   let auditorToken: string;
+  let complianceStaffToken: string;
 
   // Application IDs yang diakumulasi lintas describe block
   // pg driver mengembalikan BIGINT sebagai string — simpan sebagai string
@@ -164,6 +165,22 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       .post(`${BASE}/auth/login`)
       .send({ email: auditorEmail, password: 'Test@123456' });
     auditorToken = loginAuditor.body.access_token;
+
+    // Buat ComplianceStaff test user (approval pertama monitoring — staff-review)
+    const complianceStaffEmail = `compstaff${SUFFIX}@test.local`;
+    await request(app.getHttpServer())
+      .post(`${BASE}/users/admins`)
+      .set('Authorization', `Bearer ${sysAdminToken}`)
+      .send({
+        email: complianceStaffEmail,
+        fullName: `Test Compliance Staff ${SUFFIX}`,
+        role: 'ComplianceStaff',
+        password: 'Test@123456',
+      });
+    const loginComplianceStaff = await request(app.getHttpServer())
+      .post(`${BASE}/auth/login`)
+      .send({ email: complianceStaffEmail, password: 'Test@123456' });
+    complianceStaffToken = loginComplianceStaff.body.access_token;
   }, 30000);
 
   afterAll(async () => {
@@ -3843,13 +3860,20 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     const codesOf = (body: any): string[] =>
       (body.triggers ?? []).map((t: any) => t.rule_code);
 
-    // ── T-01: Role Director dikenali ──
-    it('T-01: Director role dapat dibuat & login (dari setup) → bisa akses GET cases', async () => {
+    // ── T-01: Role ComplianceStaff dikenali & Director tidak lagi punya akses ──
+    it('T-01: ComplianceStaff role dapat dibuat & login → bisa akses GET cases', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases`)
-        .set('Authorization', `Bearer ${directorToken}`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
         .expect(200);
       expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    it('T-01b: Director tidak lagi punya akses monitoring → GET cases 403', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(403);
     });
 
     // ── T-02: LTKT single cash ≥ 500M → strictly LTKT (high-value hanya supporting) ──
@@ -3979,53 +4003,73 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(ev.body.case_type).toBe('BOTH');
     });
 
-    // ── T-07: Compliance CLOSE_FALSE_POSITIVE ──
-    it('T-07: compliance CLOSE_FALSE_POSITIVE → status CLOSED_FALSE_POSITIVE', async () => {
+    // Helper: staff review (approval pertama). Mengembalikan supertest Test
+    // agar bisa di-await maupun di-chain .expect().
+    function staffReview(
+      caseId: string,
+      action: string,
+      notes = 'analisis staff',
+      token = complianceStaffToken,
+    ) {
+      return request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ action, notes });
+    }
+
+    // Helper: manager review (approval kedua).
+    function managerReview(
+      caseId: string,
+      action: string,
+      notes = 'keputusan manager',
+      token = complianceToken,
+    ) {
+      return request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/manager-review`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ action, notes });
+    }
+
+    // ── T-07: Staff recommend close → Manager CLOSE_FALSE_POSITIVE ──
+    it('T-07: staff RECOMMEND_CLOSE_FALSE_POSITIVE → manager CLOSE_FALSE_POSITIVE → CLOSED_FALSE_POSITIVE', async () => {
       const caseId = await setupLtkmCase(`70007${SUFFIX}`, `07007${SUFFIX}`);
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'CLOSE_FALSE_POSITIVE', notes: 'bukan mencurigakan' })
-        .expect(200);
+      const staff = await staffReview(caseId, 'RECOMMEND_CLOSE_FALSE_POSITIVE', 'kemungkinan false positive');
+      expect(staff.status).toBe(200);
+      expect(staff.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
+
+      const res = await managerReview(caseId, 'CLOSE_FALSE_POSITIVE', 'setuju tutup');
+      expect(res.status).toBe(200);
       expect(res.body.status).toBe('CLOSED_FALSE_POSITIVE');
     });
 
-    // ── T-08: Compliance NEED_CLARIFICATION ──
-    it('T-08: compliance NEED_CLARIFICATION → status NEED_CLARIFICATION', async () => {
+    // ── T-08: Staff REQUEST_CLARIFICATION ──
+    it('T-08: staff REQUEST_CLARIFICATION → status NEED_CLARIFICATION', async () => {
       const caseId = await setupLtkmCase(`70008${SUFFIX}`, `07008${SUFFIX}`);
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'NEED_CLARIFICATION', notes: 'butuh dokumen tambahan' })
-        .expect(200);
+      const res = await staffReview(caseId, 'REQUEST_CLARIFICATION', 'butuh dokumen tambahan');
+      expect(res.status).toBe(200);
       expect(res.body.status).toBe('NEED_CLARIFICATION');
     });
 
-    // ── T-09: Compliance ESCALATE_TO_DIRECTOR ──
-    it('T-09: compliance ESCALATE_TO_DIRECTOR + notes → PENDING_DIRECTOR_REVIEW + compliance fields terisi', async () => {
+    // ── T-09: Staff ESCALATE_TO_MANAGER ──
+    it('T-09: staff ESCALATE_TO_MANAGER + notes → PENDING_COMPLIANCE_MANAGER_REVIEW + staff fields terisi', async () => {
       const caseId = await setupLtkmCase(`70009${SUFFIX}`, `07009${SUFFIX}`);
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'ESCALATE_TO_DIRECTOR', notes: 'eskalasi ke Dirut' })
-        .expect(200);
-      expect(res.body.status).toBe('PENDING_DIRECTOR_REVIEW');
-      // wajib: compliance review fields terisi saat masuk PENDING
-      expect(res.body.compliance_reviewed_by).toBeTruthy();
-      expect(res.body.compliance_reviewed_at).toBeTruthy();
-      expect(res.body.compliance_action).toBe('ESCALATE_TO_DIRECTOR');
-      expect(res.body.compliance_notes).toBe('eskalasi ke Dirut');
+      const res = await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi ke manager');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
+      expect(res.body.staff_reviewed_by).toBeTruthy();
+      expect(res.body.staff_reviewed_at).toBeTruthy();
+      expect(res.body.staff_action).toBe('ESCALATE_TO_MANAGER');
+      expect(res.body.staff_notes).toBe('eskalasi ke manager');
     });
 
-    // ── T-09b: ESCALATE_TO_DIRECTOR tanpa notes → 400 ──
-    it('T-09b: compliance ESCALATE_TO_DIRECTOR tanpa notes → 400', async () => {
+    // ── T-09b: Staff ESCALATE_TO_MANAGER tanpa notes → 400 ──
+    it('T-09b: staff ESCALATE_TO_MANAGER tanpa notes → 400, status tetap DETECTED', async () => {
       const caseId = await setupLtkmCase(`70091${SUFFIX}`, `07091${SUFFIX}`);
       await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'ESCALATE_TO_DIRECTOR' })
+        .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .send({ action: 'ESCALATE_TO_MANAGER' })
         .expect(400);
-      // status tidak berubah (tetap DETECTED)
       const detail = await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases/${caseId}`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -4033,79 +4077,56 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(detail.body.status).toBe('DETECTED');
     });
 
-    // ── T-09c: RECOMMEND_REPORT LTKM + notes → PENDING_DIRECTOR_REVIEW ──
-    it('T-09c: compliance RECOMMEND_REPORT (LTKM) + notes → PENDING_DIRECTOR_REVIEW', async () => {
+    // ── T-09c: Staff RECOMMEND_CLOSE_FALSE_POSITIVE + notes → PENDING_MANAGER ──
+    it('T-09c: staff RECOMMEND_CLOSE_FALSE_POSITIVE + notes → PENDING_COMPLIANCE_MANAGER_REVIEW', async () => {
       const caseId = await setupLtkmCase(`70092${SUFFIX}`, `07092${SUFFIX}`);
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'RECOMMEND_REPORT', notes: 'rekomendasi lapor LTKM' })
-        .expect(200);
-      expect(res.body.status).toBe('PENDING_DIRECTOR_REVIEW');
-      expect(res.body.compliance_action).toBe('RECOMMEND_REPORT');
-      expect(res.body.compliance_reviewed_by).toBeTruthy();
-      expect(res.body.compliance_reviewed_at).toBeTruthy();
+      const res = await staffReview(caseId, 'RECOMMEND_CLOSE_FALSE_POSITIVE', 'rekomendasi tutup');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
+      expect(res.body.staff_action).toBe('RECOMMEND_CLOSE_FALSE_POSITIVE');
+      expect(res.body.staff_reviewed_by).toBeTruthy();
+      expect(res.body.staff_reviewed_at).toBeTruthy();
     });
 
-    // ── T-09d: RECOMMEND_REPORT tanpa notes → 400 ──
-    it('T-09d: compliance RECOMMEND_REPORT tanpa notes → 400', async () => {
+    // ── T-09d: Staff review tanpa notes → 400 ──
+    it('T-09d: staff RECOMMEND_CLOSE_FALSE_POSITIVE tanpa notes → 400', async () => {
       const caseId = await setupLtkmCase(`70093${SUFFIX}`, `07093${SUFFIX}`);
       await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'RECOMMEND_REPORT' })
+        .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .send({ action: 'RECOMMEND_CLOSE_FALSE_POSITIVE' })
         .expect(400);
     });
 
-    // ── T-10: Director APPROVED → READY_TO_REPORT + report DRAFT ──
-    it('T-10: director APPROVED → READY_TO_REPORT, report_status DRAFT, report_type LTKM', async () => {
+    // ── T-10: Manager APPROVE_REPORT → READY_TO_REPORT + report DRAFT ──
+    it('T-10: manager APPROVE_REPORT → READY_TO_REPORT, report_status DRAFT, report_type LTKM', async () => {
       const caseId = await setupLtkmCase(`70010${SUFFIX}`, `07010${SUFFIX}`);
-      await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'ESCALATE_TO_DIRECTOR', notes: 'eskalasi ke Dirut' })
-        .expect(200);
+      await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi ke manager').expect(200);
 
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
-        .set('Authorization', `Bearer ${directorToken}`)
-        .send({ decision: 'APPROVED', notes: 'setuju laporkan' })
-        .expect(200);
+      const res = await managerReview(caseId, 'APPROVE_REPORT', 'setuju laporkan');
+      expect(res.status).toBe(200);
       expect(res.body.status).toBe('READY_TO_REPORT');
       expect(res.body.report_status).toBe('DRAFT');
       expect(res.body.report_type).toBe('LTKM');
+      expect(res.body.manager_reviewed_by).toBeTruthy();
+      expect(res.body.manager_action).toBe('APPROVE_REPORT');
     });
 
-    // ── T-11: Director REJECTED ──
-    it('T-11: director REJECTED → status DIRECTOR_REJECTED', async () => {
+    // ── T-11: Manager REJECT → MANAGER_REJECTED ──
+    it('T-11: manager REJECT → status MANAGER_REJECTED', async () => {
       const caseId = await setupLtkmCase(`70011${SUFFIX}`, `07011${SUFFIX}`);
-      await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'ESCALATE_TO_DIRECTOR', notes: 'eskalasi ke Dirut' })
-        .expect(200);
+      await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi ke manager').expect(200);
 
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
-        .set('Authorization', `Bearer ${directorToken}`)
-        .send({ decision: 'REJECTED', notes: 'tidak perlu dilaporkan' })
-        .expect(200);
-      expect(res.body.status).toBe('DIRECTOR_REJECTED');
+      const res = await managerReview(caseId, 'REJECT', 'tidak perlu dilaporkan');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('MANAGER_REJECTED');
     });
 
     // ── T-12: Report SUBMITTED → REPORTED ──
     it('T-12: report SUBMITTED → status REPORTED', async () => {
       const caseId = await setupLtkmCase(`70012${SUFFIX}`, `07012${SUFFIX}`);
-      await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'ESCALATE_TO_DIRECTOR', notes: 'eskalasi ke Dirut' })
-        .expect(200);
-      await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
-        .set('Authorization', `Bearer ${directorToken}`)
-        .send({ decision: 'APPROVED' })
-        .expect(200);
+      await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi ke manager').expect(200);
+      await managerReview(caseId, 'APPROVE_REPORT', 'approve').expect(200);
 
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/monitoring/cases/${caseId}/report`)
@@ -4137,7 +4158,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     // ── T-14: Auditor read-only ──
-    it('T-14: Auditor bisa GET cases (200) tapi tidak bisa compliance-review (403)', async () => {
+    it('T-14: Auditor bisa GET cases (200) tapi tidak bisa staff/manager review (403)', async () => {
       await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases`)
         .set('Authorization', `Bearer ${auditorToken}`)
@@ -4145,9 +4166,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const caseId = await setupLtkmCase(`70014${SUFFIX}`, `07014${SUFFIX}`);
       await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
         .set('Authorization', `Bearer ${auditorToken}`)
-        .send({ action: 'CLOSE_FALSE_POSITIVE' })
+        .send({ action: 'ESCALATE_TO_MANAGER', notes: 'x' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/manager-review`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ action: 'APPROVE_REPORT', notes: 'x' })
         .expect(403);
     });
 
@@ -4187,14 +4213,33 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(rows[0].c).toBe(1);
     });
 
-    // ── T-17: LTKM tidak boleh READY_TO_REPORT langsung tanpa Director ──
-    it('T-17: compliance READY_TO_REPORT pada LTKM → 400 (butuh Director)', async () => {
+    // ── T-17: Manager tidak boleh review sebelum staff review (case DETECTED) ──
+    it('T-17: manager-review sebelum staff review → 400', async () => {
       const caseId = await setupLtkmCase(`70017${SUFFIX}`, `07017${SUFFIX}`);
+      // case masih DETECTED → belum melewati staff review
+      const res = await managerReview(caseId, 'APPROVE_REPORT', 'coba approve langsung');
+      expect(res.status).toBe(400);
+    });
+
+    // ── T-17b: ComplianceStaff tidak boleh manager-review (403) ──
+    it('T-17b: ComplianceStaff tidak bisa manager-review (403)', async () => {
+      const caseId = await setupLtkmCase(`70171${SUFFIX}`, `07171${SUFFIX}`);
+      await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi').expect(200);
       await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .patch(`${BASE}/monitoring/cases/${caseId}/manager-review`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .send({ action: 'APPROVE_REPORT', notes: 'coba' })
+        .expect(403);
+    });
+
+    // ── T-17c: ComplianceLead (Manager) tidak boleh staff-review (403) ──
+    it('T-17c: ComplianceLead tidak bisa staff-review (403)', async () => {
+      const caseId = await setupLtkmCase(`70172${SUFFIX}`, `07172${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
         .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'READY_TO_REPORT' })
-        .expect(400);
+        .send({ action: 'ESCALATE_TO_MANAGER', notes: 'coba' })
+        .expect(403);
     });
 
     // ── T-18: GET case detail termasuk triggers + linked transfer ──
@@ -4220,77 +4265,64 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.cif_no).toBeTruthy();
     });
 
-    // Helper: siapkan case yang sudah PENDING_DIRECTOR_REVIEW.
-    async function setupPendingDirectorCase(nik: string, phone: string): Promise<string> {
+    // Helper: siapkan case yang sudah PENDING_COMPLIANCE_MANAGER_REVIEW.
+    async function setupPendingManagerCase(nik: string, phone: string): Promise<string> {
       const caseId = await setupLtkmCase(nik, phone);
-      await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ action: 'ESCALATE_TO_DIRECTOR', notes: 'eskalasi ke Dirut' })
-        .expect(200);
+      await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi ke manager').expect(200);
       return caseId;
     }
 
-    // ── T-19: Director GET /cases → hanya PENDING_DIRECTOR_REVIEW ──
-    it('T-19: Director GET /monitoring/cases → semua item berstatus PENDING_DIRECTOR_REVIEW', async () => {
-      await setupPendingDirectorCase(`70020${SUFFIX}`, `07020${SUFFIX}`);
+    // ── T-19: ComplianceStaff GET /cases → hanya status tahap staff ──
+    it('T-19: ComplianceStaff GET /monitoring/cases → hanya DETECTED/STAFF_REVIEW/NEED_CLARIFICATION', async () => {
+      await setupLtkmCase(`70019${SUFFIX}`, `07019${SUFFIX}`); // buat 1 case DETECTED
 
       const res = await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases`)
-        .set('Authorization', `Bearer ${directorToken}`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
         .expect(200);
       expect(res.body.data.length).toBeGreaterThan(0);
-      expect(
-        res.body.data.every((c: any) => c.status === 'PENDING_DIRECTOR_REVIEW'),
-      ).toBe(true);
+      const allowed = ['DETECTED', 'PENDING_COMPLIANCE_STAFF_REVIEW', 'NEED_CLARIFICATION'];
+      expect(res.body.data.every((c: any) => allowed.includes(c.status))).toBe(true);
     });
 
-    // ── T-20: Director query status lain di-abaikan (forced PENDING) ──
-    it('T-20: Director GET /cases?status=DETECTED → tetap forced PENDING_DIRECTOR_REVIEW', async () => {
-      // ada case DETECTED dari test sebelumnya, pastikan Director tetap tidak melihatnya
+    // ── T-20: ComplianceStaff tidak bisa melihat case PENDING_MANAGER ──
+    it('T-20: ComplianceStaff GET /cases?status=PENDING_COMPLIANCE_MANAGER_REVIEW → tidak menampilkan case manager', async () => {
+      await setupPendingManagerCase(`70020${SUFFIX}`, `07020${SUFFIX}`);
       const res = await request(app.getHttpServer())
-        .get(`${BASE}/monitoring/cases?status=DETECTED`)
-        .set('Authorization', `Bearer ${directorToken}`)
+        .get(`${BASE}/monitoring/cases?status=PENDING_COMPLIANCE_MANAGER_REVIEW`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
         .expect(200);
       expect(
-        res.body.data.every((c: any) => c.status === 'PENDING_DIRECTOR_REVIEW'),
-      ).toBe(true);
-      expect(res.body.data.some((c: any) => c.status === 'DETECTED')).toBe(false);
+        res.body.data.some((c: any) => c.status === 'PENDING_COMPLIANCE_MANAGER_REVIEW'),
+      ).toBe(false);
     });
 
-    // ── T-21: Director GET detail PENDING → 200 ──
-    it('T-21: Director GET /cases/:id PENDING_DIRECTOR_REVIEW → 200', async () => {
-      const caseId = await setupPendingDirectorCase(`70021${SUFFIX}`, `07021${SUFFIX}`);
+    // ── T-21: ComplianceLead (Manager) GET detail PENDING_MANAGER → 200 ──
+    it('T-21: ComplianceLead GET /cases/:id PENDING_COMPLIANCE_MANAGER_REVIEW → 200', async () => {
+      const caseId = await setupPendingManagerCase(`70021${SUFFIX}`, `07021${SUFFIX}`);
       const res = await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases/${caseId}`)
-        .set('Authorization', `Bearer ${directorToken}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
-      expect(res.body.status).toBe('PENDING_DIRECTOR_REVIEW');
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
       expect(Array.isArray(res.body.triggers)).toBe(true);
     });
 
-    // ── T-22: Director GET detail DETECTED → 403 ──
-    it('T-22: Director GET /cases/:id DETECTED → 403', async () => {
-      const caseId = await setupLtkmCase(`70022${SUFFIX}`, `07022${SUFFIX}`);
+    // ── T-22: ComplianceStaff GET detail case PENDING_MANAGER → 403 ──
+    it('T-22: ComplianceStaff GET /cases/:id PENDING_COMPLIANCE_MANAGER_REVIEW → 403', async () => {
+      const caseId = await setupPendingManagerCase(`70022${SUFFIX}`, `07022${SUFFIX}`);
       await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases/${caseId}`)
-        .set('Authorization', `Bearer ${directorToken}`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
         .expect(403);
     });
 
-    // ── T-23: Director GET detail READY_TO_REPORT → 403 ──
-    it('T-23: Director GET /cases/:id READY_TO_REPORT (setelah approve) → 403', async () => {
-      const caseId = await setupPendingDirectorCase(`70023${SUFFIX}`, `07023${SUFFIX}`);
-      await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
-        .set('Authorization', `Bearer ${directorToken}`)
-        .send({ decision: 'APPROVED' })
-        .expect(200);
-      // setelah approve → READY_TO_REPORT, tidak lagi terlihat oleh Director
-      await request(app.getHttpServer())
-        .get(`${BASE}/monitoring/cases/${caseId}`)
-        .set('Authorization', `Bearer ${directorToken}`)
-        .expect(403);
+    // ── T-23: Manager APPROVE_REPORT → READY_TO_REPORT (end-to-end 2 langkah) ──
+    it('T-23: staff escalate → manager APPROVE_REPORT → READY_TO_REPORT', async () => {
+      const caseId = await setupPendingManagerCase(`70023${SUFFIX}`, `07023${SUFFIX}`);
+      const res = await managerReview(caseId, 'APPROVE_REPORT', 'approve');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('READY_TO_REPORT');
     });
 
     // ── T-24: Director tidak punya akses ke report queue ──
@@ -4327,16 +4359,16 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
     });
 
-    // Helper: buat case PENDING_DIRECTOR_REVIEW yang malformed (tanpa compliance
-    // review fields) — mensimulasikan data korup/legacy. Tidak lewat API.
+    // Helper: buat case PENDING_COMPLIANCE_MANAGER_REVIEW yang malformed (tanpa
+    // staff review fields) — mensimulasikan data korup/legacy. Tidak lewat API.
     async function setupMalformedPendingCase(nik: string, phone: string): Promise<string> {
       const caseId = await setupLtkmCase(nik, phone);
       await pgPool.query(
         `UPDATE monitoring_cases
-         SET status='PENDING_DIRECTOR_REVIEW',
-             compliance_reviewed_by=NULL,
-             compliance_reviewed_at=NULL,
-             compliance_action=NULL
+         SET status='PENDING_COMPLIANCE_MANAGER_REVIEW',
+             staff_reviewed_by=NULL,
+             staff_reviewed_at=NULL,
+             staff_action=NULL
          WHERE id=$1`,
         [Number(caseId)],
       );
@@ -4504,36 +4536,48 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       }
     });
 
-    // ── T-27: Director tidak bisa review PENDING malformed (compliance fields kosong) ──
-    it('T-27: director-review pada PENDING tanpa compliance fields → 400', async () => {
+    // ── T-27: Manager tidak bisa review PENDING malformed (staff fields kosong) ──
+    it('T-27: manager-review pada PENDING_MANAGER tanpa staff fields → 400', async () => {
       const caseId = await setupMalformedPendingCase(`70027${SUFFIX}`, `07027${SUFFIX}`);
       await request(app.getHttpServer())
-        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
-        .set('Authorization', `Bearer ${directorToken}`)
-        .send({ decision: 'APPROVED', notes: 'coba approve' })
+        .patch(`${BASE}/monitoring/cases/${caseId}/manager-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'APPROVE_REPORT', notes: 'coba approve' })
         .expect(400);
     });
 
-    // ── T-28: Director list & detail menyembunyikan PENDING malformed ──
-    it('T-28: Director list/detail tidak menampilkan PENDING malformed tanpa compliance fields', async () => {
-      const caseId = await setupMalformedPendingCase(`70028${SUFFIX}`, `07028${SUFFIX}`);
+    // ── T-28: Backward-compat — endpoint lama compliance/director-review masih jalan ──
+    it('T-28: legacy compliance-review → staff-review, director-review → manager-review', async () => {
+      const caseId = await setupLtkmCase(`70028${SUFFIX}`, `07028${SUFFIX}`);
 
-      const list = await request(app.getHttpServer())
-        .get(`${BASE}/monitoring/cases?limit=100`)
-        .set('Authorization', `Bearer ${directorToken}`)
+      // legacy compliance-review (ComplianceStaff) → dipetakan ke staff ESCALATE_TO_MANAGER
+      const staff = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .send({ action: 'ESCALATE_TO_DIRECTOR', notes: 'eskalasi legacy' })
         .expect(200);
-      // semua case yang tampil punya compliance_reviewed_by
-      expect(
-        list.body.data.every((c: any) => c.compliance_reviewed_by !== null),
-      ).toBe(true);
-      // case malformed tidak muncul
-      expect(list.body.data.some((c: any) => String(c.id) === String(caseId))).toBe(false);
+      expect(staff.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
+      expect(staff.body.staff_action).toBe('ESCALATE_TO_MANAGER');
 
-      // detail juga forbidden
-      await request(app.getHttpServer())
-        .get(`${BASE}/monitoring/cases/${caseId}`)
-        .set('Authorization', `Bearer ${directorToken}`)
-        .expect(403);
+      // legacy director-review (ComplianceLead) → dipetakan ke manager APPROVE_REPORT
+      const mgr = await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/director-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED', notes: 'approve legacy' })
+        .expect(200);
+      expect(mgr.body.status).toBe('READY_TO_REPORT');
+      expect(mgr.body.manager_action).toBe('APPROVE_REPORT');
+    });
+
+    // ── T-29: ComplianceStaff dapat melakukan review pertama, tidak bisa final approve ──
+    it('T-29: ComplianceStaff first review OK, tidak bisa mark READY_TO_REPORT langsung', async () => {
+      const caseId = await setupLtkmCase(`70029${SUFFIX}`, `07029${SUFFIX}`);
+      // staff hanya bisa escalate/clarify/recommend — tidak ada aksi ke READY_TO_REPORT
+      const res = await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi');
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
+      // READY_TO_REPORT hanya tercapai setelah manager approve
+      expect(res.body.status).not.toBe('READY_TO_REPORT');
     });
   });
 

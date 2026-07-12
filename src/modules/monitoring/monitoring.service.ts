@@ -11,6 +11,8 @@ import { resolveUserId } from "../../common/auth.util";
 import {
   ComplianceReviewDto,
   DirectorReviewDto,
+  ManagerReviewDto,
+  StaffReviewDto,
   UpdateReportDto,
 } from "./dto";
 
@@ -324,10 +326,19 @@ const SEVERITY_RANK: Record<Severity, number> = {
 // Status yang dianggap "sudah selesai" → tidak boleh di-dedup/append lagi.
 const CLOSED_STATUSES = [
   "CLOSED_FALSE_POSITIVE",
-  "COMPLIANCE_REJECTED",
-  "DIRECTOR_REJECTED",
+  "MANAGER_REJECTED",
   "REPORTED",
   "ARCHIVED",
+  // legacy (deprecated)
+  "COMPLIANCE_REJECTED",
+  "DIRECTOR_REJECTED",
+];
+
+// Status yang relevan untuk ComplianceStaff (approval pertama).
+const STAFF_RELEVANT_STATUSES = [
+  "DETECTED",
+  "PENDING_COMPLIANCE_STAFF_REVIEW",
+  "NEED_CLARIFICATION",
 ];
 
 const PEP_CODES = [
@@ -1030,18 +1041,15 @@ export class MonitoringService {
   async getCase(id: number, user?: AuthedUser) {
     const base = await this.getCaseWithTriggers(id);
 
-    // Director hanya boleh melihat case yang menunggu review Dirut DAN sudah
-    // melalui compliance review yang lengkap.
-    if (user?.role === "Director") {
-      const complianceComplete =
-        !!base.compliance_reviewed_by &&
-        !!base.compliance_reviewed_at &&
-        !!base.compliance_action;
-      if (base.status !== "PENDING_DIRECTOR_REVIEW" || !complianceComplete) {
-        throw new ForbiddenException(
-          "Director hanya dapat melihat case PENDING_DIRECTOR_REVIEW yang sudah lengkap compliance review-nya",
-        );
-      }
+    // ComplianceStaff hanya boleh melihat detail case yang relevan dengan
+    // tahap review pertama (belum/masih di tahap staff).
+    if (
+      user?.role === "ComplianceStaff" &&
+      !STAFF_RELEVANT_STATUSES.includes(base.status)
+    ) {
+      throw new ForbiddenException(
+        "ComplianceStaff hanya dapat melihat case pada tahap staff review",
+      );
     }
 
     // Ringkasan transfer & application jika ada
@@ -1083,26 +1091,25 @@ export class MonitoringService {
     const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 20));
     const offset = (page - 1) * limit;
 
-    // Director hanya melihat case yang menunggu review Dirut — abaikan status
-    // apa pun yang dikirim FE/user, paksa PENDING_DIRECTOR_REVIEW.
-    const effectiveStatus =
-      user?.role === "Director" ? "PENDING_DIRECTOR_REVIEW" : query.status;
-
     const where: string[] = ["1=1"];
     const params: any[] = [];
 
-    if (effectiveStatus) {
-      params.push(effectiveStatus);
+    // ComplianceStaff hanya melihat case yang relevan dengan tahap review
+    // pertama (DETECTED / PENDING_COMPLIANCE_STAFF_REVIEW / NEED_CLARIFICATION).
+    if (user?.role === "ComplianceStaff") {
+      // Jika FE mengirim status spesifik, hormati selama masih dalam scope staff.
+      if (query.status && STAFF_RELEVANT_STATUSES.includes(query.status)) {
+        params.push(query.status);
+        where.push(`status = $${params.length}`);
+      } else {
+        params.push(STAFF_RELEVANT_STATUSES);
+        where.push(`status = ANY($${params.length}::text[])`);
+      }
+    } else if (query.status) {
+      params.push(query.status);
       where.push(`status = $${params.length}`);
     }
 
-    // Director hanya melihat PENDING yang benar-benar sudah lengkap compliance
-    // review-nya (guard terhadap case malformed).
-    if (user?.role === "Director") {
-      where.push("compliance_reviewed_by IS NOT NULL");
-      where.push("compliance_reviewed_at IS NOT NULL");
-      where.push("compliance_action IS NOT NULL");
-    }
     if (query.case_type) {
       params.push(query.case_type);
       where.push(`case_type = $${params.length}`);
@@ -1192,14 +1199,23 @@ export class MonitoringService {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // Workflow: compliance review
+  // Workflow: two-step internal compliance review
+  //   1) staffReview   — approval pertama (ComplianceStaff)
+  //   2) managerReview  — approval kedua  (ComplianceLead / Compliance Manager)
+  // Director/Dirut tidak lagi terlibat dalam approval monitoring.
   // ───────────────────────────────────────────────────────────────────────────
 
   private caseTypeIncludesLtkm(caseType: string): boolean {
     return caseType === "LTKM" || caseType === "BOTH";
   }
 
-  async complianceReview(id: number, dto: ComplianceReviewDto, user: AuthedUser) {
+  // Status yang boleh menerima staff review (approval pertama).
+  private canStaffReview(status: string): boolean {
+    return STAFF_RELEVANT_STATUSES.includes(status);
+  }
+
+  // ── Approval pertama: ComplianceStaff ──────────────────────────────────────
+  async staffReview(id: number, dto: StaffReviewDto, user: AuthedUser) {
     const { rows } = await this.pool.query(
       `SELECT * FROM monitoring_cases WHERE id=$1`,
       [id],
@@ -1207,20 +1223,75 @@ export class MonitoringService {
     const c = rows[0];
     if (!c) throw new NotFoundException("Monitoring case not found");
 
-    if (CLOSED_STATUSES.includes(c.status) && c.status !== "NEED_CLARIFICATION") {
+    if (!this.canStaffReview(c.status)) {
       throw new BadRequestException(
-        `Case sudah final (${c.status}), tidak bisa direview ulang`,
+        `Case berstatus ${c.status} tidak dapat direview oleh Compliance Staff ` +
+          `(hanya ${STAFF_RELEVANT_STATUSES.join(", ")})`,
       );
     }
 
-    // Aksi yang mengarah ke Director / laporan wajib disertai notes non-kosong.
-    const NOTES_REQUIRED_ACTIONS = ["ESCALATE_TO_DIRECTOR", "RECOMMEND_REPORT"];
-    if (
-      NOTES_REQUIRED_ACTIONS.includes(dto.action) &&
-      !(dto.notes && dto.notes.trim().length > 0)
-    ) {
+    // Semua aksi staff wajib disertai notes non-kosong (jejak analisis awal).
+    if (!(dto.notes && dto.notes.trim().length > 0)) {
       throw new BadRequestException(
         `notes wajib diisi untuk aksi ${dto.action}`,
+      );
+    }
+
+    const actorId = resolveUserId(user);
+    let status = c.status as string;
+
+    switch (dto.action) {
+      case "ESCALATE_TO_MANAGER":
+        status = "PENDING_COMPLIANCE_MANAGER_REVIEW";
+        break;
+      case "RECOMMEND_CLOSE_FALSE_POSITIVE":
+        // Rekomendasi staff untuk menutup — keputusan akhir tetap di Manager.
+        status = "PENDING_COMPLIANCE_MANAGER_REVIEW";
+        break;
+      case "REQUEST_CLARIFICATION":
+        status = "NEED_CLARIFICATION";
+        break;
+    }
+
+    const { rows: upd } = await this.pool.query(
+      `UPDATE monitoring_cases
+       SET status=$2,
+           staff_action=$3,
+           staff_notes=$4,
+           staff_reviewed_by=$5,
+           staff_reviewed_at=now(),
+           updated_by=$5,
+           updated_at=now()
+       WHERE id=$1
+       RETURNING *`,
+      [id, status, dto.action, dto.notes ?? null, actorId],
+    );
+
+    await this.audit(actorId, "MONITORING_STAFF_REVIEW", String(id), c, upd[0]);
+    return this.getCaseWithTriggers(id);
+  }
+
+  // ── Approval kedua: ComplianceLead / Compliance Manager ────────────────────
+  async managerReview(id: number, dto: ManagerReviewDto, user: AuthedUser) {
+    const { rows } = await this.pool.query(
+      `SELECT * FROM monitoring_cases WHERE id=$1`,
+      [id],
+    );
+    const c = rows[0];
+    if (!c) throw new NotFoundException("Monitoring case not found");
+
+    if (c.status !== "PENDING_COMPLIANCE_MANAGER_REVIEW") {
+      throw new BadRequestException(
+        "Hanya case berstatus PENDING_COMPLIANCE_MANAGER_REVIEW yang bisa direview Compliance Manager. " +
+          "Case harus melewati staff review terlebih dahulu.",
+      );
+    }
+
+    // Defense-in-depth: PENDING_COMPLIANCE_MANAGER_REVIEW hanya sah bila sudah
+    // melalui staff review yang lengkap. Tolak case malformed.
+    if (!c.staff_reviewed_by || !c.staff_reviewed_at || !c.staff_action) {
+      throw new BadRequestException(
+        "Case belum melalui staff review yang lengkap (staff_reviewed_by/at/action wajib terisi)",
       );
     }
 
@@ -1230,120 +1301,29 @@ export class MonitoringService {
     let reportStatus: string | null = c.report_status;
 
     switch (dto.action) {
+      case "APPROVE_REPORT":
+        status = "READY_TO_REPORT";
+        reportType = this.caseTypeIncludesLtkm(c.case_type) ? "LTKM" : "LTKT";
+        reportStatus = "DRAFT";
+        break;
       case "CLOSE_FALSE_POSITIVE":
         status = "CLOSED_FALSE_POSITIVE";
         break;
-      case "NEED_CLARIFICATION":
+      case "REJECT":
+        status = "MANAGER_REJECTED";
+        break;
+      case "REQUEST_CLARIFICATION":
         status = "NEED_CLARIFICATION";
         break;
-      case "ESCALATE_TO_DIRECTOR":
-        status = "PENDING_DIRECTOR_REVIEW";
-        break;
-      case "RECOMMEND_REPORT":
-        if (this.caseTypeIncludesLtkm(c.case_type)) {
-          status = "PENDING_DIRECTOR_REVIEW";
-        } else {
-          status = "READY_TO_REPORT";
-          reportType = "LTKT";
-          reportStatus = "DRAFT";
-        }
-        break;
-      case "READY_TO_REPORT":
-        // LTKM tidak boleh langsung ready-to-report tanpa persetujuan Director.
-        if (this.caseTypeIncludesLtkm(c.case_type)) {
-          throw new BadRequestException(
-            "LTKM memerlukan persetujuan Director sebelum READY_TO_REPORT. Gunakan ESCALATE_TO_DIRECTOR / RECOMMEND_REPORT.",
-          );
-        }
-        status = "READY_TO_REPORT";
-        reportType = "LTKT";
-        reportStatus = "DRAFT";
-        break;
     }
 
     const { rows: upd } = await this.pool.query(
       `UPDATE monitoring_cases
        SET status=$2,
-           compliance_status=$3,
-           compliance_action=$4,
-           compliance_notes=$5,
-           compliance_reviewed_by=$6,
-           compliance_reviewed_at=now(),
-           report_type=$7,
-           report_status=$8,
-           updated_by=$6,
-           updated_at=now()
-       WHERE id=$1
-       RETURNING *`,
-      [
-        id,
-        status,
-        status,
-        dto.action,
-        dto.notes ?? null,
-        actorId,
-        reportType,
-        reportStatus,
-      ],
-    );
-
-    await this.audit(actorId, "MONITORING_COMPLIANCE_REVIEW", String(id), c, upd[0]);
-    return this.getCaseWithTriggers(id);
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Workflow: director review
-  // ───────────────────────────────────────────────────────────────────────────
-
-  async directorReview(id: number, dto: DirectorReviewDto, user: AuthedUser) {
-    const { rows } = await this.pool.query(
-      `SELECT * FROM monitoring_cases WHERE id=$1`,
-      [id],
-    );
-    const c = rows[0];
-    if (!c) throw new NotFoundException("Monitoring case not found");
-
-    if (c.status !== "PENDING_DIRECTOR_REVIEW") {
-      throw new BadRequestException(
-        "Hanya case berstatus PENDING_DIRECTOR_REVIEW yang bisa direview Director",
-      );
-    }
-
-    // Defense-in-depth: PENDING_DIRECTOR_REVIEW hanya sah bila sudah melalui
-    // compliance review yang lengkap. Tolak case malformed.
-    if (
-      !c.compliance_reviewed_by ||
-      !c.compliance_reviewed_at ||
-      !c.compliance_action
-    ) {
-      throw new BadRequestException(
-        "Case belum melalui compliance review yang lengkap (compliance_reviewed_by/at/action wajib terisi)",
-      );
-    }
-
-    const actorId = resolveUserId(user);
-    let status = c.status as string;
-    let reportType: string | null = c.report_type;
-    let reportStatus: string | null = c.report_status;
-
-    if (dto.decision === "APPROVED") {
-      status = "READY_TO_REPORT";
-      reportType = this.caseTypeIncludesLtkm(c.case_type) ? "LTKM" : "LTKT";
-      reportStatus = "DRAFT";
-    } else if (dto.decision === "REJECTED") {
-      status = "DIRECTOR_REJECTED";
-    } else {
-      // REQUEST_MORE_INFO
-      status = "NEED_CLARIFICATION";
-    }
-
-    const { rows: upd } = await this.pool.query(
-      `UPDATE monitoring_cases
-       SET status=$2,
-           director_decision=$3,
-           director_notes=$4,
-           director_reviewed_by=$5,
-           director_reviewed_at=now(),
+           manager_action=$3,
+           manager_notes=$4,
+           manager_reviewed_by=$5,
+           manager_reviewed_at=now(),
            report_type=$6,
            report_status=$7,
            updated_by=$5,
@@ -1353,7 +1333,7 @@ export class MonitoringService {
       [
         id,
         status,
-        dto.decision,
+        dto.action,
         dto.notes ?? null,
         actorId,
         reportType,
@@ -1361,8 +1341,47 @@ export class MonitoringService {
       ],
     );
 
-    await this.audit(actorId, "MONITORING_DIRECTOR_REVIEW", String(id), c, upd[0]);
+    await this.audit(actorId, "MONITORING_MANAGER_REVIEW", String(id), c, upd[0]);
     return this.getCaseWithTriggers(id);
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Legacy aliases (deprecated) — memetakan endpoint lama ke flow baru agar FE
+  // lama tidak langsung rusak saat rilis. Hapus setelah FE migrasi penuh.
+  //   compliance-review → staff-review
+  //   director-review    → manager-review
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async complianceReview(id: number, dto: ComplianceReviewDto, user: AuthedUser) {
+    const map: Record<string, StaffReviewDto["action"]> = {
+      ESCALATE_TO_DIRECTOR: "ESCALATE_TO_MANAGER",
+      RECOMMEND_REPORT: "ESCALATE_TO_MANAGER",
+      READY_TO_REPORT: "ESCALATE_TO_MANAGER",
+      NEED_CLARIFICATION: "REQUEST_CLARIFICATION",
+      CLOSE_FALSE_POSITIVE: "RECOMMEND_CLOSE_FALSE_POSITIVE",
+    };
+    const action = map[dto.action];
+    if (!action) {
+      throw new BadRequestException(
+        `Aksi ${dto.action} tidak lagi didukung. Gunakan endpoint staff-review.`,
+      );
+    }
+    return this.staffReview(id, { action, notes: dto.notes }, user);
+  }
+
+  async directorReview(id: number, dto: DirectorReviewDto, user: AuthedUser) {
+    const map: Record<string, ManagerReviewDto["action"]> = {
+      APPROVED: "APPROVE_REPORT",
+      REJECTED: "REJECT",
+      REQUEST_MORE_INFO: "REQUEST_CLARIFICATION",
+    };
+    const action = map[dto.decision];
+    if (!action) {
+      throw new BadRequestException(
+        `Keputusan ${dto.decision} tidak lagi didukung. Gunakan endpoint manager-review.`,
+      );
+    }
+    return this.managerReview(id, { action, notes: dto.notes }, user);
   }
 
   // ───────────────────────────────────────────────────────────────────────────

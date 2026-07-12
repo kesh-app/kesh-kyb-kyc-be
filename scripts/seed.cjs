@@ -27,6 +27,7 @@ function buildPgConfig() {
   const roles = [
     'BranchAdmin',
     'FrontDesk',
+    'ComplianceStaff',
     'ComplianceLead',
     'Auditor',
     'FinanceStaff',
@@ -72,7 +73,18 @@ function buildPgConfig() {
     ['System Admin', sysEmail, sysHash, 'SystemAdmin', 'MAIN']
   );
 
-  // 🔹 Director default (Direktur Utama) — untuk testing monitoring director-review
+  // 🔹 ComplianceStaff default — approval pertama monitoring (staff-review)
+  const staffEmail = 'compliance.staff@kesh.co.id'.toLowerCase();
+  const staffPassword = process.env.SEED_COMPLIANCE_STAFF_PASSWORD || 'Password123!';
+  const staffHash = await bcrypt.hash(staffPassword, 10);
+  await client.query(
+    `INSERT INTO users(name,email,password_hash,role,branch_id)
+     VALUES($1,$2,$3,$4,(SELECT id FROM branches WHERE code=$5))
+     ON CONFLICT (email) DO NOTHING`,
+    ['Compliance Staff', staffEmail, staffHash, 'ComplianceStaff', 'MAIN']
+  );
+
+  // 🔹 Director default (Direktur Utama) — legacy, tidak lagi approver monitoring
   const directorEmail = 'director@kesh.co.id'.toLowerCase();
   const directorPassword = process.env.SEED_DIRECTOR_PASSWORD || 'Password123!';
   const directorHash = await bcrypt.hash(directorPassword, 10);
@@ -88,7 +100,10 @@ function buildPgConfig() {
   console.log('SystemAdmin credentials:');
   console.log(`  email    : ${sysEmail}`);
   console.log(`  password : ${sysPassword}`);
-  console.log('Director credentials:');
+  console.log('ComplianceStaff credentials:');
+  console.log(`  email    : ${staffEmail}`);
+  console.log(`  password : ${staffPassword}`);
+  console.log('Director credentials (legacy, non-approver):');
   console.log(`  email    : ${directorEmail}`);
   console.log(`  password : ${directorPassword}`);
 })().catch(e => {

@@ -17,6 +17,8 @@ import { MonitoringService } from "./monitoring.service";
 import {
   ComplianceReviewDto,
   DirectorReviewDto,
+  ManagerReviewDto,
+  StaffReviewDto,
   UpdateReportDto,
 } from "./dto";
 
@@ -26,10 +28,11 @@ export class MonitoringController {
   constructor(private readonly svc: MonitoringService) {}
 
   // ── Read: list cases ──────────────────────────────────────────────────────
-  // ComplianceLead, Auditor (read-only), Director. SystemAdmin via guard.
-  // Director hanya melihat case PENDING_DIRECTOR_REVIEW (di-force di service).
+  // ComplianceStaff (tahap 1), ComplianceLead/Manager (tahap 2), Auditor
+  // (read-only). SystemAdmin via guard. ComplianceStaff hanya melihat case
+  // pada tahap staff review (di-force di service).
   @Get("cases")
-  @Roles("ComplianceLead", "Director", "Auditor")
+  @Roles("ComplianceStaff", "ComplianceLead", "Auditor")
   async listCases(@Req() req: any, @Query() query: any) {
     return this.svc.listCases(query, req.user);
   }
@@ -43,9 +46,10 @@ export class MonitoringController {
   }
 
   // ── Read: case detail ─────────────────────────────────────────────────────
-  // Director hanya boleh membaca detail case PENDING_DIRECTOR_REVIEW (dijaga di service).
+  // ComplianceStaff hanya boleh membaca detail case pada tahap staff review
+  // (dijaga di service).
   @Get("cases/:id")
-  @Roles("ComplianceLead", "Director", "Auditor")
+  @Roles("ComplianceStaff", "ComplianceLead", "Auditor")
   async getCase(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getCase(id, req.user);
   }
@@ -60,9 +64,32 @@ export class MonitoringController {
     return this.svc.evaluateTransfer(transferId, req.user);
   }
 
-  // ── Compliance review ─────────────────────────────────────────────────────
-  @Patch("cases/:id/compliance-review")
+  // ── Staff review (approval pertama — ComplianceStaff) ─────────────────────
+  @Patch("cases/:id/staff-review")
+  @Roles("ComplianceStaff")
+  async staffReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: StaffReviewDto,
+  ) {
+    return this.svc.staffReview(id, dto, req.user);
+  }
+
+  // ── Manager review (approval kedua — ComplianceLead / Compliance Manager) ─
+  @Patch("cases/:id/manager-review")
   @Roles("ComplianceLead")
+  async managerReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: ManagerReviewDto,
+  ) {
+    return this.svc.managerReview(id, dto, req.user);
+  }
+
+  // ── Legacy aliases (deprecated) — dipertahankan sementara untuk FE lama ───
+  // compliance-review → staff-review, director-review → manager-review.
+  @Patch("cases/:id/compliance-review")
+  @Roles("ComplianceStaff")
   async complianceReview(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
@@ -71,9 +98,8 @@ export class MonitoringController {
     return this.svc.complianceReview(id, dto, req.user);
   }
 
-  // ── Director review ───────────────────────────────────────────────────────
   @Patch("cases/:id/director-review")
-  @Roles("Director")
+  @Roles("ComplianceLead")
   async directorReview(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,

@@ -6,7 +6,38 @@ import {
   MaxLength,
 } from "class-validator";
 
-// ── Compliance review ────────────────────────────────────────────────────────
+// ── Staff review (approval pertama — ComplianceStaff) ────────────────────────
+export const STAFF_REVIEW_ACTIONS = [
+  "ESCALATE_TO_MANAGER",
+  "REQUEST_CLARIFICATION",
+  "RECOMMEND_CLOSE_FALSE_POSITIVE",
+] as const;
+
+export class StaffReviewDto {
+  @IsIn(STAFF_REVIEW_ACTIONS as any)
+  action!: (typeof STAFF_REVIEW_ACTIONS)[number];
+
+  @IsOptional() @IsString()
+  notes?: string;
+}
+
+// ── Manager review (approval kedua — ComplianceLead / Compliance Manager) ────
+export const MANAGER_REVIEW_ACTIONS = [
+  "APPROVE_REPORT",
+  "CLOSE_FALSE_POSITIVE",
+  "REJECT",
+  "REQUEST_CLARIFICATION",
+] as const;
+
+export class ManagerReviewDto {
+  @IsIn(MANAGER_REVIEW_ACTIONS as any)
+  action!: (typeof MANAGER_REVIEW_ACTIONS)[number];
+
+  @IsOptional() @IsString()
+  notes?: string;
+}
+
+// ── Legacy: Compliance review (deprecated alias → staff review) ──────────────
 export const COMPLIANCE_ACTIONS = [
   "CLOSE_FALSE_POSITIVE",
   "NEED_CLARIFICATION",
@@ -23,7 +54,7 @@ export class ComplianceReviewDto {
   notes?: string;
 }
 
-// ── Director review ──────────────────────────────────────────────────────────
+// ── Legacy: Director review (deprecated alias → manager review) ──────────────
 export const DIRECTOR_DECISIONS = [
   "APPROVED",
   "REJECTED",
