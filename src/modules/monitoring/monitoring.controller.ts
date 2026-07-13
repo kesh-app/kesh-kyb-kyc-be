@@ -28,11 +28,10 @@ export class MonitoringController {
   constructor(private readonly svc: MonitoringService) {}
 
   // ── Read: list cases ──────────────────────────────────────────────────────
-  // ComplianceStaff (tahap 1), ComplianceLead/Manager (tahap 2), Auditor
-  // (read-only). SystemAdmin via guard. ComplianceStaff hanya melihat case
-  // pada tahap staff review (di-force di service).
+  // ComplianceLead (review & approval), Auditor (read-only).
+  // Director/SystemAdmin via guard bypass.
   @Get("cases")
-  @Roles("ComplianceStaff", "ComplianceLead", "Auditor")
+  @Roles("ComplianceLead", "Auditor")
   async listCases(@Req() req: any, @Query() query: any) {
     return this.svc.listCases(query, req.user);
   }
@@ -46,10 +45,8 @@ export class MonitoringController {
   }
 
   // ── Read: case detail ─────────────────────────────────────────────────────
-  // ComplianceStaff hanya boleh membaca detail case pada tahap staff review
-  // (dijaga di service).
   @Get("cases/:id")
-  @Roles("ComplianceStaff", "ComplianceLead", "Auditor")
+  @Roles("ComplianceLead", "Auditor")
   async getCase(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getCase(id, req.user);
   }
@@ -64,9 +61,9 @@ export class MonitoringController {
     return this.svc.evaluateTransfer(transferId, req.user);
   }
 
-  // ── Staff review (approval pertama — ComplianceStaff) ─────────────────────
+  // ── Staff review (approval pertama — ComplianceLead) ─────────────────────
   @Patch("cases/:id/staff-review")
-  @Roles("ComplianceStaff")
+  @Roles("ComplianceLead")
   async staffReview(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
@@ -87,9 +84,9 @@ export class MonitoringController {
   }
 
   // ── Legacy aliases (deprecated) — dipertahankan sementara untuk FE lama ───
-  // compliance-review → staff-review, director-review → manager-review.
+  // compliance-review → staff-review (ComplianceLead), director-review → manager-review.
   @Patch("cases/:id/compliance-review")
-  @Roles("ComplianceStaff")
+  @Roles("ComplianceLead")
   async complianceReview(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,

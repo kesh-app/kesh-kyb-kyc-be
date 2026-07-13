@@ -119,6 +119,17 @@ export class DecideTransferDto {
   reject_reason?: string;
 }
 
+export class ReviewTransferDto {
+  @IsString()
+  action!: 'APPROVE' | 'REJECT';
+
+  @IsOptional() @IsString()
+  notes?: string;
+
+  @IsOptional() @IsString()
+  reject_reason?: string;
+}
+
 export class SetTransferResultDto {
   @IsString()
   result!: 'SUCCESS' | 'FAILED';

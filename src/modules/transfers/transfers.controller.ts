@@ -17,6 +17,7 @@ import { TransfersService } from "./transfers.service";
 import {
   CreateTransferDto,
   DecideTransferDto,
+  ReviewTransferDto,
   SetTransferResultDto,
   UpdateTransferDto,
 } from "./dto";
@@ -51,7 +52,29 @@ export class TransfersController {
     return this.svc.submit(id, req.user, req.ip);
   }
 
-  // DECIDE (APPROVE / REJECT)
+  // SUPERVISOR REVIEW (layer 1) — OperationSupervisor
+  @Post(":id/supervisor-review")
+  @Roles("OperationSupervisor")
+  async supervisorReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: ReviewTransferDto
+  ) {
+    return this.svc.supervisorReview(id, req.user, dto, req.ip);
+  }
+
+  // FINANCE STAFF REVIEW (layer 2)
+  @Post(":id/finance-review")
+  @Roles("FinanceStaff")
+  async financeReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: ReviewTransferDto
+  ) {
+    return this.svc.financeReview(id, req.user, dto, req.ip);
+  }
+
+  // DECIDE (APPROVE / REJECT) — FinanceManager final
   @Post(":id/decision")
   @Roles("FinanceManager")
   async decide(
@@ -75,21 +98,21 @@ export class TransfersController {
 
   // LIST TRANSFERS
   @Get()
-  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "Auditor", "FrontDesk")
   async list(@Req() req: any, @Query("status") status?: string) {
     return this.svc.list(req.user, status);
   }
 
   // BANK CATALOG — static list for FE dropdown
   @Get("banks")
-  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin", "FrontDesk")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "ComplianceLead", "FrontDesk", "Auditor")
   getBanks() {
     return this.svc.getBanks();
   }
 
   // SENDER SEARCH — cari aplikasi APPROVED sebagai calon pengirim transfer
   @Get("senders/search")
-  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "SystemAdmin", "FrontDesk")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "ComplianceLead", "FrontDesk", "Auditor")
   async searchSenders(
     @Query("q") q = "",
     @Query("page") page = "1",
@@ -100,14 +123,14 @@ export class TransfersController {
 
   // SNAP PREVIEW — pure mapping of stored data, NO external bank/API call
   @Get(":id/snap-preview")
-  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "Auditor", "FrontDesk")
   async snapPreview(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.snapPreview(id, req.user);
   }
 
   // GET TRANSFER DETAIL
   @Get(":id")
-  @Roles("FinanceStaff", "FinanceManager", "SystemAdmin", "FrontDesk")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "Auditor", "FrontDesk")
   async getById(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getById(id, req.user);
   }

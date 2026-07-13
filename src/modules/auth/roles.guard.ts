@@ -26,8 +26,8 @@ export class RolesGuard implements CanActivate {
 
     if (!user) return false;
 
-    // ✅ SystemAdmin selalu boleh
-    if (user.role === 'SystemAdmin') {
+    // ✅ SystemAdmin + Director full access
+    if (user.role === 'SystemAdmin' || user.role === 'Director') {
       return true;
     }
 

@@ -23,17 +23,18 @@ function buildPgConfig() {
   const client = new Client(buildPgConfig());
   await client.connect();
 
-  // 🔹 roles idempotent – sekalian tambahin role finance & SystemAdmin
+  // 🔹 roles idempotent
   const roles = [
     'BranchAdmin',
     'FrontDesk',
-    'ComplianceStaff',
+    'OperationSupervisor',
     'ComplianceLead',
     'Auditor',
     'FinanceStaff',
     'FinanceManager',
     'SystemAdmin',
     'Director',
+    'ComplianceStaff', // deprecated; kept for backward-compat with existing users
   ];
   for (const r of roles) {
     await client.query(
@@ -73,18 +74,18 @@ function buildPgConfig() {
     ['System Admin', sysEmail, sysHash, 'SystemAdmin', 'MAIN']
   );
 
-  // 🔹 ComplianceStaff default — approval pertama monitoring (staff-review)
-  const staffEmail = 'compliance.staff@kesh.co.id'.toLowerCase();
-  const staffPassword = process.env.SEED_COMPLIANCE_STAFF_PASSWORD || 'Password123!';
-  const staffHash = await bcrypt.hash(staffPassword, 10);
+  // 🔹 OperationSupervisor default — approval pertama monitoring + transfer layer 1
+  const opSupEmail = 'operation.supervisor@kesh.co.id'.toLowerCase();
+  const opSupPassword = process.env.SEED_OP_SUPERVISOR_PASSWORD || 'Password123!';
+  const opSupHash = await bcrypt.hash(opSupPassword, 10);
   await client.query(
     `INSERT INTO users(name,email,password_hash,role,branch_id)
      VALUES($1,$2,$3,$4,(SELECT id FROM branches WHERE code=$5))
      ON CONFLICT (email) DO NOTHING`,
-    ['Compliance Staff', staffEmail, staffHash, 'ComplianceStaff', 'MAIN']
+    ['Operation Supervisor', opSupEmail, opSupHash, 'OperationSupervisor', 'MAIN']
   );
 
-  // 🔹 Director default (Direktur Utama) — legacy, tidak lagi approver monitoring
+  // 🔹 Director default (Direktur Utama) — full access
   const directorEmail = 'director@kesh.co.id'.toLowerCase();
   const directorPassword = process.env.SEED_DIRECTOR_PASSWORD || 'Password123!';
   const directorHash = await bcrypt.hash(directorPassword, 10);
@@ -95,15 +96,18 @@ function buildPgConfig() {
     ['Direktur Utama', directorEmail, directorHash, 'Director', 'MAIN']
   );
 
+  // NOTE: ComplianceStaff user omitted from new seeds (deprecated role).
+  // Existing ComplianceStaff users in DB remain valid for backward-compat.
+
   await client.end();
   console.log('Seeding complete.');
   console.log('SystemAdmin credentials:');
   console.log(`  email    : ${sysEmail}`);
   console.log(`  password : ${sysPassword}`);
-  console.log('ComplianceStaff credentials:');
-  console.log(`  email    : ${staffEmail}`);
-  console.log(`  password : ${staffPassword}`);
-  console.log('Director credentials (legacy, non-approver):');
+  console.log('OperationSupervisor credentials:');
+  console.log(`  email    : ${opSupEmail}`);
+  console.log(`  password : ${opSupPassword}`);
+  console.log('Director credentials:');
   console.log(`  email    : ${directorEmail}`);
   console.log(`  password : ${directorPassword}`);
 })().catch(e => {

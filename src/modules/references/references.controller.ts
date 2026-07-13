@@ -61,4 +61,31 @@ export class ReferencesController {
   getBusinessDocumentTypes() {
     return this.svc.getBusinessDocumentTypes();
   }
+
+  // ── RBA V01 reference endpoints ───────────────────────────────────────────
+  // Return only values from Excel workbook: { data: [{ code, name, score, risk_level, source_sheet }] }
+
+  @Get('rba/occupations')
+  getRbaOccupations() { return this.svc.getRbaOccupations(); }
+
+  @Get('rba/business-forms')
+  getRbaBusinessForms() { return this.svc.getRbaBusinessForms(); }
+
+  @Get('rba/source-of-funds')
+  getRbaSourceOfFunds() { return this.svc.getRbaSourceOfFunds(); }
+
+  @Get('rba/business-purposes')
+  getRbaBusinessPurposes() { return this.svc.getRbaBusinessPurposes(); }
+
+  @Get('rba/industries')
+  getRbaIndustries() { return this.svc.getRbaIndustries(); }
+
+  @Get('rba/geographies')
+  getRbaGeographies() { return this.svc.getRbaGeographies(); }
+
+  @Get('rba/products')
+  getRbaProducts() { return this.svc.getRbaProducts(); }
+
+  @Get('rba/distributions')
+  getRbaDistributions() { return this.svc.getRbaDistributions(); }
 }

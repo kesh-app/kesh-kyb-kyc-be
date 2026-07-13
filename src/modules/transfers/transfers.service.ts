@@ -23,6 +23,8 @@ import { MonitoringService } from "../monitoring/monitoring.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
+const FULL_ACCESS_ROLES = ["SystemAdmin", "Director"];
+
 @Injectable()
 export class TransfersService {
   constructor(
@@ -121,7 +123,7 @@ export class TransfersService {
     const isStaff = user.role === "FinanceStaff" || user.role === "FrontDesk";
     const isManager = user.role === "FinanceManager";
 
-    if (!isStaff && !isManager) {
+    if (!isStaff && !isManager && !FULL_ACCESS_ROLES.includes(user.role)) {
       throw new ForbiddenException("Not allowed");
     }
 
@@ -330,8 +332,11 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
-    // FinanceStaff dan FrontDesk boleh submit (SystemAdmin read-only).
-    if (user.role !== "FinanceStaff" && user.role !== "FrontDesk") {
+    if (
+      user.role !== "FinanceStaff" &&
+      user.role !== "FrontDesk" &&
+      !FULL_ACCESS_ROLES.includes(user.role)
+    ) {
       throw new ForbiddenException("Only FinanceStaff or FrontDesk can submit");
     }
 
@@ -382,6 +387,116 @@ export class TransfersService {
   }
 
   // ---------------------------------------------------------------------------
+  // SUPERVISOR REVIEW (layer 1) — OperationSupervisor
+  // ---------------------------------------------------------------------------
+  async supervisorReview(
+    id: number,
+    user: AuthedUser,
+    dto: { action: "APPROVE" | "REJECT"; notes?: string; reject_reason?: string },
+    ip?: string,
+  ) {
+    const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [id]);
+    if ((prev.rowCount ?? 0) === 0) throw new NotFoundException("Transfer not found");
+    const row = prev.rows[0];
+
+    if (row.status !== "SUBMITTED") {
+      throw new BadRequestException(
+        "Hanya transfer berstatus SUBMITTED yang dapat direview oleh Operation Supervisor.",
+      );
+    }
+
+    const actorId = resolveUserId(user);
+
+    let next;
+    if (dto.action === "APPROVE") {
+      next = await this.pool.query(
+        `UPDATE transfers SET
+          status='PENDING_FINANCE_STAFF_REVIEW',
+          supervisor_reviewed_by=$2,
+          supervisor_reviewed_at=now(),
+          supervisor_notes=$3,
+          updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+        [id, actorId, dto.notes ?? null],
+      );
+    } else {
+      next = await this.pool.query(
+        `UPDATE transfers SET
+          status='REJECTED',
+          rejected_by=$2,
+          rejected_at=now(),
+          reject_reason=$3,
+          supervisor_reviewed_by=$2,
+          supervisor_reviewed_at=now(),
+          supervisor_notes=$4,
+          updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+        [id, actorId, dto.reject_reason ?? null, dto.notes ?? null],
+      );
+    }
+
+    await this.audit(actorId, "TRANSFER_SUPERVISOR_REVIEW", String(id), row, next.rows[0], ip);
+    return next.rows[0];
+  }
+
+  // ---------------------------------------------------------------------------
+  // FINANCE STAFF REVIEW (layer 2) — FinanceStaff
+  // ---------------------------------------------------------------------------
+  async financeReview(
+    id: number,
+    user: AuthedUser,
+    dto: { action: "APPROVE" | "REJECT"; notes?: string; reject_reason?: string },
+    ip?: string,
+  ) {
+    const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [id]);
+    if ((prev.rowCount ?? 0) === 0) throw new NotFoundException("Transfer not found");
+    const row = prev.rows[0];
+
+    if (row.status !== "PENDING_FINANCE_STAFF_REVIEW") {
+      throw new BadRequestException(
+        "Hanya transfer berstatus PENDING_FINANCE_STAFF_REVIEW yang dapat direview oleh Finance Staff.",
+      );
+    }
+
+    const actorId = resolveUserId(user);
+
+    let next;
+    if (dto.action === "APPROVE") {
+      next = await this.pool.query(
+        `UPDATE transfers SET
+          status='PENDING_FINANCE_MANAGER_APPROVAL',
+          finance_reviewed_by=$2,
+          finance_reviewed_at=now(),
+          finance_notes=$3,
+          updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+        [id, actorId, dto.notes ?? null],
+      );
+    } else {
+      next = await this.pool.query(
+        `UPDATE transfers SET
+          status='REJECTED',
+          rejected_by=$2,
+          rejected_at=now(),
+          reject_reason=$3,
+          finance_reviewed_by=$2,
+          finance_reviewed_at=now(),
+          finance_notes=$4,
+          updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+        [id, actorId, dto.reject_reason ?? null, dto.notes ?? null],
+      );
+    }
+
+    await this.audit(actorId, "TRANSFER_FINANCE_REVIEW", String(id), row, next.rows[0], ip);
+    return next.rows[0];
+  }
+
+  // ---------------------------------------------------------------------------
   // DECIDE (APPROVE / REJECT) – FinanceManager
   // ---------------------------------------------------------------------------
   async decide(
@@ -397,13 +512,14 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
-    // Hanya FinanceManager yang boleh decide (SystemAdmin read-only).
-    if (user.role !== "FinanceManager") {
+    if (user.role !== "FinanceManager" && !FULL_ACCESS_ROLES.includes(user.role)) {
       throw new ForbiddenException("Only FinanceManager can approve/reject");
     }
 
-    if (row.status !== "SUBMITTED") {
-      throw new BadRequestException("Only SUBMITTED can be approved/rejected");
+    if (!["SUBMITTED", "PENDING_FINANCE_MANAGER_APPROVAL"].includes(row.status)) {
+      throw new BadRequestException(
+        "Hanya transfer berstatus SUBMITTED atau PENDING_FINANCE_MANAGER_APPROVAL yang dapat diputuskan.",
+      );
     }
 
     const decisionNotes = dto.decision_notes ?? dto.note ?? null;
@@ -466,8 +582,7 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
-    // Hanya FinanceManager yang boleh set result (SystemAdmin read-only).
-    if (user.role !== "FinanceManager") {
+    if (user.role !== "FinanceManager" && !FULL_ACCESS_ROLES.includes(user.role)) {
       throw new ForbiddenException("Only FinanceManager can set result");
     }
 
@@ -554,12 +669,12 @@ export class TransfersService {
     const params: any[] = [];
     let where = "WHERE 1=1";
 
-    if (role === "FinanceStaff" || role === "FrontDesk") {
-      // Staff / FrontDesk → hanya transfer yang dia buat sendiri
+    if (role === "FrontDesk") {
+      // FrontDesk → hanya transfer yang dia buat sendiri
       params.push(resolveUserId(user));
       where += ` AND (t.created_by = $${params.length} OR t.created_by IS NULL)`;
     }
-    // 🔹 FinanceManager, SystemAdmin → tidak ada filter khusus
+    // FinanceStaff, OperationSupervisor, FinanceManager, SystemAdmin, Director, Auditor → semua
 
     const normStatus = status?.toUpperCase();
     if (normStatus && normStatus !== "ALL") {
@@ -596,7 +711,12 @@ export class TransfersService {
   // DETAIL
   // ---------------------------------------------------------------------------
   async getById(id: number, user: AuthedUser) {
-    const isManager = user.role === "FinanceManager" || user.role === "SystemAdmin";
+    const isManager =
+      user.role === "FinanceManager" ||
+      user.role === "FinanceStaff" ||
+      user.role === "OperationSupervisor" ||
+      user.role === "Auditor" ||
+      FULL_ACCESS_ROLES.includes(user.role);
 
     const q = await this.pool.query(
       `SELECT t.*,

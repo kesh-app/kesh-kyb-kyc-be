@@ -334,7 +334,7 @@ const CLOSED_STATUSES = [
   "DIRECTOR_REJECTED",
 ];
 
-// Status yang relevan untuk ComplianceStaff (approval pertama).
+// Status yang relevan untuk tahap pertama review (approval pertama oleh ComplianceLead).
 const STAFF_RELEVANT_STATUSES = [
   "DETECTED",
   "PENDING_COMPLIANCE_STAFF_REVIEW",
@@ -1041,17 +1041,6 @@ export class MonitoringService {
   async getCase(id: number, user?: AuthedUser) {
     const base = await this.getCaseWithTriggers(id);
 
-    // ComplianceStaff hanya boleh melihat detail case yang relevan dengan
-    // tahap review pertama (belum/masih di tahap staff).
-    if (
-      user?.role === "ComplianceStaff" &&
-      !STAFF_RELEVANT_STATUSES.includes(base.status)
-    ) {
-      throw new ForbiddenException(
-        "ComplianceStaff hanya dapat melihat case pada tahap staff review",
-      );
-    }
-
     // Ringkasan transfer & application jika ada
     let transfer: any = null;
     if (base.transfer_id) {
@@ -1094,18 +1083,7 @@ export class MonitoringService {
     const where: string[] = ["1=1"];
     const params: any[] = [];
 
-    // ComplianceStaff hanya melihat case yang relevan dengan tahap review
-    // pertama (DETECTED / PENDING_COMPLIANCE_STAFF_REVIEW / NEED_CLARIFICATION).
-    if (user?.role === "ComplianceStaff") {
-      // Jika FE mengirim status spesifik, hormati selama masih dalam scope staff.
-      if (query.status && STAFF_RELEVANT_STATUSES.includes(query.status)) {
-        params.push(query.status);
-        where.push(`status = $${params.length}`);
-      } else {
-        params.push(STAFF_RELEVANT_STATUSES);
-        where.push(`status = ANY($${params.length}::text[])`);
-      }
-    } else if (query.status) {
+    if (query.status) {
       params.push(query.status);
       where.push(`status = $${params.length}`);
     }
@@ -1199,10 +1177,9 @@ export class MonitoringService {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
-  // Workflow: two-step internal compliance review
-  //   1) staffReview   — approval pertama (ComplianceStaff)
+  // Workflow: two-step internal compliance review (keduanya oleh ComplianceLead)
+  //   1) staffReview   — approval pertama (ComplianceLead)
   //   2) managerReview  — approval kedua  (ComplianceLead / Compliance Manager)
-  // Director/Dirut tidak lagi terlibat dalam approval monitoring.
   // ───────────────────────────────────────────────────────────────────────────
 
   private caseTypeIncludesLtkm(caseType: string): boolean {
@@ -1214,7 +1191,7 @@ export class MonitoringService {
     return STAFF_RELEVANT_STATUSES.includes(status);
   }
 
-  // ── Approval pertama: ComplianceStaff ──────────────────────────────────────
+  // ── Approval pertama: ComplianceLead ─────────────────────────────────────
   async staffReview(id: number, dto: StaffReviewDto, user: AuthedUser) {
     const { rows } = await this.pool.query(
       `SELECT * FROM monitoring_cases WHERE id=$1`,
@@ -1225,7 +1202,7 @@ export class MonitoringService {
 
     if (!this.canStaffReview(c.status)) {
       throw new BadRequestException(
-        `Case berstatus ${c.status} tidak dapat direview oleh Compliance Staff ` +
+        `Case berstatus ${c.status} tidak dapat direview pada tahap pertama ` +
           `(hanya ${STAFF_RELEVANT_STATUSES.join(", ")})`,
       );
     }

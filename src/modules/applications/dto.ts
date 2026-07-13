@@ -116,6 +116,16 @@ export class CreateIndividualDto {
   // CIF relationship type — OUR_CUSTOMER (default) atau WIC; BO tidak diizinkan pada individual create
   @IsOptional() @IsIn(['OUR_CUSTOMER', 'WIC'])
   cif_relationship_type?: 'OUR_CUSTOMER' | 'WIC';
+
+  // ── RBA V01 fields ──────────────────────────────────────────────────────────
+  @IsOptional() @IsString()
+  source_of_funds?: string;
+
+  @IsOptional() @IsString()
+  business_relationship_purpose?: string;
+
+  @IsOptional() @IsIn(['Aplikasi Digital', 'Agen Pihak Ketiga', 'Outlet Fisik'])
+  distribution_channel?: 'Aplikasi Digital' | 'Agen Pihak Ketiga' | 'Outlet Fisik';
 }
 
 /**
@@ -199,6 +209,16 @@ export class CreateBusinessDto {
 
   @IsOptional() @IsString()
   supervisor?: string;
+
+  // ── RBA V01 fields ──────────────────────────────────────────────────────────
+  @IsOptional() @IsString()
+  source_of_funds?: string;
+
+  @IsOptional() @IsString()
+  business_relationship_purpose?: string;
+
+  @IsOptional() @IsIn(['Aplikasi Digital', 'Agen Pihak Ketiga', 'Outlet Fisik'])
+  distribution_channel?: 'Aplikasi Digital' | 'Agen Pihak Ketiga' | 'Outlet Fisik';
 }
 
 /**

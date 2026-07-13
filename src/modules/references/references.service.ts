@@ -1,5 +1,17 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { Pool } from 'pg';
+import {
+  OCCUPATION_SCORES_EXPORT,
+  BUSINESS_FORM_SCORES_EXPORT,
+  SOURCE_OF_FUNDS_SCORES_EXPORT,
+  BUSINESS_PURPOSE_SCORES_EXPORT,
+  INDUSTRY_MAP,
+  GEOGRAPHY_MAP,
+  DISTRIBUTION_SCORES_EXPORT,
+  PRODUCT_NAME,
+  PRODUCT_SCORE,
+  getRbaLevel,
+} from '../applications/rba-v01.engine';
 
 export const INDUSTRY_CATEGORIES = [
   'Periklanan',
@@ -215,5 +227,106 @@ export class ReferencesService {
 
   getBusinessDocumentTypes() {
     return { data: BUSINESS_DOCUMENT_TYPES };
+  }
+
+  // ── RBA V01 reference endpoints (values from Excel workbook only) ──────────
+
+  getRbaOccupations() {
+    return {
+      data: Object.entries(OCCUPATION_SCORES_EXPORT).map(([name, score]) => ({
+        code: name,
+        name,
+        score,
+        risk_level: getRbaLevel(score),
+        source_sheet: '1. Customer Profile',
+      })),
+    };
+  }
+
+  getRbaBusinessForms() {
+    return {
+      data: Object.entries(BUSINESS_FORM_SCORES_EXPORT).map(([name, score]) => ({
+        code: name,
+        name,
+        score,
+        risk_level: getRbaLevel(score),
+        source_sheet: '1. Customer Profile',
+      })),
+    };
+  }
+
+  getRbaSourceOfFunds() {
+    return {
+      data: Object.entries(SOURCE_OF_FUNDS_SCORES_EXPORT).map(([name, score]) => ({
+        code: name,
+        name,
+        score,
+        risk_level: getRbaLevel(score),
+        source_sheet: '1. Customer Profile',
+      })),
+    };
+  }
+
+  getRbaBusinessPurposes() {
+    return {
+      data: Object.entries(BUSINESS_PURPOSE_SCORES_EXPORT).map(([name, score]) => ({
+        code: name,
+        name,
+        score,
+        risk_level: getRbaLevel(score),
+        source_sheet: '1. Customer Profile',
+      })),
+    };
+  }
+
+  getRbaIndustries() {
+    return {
+      data: INDUSTRY_MAP.map((entry) => ({
+        code: entry.industry,
+        name: entry.industry,
+        score: entry.score,
+        risk_level: getRbaLevel(entry.score),
+        source_sheet: '1.a Customer Profile - Industry',
+      })),
+    };
+  }
+
+  getRbaGeographies() {
+    return {
+      data: GEOGRAPHY_MAP.map((entry) => ({
+        code: entry.name,
+        name: entry.name,
+        score: entry.score,
+        risk_level: getRbaLevel(entry.score),
+        source_sheet: '3. Area Geografis',
+        aliases: entry.aliases,
+      })),
+    };
+  }
+
+  getRbaProducts() {
+    return {
+      data: [
+        {
+          code: PRODUCT_NAME,
+          name: PRODUCT_NAME,
+          score: PRODUCT_SCORE,
+          risk_level: getRbaLevel(PRODUCT_SCORE),
+          source_sheet: '2. Product',
+        },
+      ],
+    };
+  }
+
+  getRbaDistributions() {
+    return {
+      data: Object.entries(DISTRIBUTION_SCORES_EXPORT).map(([name, score]) => ({
+        code: name,
+        name,
+        score,
+        risk_level: getRbaLevel(score),
+        source_sheet: '4. Distribution',
+      })),
+    };
   }
 }

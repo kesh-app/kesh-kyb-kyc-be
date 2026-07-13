@@ -7,6 +7,7 @@ import {
   BadRequestException,
 } from "@nestjs/common";
 import { Pool } from "pg";
+import { computeRbaV01, INDUSTRY_MAP, type RbaInput } from "./rba-v01.engine";
 
 // ─── Internal Preliminary Risk Scoring — RBA v2 ────────────────────────────
 // Bukan formula resmi BI. Dipakai sebagai dasar review compliance internal.
@@ -366,10 +367,13 @@ export class ApplicationsService {
     // Validate region hierarchy if any region codes are provided
     await this.validateRegionHierarchy(dto);
 
-    // Validate industry_category if provided
+    // Validate industry_category if provided.
+    // Accepts: old INDUSTRY_CATEGORIES values (legacy) OR exact RBA V01 industry names from INDUSTRY_MAP.
     if (dto.industry_category) {
       const { INDUSTRY_CATEGORIES } = await import('../references/references.service');
-      if (!INDUSTRY_CATEGORIES.includes(dto.industry_category)) {
+      const validOld = INDUSTRY_CATEGORIES.includes(dto.industry_category);
+      const validRba = INDUSTRY_MAP.some(e => e.industry === dto.industry_category);
+      if (!validOld && !validRba) {
         throw new BadRequestException(`industry_category tidak valid: ${dto.industry_category}`);
       }
     }
@@ -426,10 +430,12 @@ export class ApplicationsService {
             street_address, house_number, rt_rw, apartment_block, address_landmark,
             pob, dob, nationality, phone, occupation,
             industry_category, company_name, company_address, monthly_income_range,
-            gender, email, signature_uri
+            gender, email, signature_uri,
+            source_of_funds, business_relationship_purpose, distribution_channel
           ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
+            $35,$36,$37
           ) RETURNING id`,
           [
             dto.full_name,
@@ -466,6 +472,9 @@ export class ApplicationsService {
             dto.gender,
             dto.email || null,
             dto.signature_uri || null,
+            dto.source_of_funds || null,
+            dto.business_relationship_purpose || null,
+            dto.distribution_channel || null,
           ],
         );
         personId = ins.rows[0].id;
@@ -553,8 +562,9 @@ export class ApplicationsService {
           business_license_number, nib, npwp, address_line, city, province, postal_code, business_activity, industry_code, phone,
           deed_number, company_email,
           pic_name, pic_position, pic_identity_number, pic_identity_type,
-          representative_signature_name, verification_officer, supervisor)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+          representative_signature_name, verification_officer, supervisor,
+          source_of_funds, business_relationship_purpose, distribution_channel)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
          RETURNING id`,
         [
           dto.legal_name,
@@ -571,8 +581,6 @@ export class ApplicationsService {
           dto.business_activity,
           dto.industry_code || null,
           dto.phone,
-          // deed_number default ke business_license_number bila tidak dikirim
-          // (nilai lama "Nomor Lisensi" kini menjadi Nomor Akta).
           dto.deed_number ?? dto.business_license_number ?? null,
           dto.company_email ?? null,
           dto.pic_name ?? null,
@@ -582,6 +590,9 @@ export class ApplicationsService {
           dto.representative_signature_name ?? null,
           dto.verification_officer ?? null,
           dto.supervisor ?? null,
+          dto.source_of_funds ?? null,
+          dto.business_relationship_purpose ?? null,
+          dto.distribution_channel ?? null,
         ],
       );
       const businessId = q.rows[0].id;
@@ -764,7 +775,9 @@ export class ApplicationsService {
     const { rows: riskRows } = await this.pool.query(
       `SELECT application_id, risk_score::float AS risk_score, risk_level,
               factors, risk_factors,
-              override_level, override_reason, override_by, override_at, created_at
+              override_level, override_reason, override_by, override_at, created_at,
+              rba_version, rba_score_v01::float AS rba_score_v01, rba_calculation_status,
+              rba_unmapped_parameters, rba_components
        FROM application_risk WHERE application_id=$1`,
       [appId],
     );
@@ -998,6 +1011,16 @@ export class ApplicationsService {
       [appId],
     );
 
+    // Derive overall screening status for RBA V01 Name Screening parameter.
+    // Rank: MATCH > NEAR_MATCH > CLEAR. Ignored statuses (FALSE_POSITIVE/DISMISSED) count as CLEAR.
+    const _nsRank: Record<string, number> = { CLEAR: 0, NEAR_MATCH: 1, MATCH: 2 };
+    let rbaNameScreeningResult = 'CLEAR';
+    for (const h of hitRows) {
+      if (['FALSE_POSITIVE', 'DISMISSED'].includes(h.review_status)) continue;
+      const s = h.review_status === 'CONFIRMED' ? 'MATCH' : 'NEAR_MATCH';
+      if (_nsRank[s] > _nsRank[rbaNameScreeningResult]) rbaNameScreeningResult = s;
+    }
+
     // ── 5. Faktor: watchlist / sanctions ──
     const riskFactors: RiskFactor[] = [];
     let score = 0;
@@ -1192,21 +1215,99 @@ export class ApplicationsService {
       threshold: SIMILARITY_THRESHOLD,
     };
 
-    // ── 12. Simpan ke DB ──
+    // ── 12. RBA V01 strict calculation ───────────────────────────────────────
+    let rbaResult: ReturnType<typeof computeRbaV01> | null = null;
+    try {
+      let rbaInput: RbaInput;
+      if (app.type === "INDIVIDUAL") {
+        const { rows: rbaP } = await this.pool.query(
+          `SELECT occupation, source_of_funds, industry_category,
+                  business_relationship_purpose, province_name, distribution_channel
+           FROM persons WHERE id=$1`,
+          [app.person_id],
+        );
+        const rp = rbaP[0] ?? {};
+        rbaInput = {
+          type: 'INDIVIDUAL',
+          occupation:                   rp.occupation ?? null,
+          source_of_funds:              rp.source_of_funds ?? null,
+          industry_category:            rp.industry_category ?? null,
+          business_relationship_purpose: rp.business_relationship_purpose ?? null,
+          province_name:                rp.province_name ?? null,
+          distribution_channel:         rp.distribution_channel ?? null,
+          name_screening_result:        rbaNameScreeningResult,
+        };
+      } else {
+        const { rows: rbaB } = await this.pool.query(
+          `SELECT legal_form, source_of_funds, business_activity AS industry_category,
+                  business_relationship_purpose, province, distribution_channel
+           FROM business_entities WHERE id=$1`,
+          [app.business_id],
+        );
+        const rb = rbaB[0] ?? {};
+        rbaInput = {
+          type: 'BUSINESS',
+          legal_form:                   rb.legal_form ?? null,
+          source_of_funds:              rb.source_of_funds ?? null,
+          industry_category:            rb.industry_category ?? null,
+          business_relationship_purpose: rb.business_relationship_purpose ?? null,
+          province:                     rb.province ?? null,
+          distribution_channel:         rb.distribution_channel ?? null,
+          name_screening_result:        rbaNameScreeningResult,
+        };
+      }
+      rbaResult = computeRbaV01(rbaInput);
+    } catch (e: any) {
+      this.logger.warn(`RBA V01 compute failed for app ${appId}: ${e?.message}`);
+    }
+
+    // ── 13. Simpan ke DB ──────────────────────────────────────────────────────
+    const finalRiskScore = rbaResult?.rba_calculation_status === 'COMPLETE' && rbaResult.rba_score_v01 !== null
+      ? Math.round((rbaResult.rba_score_v01 / 3) * 100)
+      : score;
+    const finalRiskLevel = rbaResult?.rba_calculation_status === 'COMPLETE' && rbaResult.risk_level
+      ? rbaResult.risk_level
+      : risk_level;
+
     await this.pool.query(
       `INSERT INTO application_risk
-         (application_id, risk_score, risk_level, factors, risk_factors, created_at)
-       VALUES ($1,$2,$3,$4,$5,now())
+         (application_id, risk_score, risk_level, factors, risk_factors,
+          rba_version, rba_score_v01, rba_calculation_status,
+          rba_unmapped_parameters, rba_components, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
        ON CONFLICT (application_id) DO UPDATE SET
-         risk_score    = EXCLUDED.risk_score,
-         risk_level    = EXCLUDED.risk_level,
-         factors       = EXCLUDED.factors,
-         risk_factors  = EXCLUDED.risk_factors,
-         created_at    = now()`,
-      [appId, score, risk_level, JSON.stringify(factors), JSON.stringify(riskFactors)],
+         risk_score                = EXCLUDED.risk_score,
+         risk_level                = EXCLUDED.risk_level,
+         factors                   = EXCLUDED.factors,
+         risk_factors              = EXCLUDED.risk_factors,
+         rba_version               = EXCLUDED.rba_version,
+         rba_score_v01             = EXCLUDED.rba_score_v01,
+         rba_calculation_status    = EXCLUDED.rba_calculation_status,
+         rba_unmapped_parameters   = EXCLUDED.rba_unmapped_parameters,
+         rba_components            = EXCLUDED.rba_components,
+         created_at                = now()`,
+      [
+        appId, finalRiskScore, finalRiskLevel,
+        JSON.stringify(factors), JSON.stringify(riskFactors),
+        rbaResult?.rba_version ?? 'RBA_V01',
+        rbaResult?.rba_score_v01 ?? null,
+        rbaResult?.rba_calculation_status ?? 'INCOMPLETE',
+        JSON.stringify(rbaResult?.rba_unmapped_parameters ?? []),
+        JSON.stringify(rbaResult?.rba_components ?? {}),
+      ],
     );
 
-    return { risk_score: score, risk_level, factors, risk_factors: riskFactors };
+    return {
+      risk_score: finalRiskScore,
+      risk_level: finalRiskLevel,
+      factors,
+      risk_factors: riskFactors,
+      rba_version: rbaResult?.rba_version ?? 'RBA_V01',
+      rba_score_v01: rbaResult?.rba_score_v01 ?? null,
+      rba_calculation_status: rbaResult?.rba_calculation_status ?? 'INCOMPLETE',
+      rba_unmapped_parameters: rbaResult?.rba_unmapped_parameters ?? [],
+      rba_components: rbaResult?.rba_components ?? {},
+    };
   }
 
   // List parties for a BUSINESS application
@@ -1871,8 +1972,10 @@ export class ApplicationsService {
     appId: number,
     decision: "APPROVED" | "REJECTED",
     reason: string | null,
-    reviewerId: number,
+    user: { sub?: number | string; id?: number | string; role: string },
   ) {
+    const reviewerId = user.sub ?? (user as any).id;
+
     const { rows } = await this.pool.query(
       `SELECT id, status FROM applications WHERE id=$1`,
       [appId],
@@ -1884,6 +1987,23 @@ export class ApplicationsService {
       throw new BadRequestException(
         `Tidak bisa membuat keputusan untuk status ${app.status}. Harus SUBMITTED atau IN_REVIEW.`,
       );
+    }
+
+    // OperationSupervisor hanya boleh memutuskan aplikasi LOW/MEDIUM risk.
+    // HIGH risk hanya untuk ComplianceLead (atau SystemAdmin/Director via guard bypass).
+    const fullAccessRoles = ["SystemAdmin", "Director"];
+    if (user.role === "OperationSupervisor") {
+      const { rows: riskRows } = await this.pool.query(
+        `SELECT COALESCE(override_level, risk_level) AS effective_level
+         FROM application_risk WHERE application_id=$1`,
+        [appId],
+      );
+      const effectiveLevel = riskRows[0]?.effective_level;
+      if (effectiveLevel === "HIGH") {
+        throw new ForbiddenException(
+          "KYC/KYB high risk hanya dapat diputuskan oleh Lead Compliance.",
+        );
+      }
     }
 
     if (decision === "APPROVED") {

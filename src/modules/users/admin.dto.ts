@@ -11,14 +11,15 @@ import {
 
 export const INTERNAL_ROLES = [
   'SystemAdmin',
+  'Director',
   'BranchAdmin',
   'FrontDesk',
-  'ComplianceStaff',
+  'OperationSupervisor',
   'ComplianceLead',
   'Auditor',
   'FinanceStaff',
   'FinanceManager',
-  'Director',
+  // 'ComplianceStaff' — deprecated; existing users kept for backward-compat but no new creation
 ] as const;
 
 export type InternalRole = (typeof INTERNAL_ROLES)[number];

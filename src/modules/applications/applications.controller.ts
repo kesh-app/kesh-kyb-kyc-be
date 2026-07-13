@@ -246,16 +246,16 @@ export class ApplicationsController {
     return this.svc.submit(appId, req.user.sub);
   }
 
-  // KYC/KYB decision (approve/reject) hanya untuk Compliance (Staff/Lead) &
-  // SystemAdmin (via RolesGuard). FrontDesk/Frontliner TIDAK boleh memutuskan.
-  @Roles("ComplianceStaff", "ComplianceLead")
+  // KYC/KYB decision: OperationSupervisor untuk LOW/MEDIUM risk,
+  // ComplianceLead untuk HIGH risk + semua risk, Director/SystemAdmin via bypass.
+  @Roles("OperationSupervisor", "ComplianceLead")
   @Patch(":id/decision")
   async decide(
     @Param("id", ParseIntPipe) appId: number,
     @Body(new ValidationPipe({ whitelist: true })) dto: DecisionDto,
     @Req() req: any,
   ) {
-    return this.svc.decide(appId, dto.decision, dto.reason ?? null, req.user.sub);
+    return this.svc.decide(appId, dto.decision, dto.reason ?? null, req.user);
   }
 
   @Roles("FrontDesk", "ComplianceLead")

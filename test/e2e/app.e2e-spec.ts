@@ -42,7 +42,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   let frontDeskToken: string;
   let directorToken: string;
   let auditorToken: string;
-  let complianceStaffToken: string;
+  let operationSupervisorToken: string;
 
   // Application IDs yang diakumulasi lintas describe block
   // pg driver mengembalikan BIGINT sebagai string — simpan sebagai string
@@ -166,21 +166,21 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       .send({ email: auditorEmail, password: 'Test@123456' });
     auditorToken = loginAuditor.body.access_token;
 
-    // Buat ComplianceStaff test user (approval pertama monitoring — staff-review)
-    const complianceStaffEmail = `compstaff${SUFFIX}@test.local`;
+    // Buat OperationSupervisor test user (approval pertama monitoring + transfer layer 1)
+    const opSupEmail = `opsup${SUFFIX}@test.local`;
     await request(app.getHttpServer())
       .post(`${BASE}/users/admins`)
       .set('Authorization', `Bearer ${sysAdminToken}`)
       .send({
-        email: complianceStaffEmail,
-        fullName: `Test Compliance Staff ${SUFFIX}`,
-        role: 'ComplianceStaff',
+        email: opSupEmail,
+        fullName: `Test Operation Supervisor ${SUFFIX}`,
+        role: 'OperationSupervisor',
         password: 'Test@123456',
       });
-    const loginComplianceStaff = await request(app.getHttpServer())
+    const loginOpSup = await request(app.getHttpServer())
       .post(`${BASE}/auth/login`)
-      .send({ email: complianceStaffEmail, password: 'Test@123456' });
-    complianceStaffToken = loginComplianceStaff.body.access_token;
+      .send({ email: opSupEmail, password: 'Test@123456' });
+    operationSupervisorToken = loginOpSup.body.access_token;
   }, 30000);
 
   afterAll(async () => {
@@ -898,24 +898,82 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(403);
     });
 
-    it('E-06: ComplianceStaff approve KYC → 200 APPROVED', async () => {
+    it('E-06: OperationSupervisor approve KYC (LOW/MEDIUM risk) → 200 APPROVED', async () => {
       const appId = await createSubmittedIndividual(6);
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'APPROVED', reason: 'lengkap' })
         .expect(200);
       expect(res.body.status).toBe('APPROVED');
     });
 
-    it('E-07: ComplianceStaff reject KYC → 200 REJECTED', async () => {
+    it('E-07: OperationSupervisor reject KYC (LOW/MEDIUM risk) → 200 REJECTED', async () => {
       const appId = await createSubmittedIndividual(7);
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'REJECTED', reason: 'tidak sesuai' })
         .expect(200);
       expect(res.body.status).toBe('REJECTED');
+    });
+
+    it('E-10: OperationSupervisor tidak bisa approve HIGH risk KYC → 403', async () => {
+      const appId = await createSubmittedIndividual(10);
+      // Force HIGH risk via DB
+      await pgPool.query(
+        `INSERT INTO application_risk(application_id, risk_score, risk_level, factors)
+         VALUES($1, 100, 'HIGH', '{}'::jsonb)
+         ON CONFLICT (application_id) DO UPDATE SET risk_level='HIGH'`,
+        [Number(appId)],
+      );
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'APPROVED', reason: 'coba' })
+        .expect(403);
+      expect(res.body.message).toContain('Lead Compliance');
+    });
+
+    it('E-11: ComplianceLead bisa approve HIGH risk KYC → 200 APPROVED', async () => {
+      const appId = await createSubmittedIndividual(11);
+      await pgPool.query(
+        `INSERT INTO application_risk(application_id, risk_score, risk_level, factors)
+         VALUES($1, 100, 'HIGH', '{}'::jsonb)
+         ON CONFLICT (application_id) DO UPDATE SET risk_level='HIGH'`,
+        [Number(appId)],
+      );
+      // HIGH risk juga butuh EDD sebelum approve — skip via reject
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'REJECTED', reason: 'high risk - ditolak oleh lead' })
+        .expect(200);
+      expect(res.body.status).toBe('REJECTED');
+    });
+
+    it('E-12: Director bisa approve KYC (full access via guard bypass) → 200', async () => {
+      const appId = await createSubmittedIndividual(12);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ decision: 'APPROVED', reason: 'direktur setuju' })
+        .expect(200);
+      expect(res.body.status).toBe('APPROVED');
+    });
+
+    it('E-13: ComplianceStaff tidak dapat dibuat via API (role deprecated) → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/users/admins`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .send({
+          email: `compstaff_new${SUFFIX}@test.local`,
+          fullName: 'Legacy Staff',
+          role: 'ComplianceStaff',
+          password: 'Test@123456',
+        })
+        .expect(400);
+      expect(res.body).toBeDefined();
     });
 
     it('E-08: ComplianceLead reject KYC → 200 REJECTED', async () => {
@@ -1127,6 +1185,168 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send(transferBody(appId))
         .expect(201);
       expect(res.body.status).toBe('DRAFT');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // FW. TRANSFER — alur 3-langkah (OperationSupervisor → FinanceStaff → FinanceManager)
+  // ══════════════════════════════════════════════════════════
+  describe('FW. Transfer 3-step approval workflow', () => {
+    async function createApprovedSenderForTransfer(tag: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `TRF Sender ${tag}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3188${tag}`,
+          address_identity: 'Jl. Transfer No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0888${tag}`,
+          occupation: 'Wiraswasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [appId]);
+      return appId;
+    }
+
+    async function createAndSubmitTransfer(senderAppId: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 100_000,
+          sender_application_id: Number(senderAppId),
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '9876543210',
+          beneficiaryAccountName: 'Penerima FW',
+        })
+        .expect(201);
+      const txId = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+
+      return txId;
+    }
+
+    it('FW-01: FrontDesk dapat membuat dan submit transfer → SUBMITTED', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW01${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(200);
+      expect(res.body.status).toBe('SUBMITTED');
+    });
+
+    it('FW-02: OperationSupervisor dapat approve transfer layer 1 → PENDING_FINANCE_STAFF_REVIEW', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW02${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'dokumen lengkap' })
+        .expect(201);
+      expect(res.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+    });
+
+    it('FW-03: FinanceStaff dapat forward transfer layer 2 → PENDING_FINANCE_MANAGER_APPROVAL', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW03${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'siap untuk approval' })
+        .expect(201);
+      expect(res.body.status).toBe('PENDING_FINANCE_MANAGER_APPROVAL');
+    });
+
+    it('FW-04: FinanceManager dapat final approve transfer → APPROVED', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW04${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(201);
+      expect(res.body.status).toBe('APPROVED');
+    });
+
+    it('FW-05: OperationSupervisor dapat reject transfer layer 1 → REJECTED', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW05${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'REJECT', reject_reason: 'dokumen tidak lengkap' })
+        .expect(201);
+      expect(res.body.status).toBe('REJECTED');
+    });
+
+    it('FW-06: FinanceStaff tidak bisa supervisor-review (wrong role) → 403', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW06${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'coba' })
+        .expect(403);
+    });
+
+    it('FW-07: OperationSupervisor tidak bisa finance-review (wrong role) → 403', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW07${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'coba' })
+        .expect(403);
+    });
+
+    it('FW-08: Auditor dapat membaca daftar transfer → 200', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
     });
   });
 
@@ -2574,8 +2794,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(String(res.body.id)).toBe(transferId);
     });
 
-    it('J-12: POST /transfers dengan SystemAdmin → 403 (read-only)', async () => {
-      // SystemAdmin tidak boleh membuat transfer — hanya FinanceStaff yang boleh
+    it('J-12: POST /transfers dengan SystemAdmin → 201 (full access)', async () => {
+      // SystemAdmin punya full access termasuk membuat transfer
       return request(app.getHttpServer())
         .post(`${BASE}/transfers`)
         .set('Authorization', `Bearer ${sysAdminToken}`)
@@ -2583,10 +2803,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           amount: 100000,
           sender_application_id: Number(indivAppIdOk),
           beneficiaryBankName: 'Bank Test',
-          beneficiaryAccountNumber: '111',
+          beneficiaryAccountNumber: '1111111111',
           beneficiaryAccountName: 'Test',
         })
-        .expect(403);
+        .expect(201);
     });
   });
 
@@ -3175,8 +3395,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.result_updated_by).not.toBeNull();
     });
 
-    it('N-09: SystemAdmin read OK tapi submit/approve/result → 403', async () => {
-      // list & detail boleh
+    it('N-09: SystemAdmin full access — read + submit + approve + result semua OK', async () => {
+      // list & detail
       await request(app.getHttpServer())
         .get(`${BASE}/transfers`)
         .set('Authorization', `Bearer ${sysAdminToken}`)
@@ -3187,23 +3407,25 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${sysAdminToken}`)
         .expect(200);
 
-      // mutasi dilarang (read-only)
+      // SystemAdmin boleh submit (txSnap masih DRAFT pada titik ini)
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txSnap}/submit`)
         .set('Authorization', `Bearer ${sysAdminToken}`)
-        .expect(403);
+        .expect(201);
 
+      // SystemAdmin boleh decide (txSnap sekarang SUBMITTED)
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txSnap}/decision`)
         .set('Authorization', `Bearer ${sysAdminToken}`)
         .send({ decision: 'APPROVE' })
-        .expect(403);
+        .expect(201);
 
+      // SystemAdmin boleh set result (txSnap sekarang APPROVED)
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txSnap}/result`)
         .set('Authorization', `Bearer ${sysAdminToken}`)
         .send({ result: 'SUCCESS' })
-        .expect(403);
+        .expect(201);
     });
 
     it('N-10: GET /transfers/:id/snap-preview → amount + beneficiary + source mapping', async () => {
@@ -4568,20 +4790,20 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     const codesOf = (body: any): string[] =>
       (body.triggers ?? []).map((t: any) => t.rule_code);
 
-    // ── T-01: Role ComplianceStaff dikenali & Director tidak lagi punya akses ──
-    it('T-01: ComplianceStaff role dapat dibuat & login → bisa akses GET cases', async () => {
-      const res = await request(app.getHttpServer())
-        .get(`${BASE}/monitoring/cases`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
-        .expect(200);
-      expect(Array.isArray(res.body.data)).toBe(true);
-    });
-
-    it('T-01b: Director tidak lagi punya akses monitoring → GET cases 403', async () => {
+    // ── T-01: OperationSupervisor tidak boleh akses monitoring ──
+    it('T-01: OperationSupervisor GET /monitoring/cases → 403 (no access)', async () => {
       await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases`)
-        .set('Authorization', `Bearer ${directorToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .expect(403);
+    });
+
+    it('T-01b: Director punya full access monitoring → GET cases 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
     });
 
     // ── T-02: LTKT single cash ≥ 500M → strictly LTKT (high-value hanya supporting) ──
@@ -4711,13 +4933,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(ev.body.case_type).toBe('BOTH');
     });
 
-    // Helper: staff review (approval pertama). Mengembalikan supertest Test
-    // agar bisa di-await maupun di-chain .expect().
+    // Helper: staff review (approval pertama — ComplianceLead).
     function staffReview(
       caseId: string,
       action: string,
       notes = 'analisis staff',
-      token = complianceStaffToken,
+      token = complianceToken,
     ) {
       return request(app.getHttpServer())
         .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
@@ -4775,7 +4996,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const caseId = await setupLtkmCase(`70091${SUFFIX}`, `07091${SUFFIX}`);
       await request(app.getHttpServer())
         .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .send({ action: 'ESCALATE_TO_MANAGER' })
         .expect(400);
       const detail = await request(app.getHttpServer())
@@ -4801,7 +5022,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const caseId = await setupLtkmCase(`70093${SUFFIX}`, `07093${SUFFIX}`);
       await request(app.getHttpServer())
         .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .send({ action: 'RECOMMEND_CLOSE_FALSE_POSITIVE' })
         .expect(400);
     });
@@ -4929,25 +5150,35 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.status).toBe(400);
     });
 
-    // ── T-17b: ComplianceStaff tidak boleh manager-review (403) ──
-    it('T-17b: ComplianceStaff tidak bisa manager-review (403)', async () => {
+    // ── T-17b: OperationSupervisor tidak punya akses monitoring sama sekali ──
+    it('T-17b: OperationSupervisor tidak bisa manager-review (403 — no monitoring access)', async () => {
       const caseId = await setupLtkmCase(`70171${SUFFIX}`, `07171${SUFFIX}`);
       await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi').expect(200);
       await request(app.getHttpServer())
         .patch(`${BASE}/monitoring/cases/${caseId}/manager-review`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ action: 'APPROVE_REPORT', notes: 'coba' })
         .expect(403);
     });
 
-    // ── T-17c: ComplianceLead (Manager) tidak boleh staff-review (403) ──
-    it('T-17c: ComplianceLead tidak bisa staff-review (403)', async () => {
+    // ── T-17c: OperationSupervisor tidak bisa staff-review (403) ──
+    it('T-17c: OperationSupervisor tidak bisa staff-review (403 — no monitoring access)', async () => {
       const caseId = await setupLtkmCase(`70172${SUFFIX}`, `07172${SUFFIX}`);
       await request(app.getHttpServer())
         .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ action: 'ESCALATE_TO_MANAGER', notes: 'coba' })
         .expect(403);
+    });
+
+    // ── T-17d: ComplianceLead bisa staff-review (200) ──
+    it('T-17d: ComplianceLead bisa staff-review (200 — now first reviewer)', async () => {
+      const caseId = await setupLtkmCase(`70173${SUFFIX}`, `07173${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/monitoring/cases/${caseId}/staff-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'ESCALATE_TO_MANAGER', notes: 'eskalasi' })
+        .expect(200);
     });
 
     // ── T-18: GET case detail termasuk triggers + linked transfer ──
@@ -4980,29 +5211,22 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return caseId;
     }
 
-    // ── T-19: ComplianceStaff GET /cases → hanya status tahap staff ──
-    it('T-19: ComplianceStaff GET /monitoring/cases → hanya DETECTED/STAFF_REVIEW/NEED_CLARIFICATION', async () => {
+    // ── T-19: OperationSupervisor tidak punya akses GET /monitoring/cases ──
+    it('T-19: OperationSupervisor GET /monitoring/cases → 403 (no monitoring access)', async () => {
       await setupLtkmCase(`70019${SUFFIX}`, `07019${SUFFIX}`); // buat 1 case DETECTED
-
-      const res = await request(app.getHttpServer())
+      await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
-        .expect(200);
-      expect(res.body.data.length).toBeGreaterThan(0);
-      const allowed = ['DETECTED', 'PENDING_COMPLIANCE_STAFF_REVIEW', 'NEED_CLARIFICATION'];
-      expect(res.body.data.every((c: any) => allowed.includes(c.status))).toBe(true);
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(403);
     });
 
-    // ── T-20: ComplianceStaff tidak bisa melihat case PENDING_MANAGER ──
-    it('T-20: ComplianceStaff GET /cases?status=PENDING_COMPLIANCE_MANAGER_REVIEW → tidak menampilkan case manager', async () => {
+    // ── T-20: OperationSupervisor tidak punya akses GET /monitoring/cases dengan filter ──
+    it('T-20: OperationSupervisor GET /cases?status=PENDING_COMPLIANCE_MANAGER_REVIEW → 403', async () => {
       await setupPendingManagerCase(`70020${SUFFIX}`, `07020${SUFFIX}`);
-      const res = await request(app.getHttpServer())
+      await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases?status=PENDING_COMPLIANCE_MANAGER_REVIEW`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
-        .expect(200);
-      expect(
-        res.body.data.some((c: any) => c.status === 'PENDING_COMPLIANCE_MANAGER_REVIEW'),
-      ).toBe(false);
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(403);
     });
 
     // ── T-21: ComplianceLead (Manager) GET detail PENDING_MANAGER → 200 ──
@@ -5016,12 +5240,20 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(Array.isArray(res.body.triggers)).toBe(true);
     });
 
-    // ── T-22: ComplianceStaff GET detail case PENDING_MANAGER → 403 ──
-    it('T-22: ComplianceStaff GET /cases/:id PENDING_COMPLIANCE_MANAGER_REVIEW → 403', async () => {
+    // ── T-22: OperationSupervisor tidak punya akses GET case detail ──
+    it('T-22: OperationSupervisor GET /cases/:id → 403 (no monitoring access)', async () => {
       const caseId = await setupPendingManagerCase(`70022${SUFFIX}`, `07022${SUFFIX}`);
       await request(app.getHttpServer())
         .get(`${BASE}/monitoring/cases/${caseId}`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(403);
+    });
+
+    // ── T-22b: OperationSupervisor tidak punya akses GET /monitoring/reports ──
+    it('T-22b: OperationSupervisor GET /monitoring/reports → 403 (no monitoring access)', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/reports`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .expect(403);
     });
 
@@ -5033,12 +5265,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('READY_TO_REPORT');
     });
 
-    // ── T-24: Director tidak punya akses ke report queue ──
-    it('T-24: Director GET /monitoring/reports → 403', async () => {
-      await request(app.getHttpServer())
+    // ── T-24: Director punya full access ke report queue ──
+    it('T-24: Director GET /monitoring/reports → 200 (full access)', async () => {
+      const res = await request(app.getHttpServer())
         .get(`${BASE}/monitoring/reports`)
         .set('Authorization', `Bearer ${directorToken}`)
-        .expect(403);
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
     });
 
     // ── T-25: ComplianceLead & SystemAdmin tetap melihat semua status ──
@@ -5258,10 +5491,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('T-28: legacy compliance-review → staff-review, director-review → manager-review', async () => {
       const caseId = await setupLtkmCase(`70028${SUFFIX}`, `07028${SUFFIX}`);
 
-      // legacy compliance-review (ComplianceStaff) → dipetakan ke staff ESCALATE_TO_MANAGER
+      // legacy compliance-review (ComplianceLead) → dipetakan ke staff ESCALATE_TO_MANAGER
       const staff = await request(app.getHttpServer())
         .patch(`${BASE}/monitoring/cases/${caseId}/compliance-review`)
-        .set('Authorization', `Bearer ${complianceStaffToken}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .send({ action: 'ESCALATE_TO_DIRECTOR', notes: 'eskalasi legacy' })
         .expect(200);
       expect(staff.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
@@ -5277,8 +5510,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(mgr.body.manager_action).toBe('APPROVE_REPORT');
     });
 
-    // ── T-29: ComplianceStaff dapat melakukan review pertama, tidak bisa final approve ──
-    it('T-29: ComplianceStaff first review OK, tidak bisa mark READY_TO_REPORT langsung', async () => {
+    // ── T-29: ComplianceLead review pertama tidak bisa langsung ke READY_TO_REPORT ──
+    it('T-29: ComplianceLead first review (ESCALATE_TO_MANAGER) tidak bisa mark READY_TO_REPORT langsung', async () => {
       const caseId = await setupLtkmCase(`70029${SUFFIX}`, `07029${SUFFIX}`);
       // staff hanya bisa escalate/clarify/recommend — tidak ada aksi ke READY_TO_REPORT
       const res = await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi');
@@ -6188,6 +6421,44 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(res.body.person.monthly_income_range).toBe('Rata-rata lebih dari Rp20 juta sampai Rp50 juta per bulan');
         expect(res.body.person.company_name).toBe('PT Elektronik Test');
       });
+
+      it('V3-05: industry_category = RBA V01 Excel name → 201, stored as-is', async () => {
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            industry_category: 'Aktivitas Keuangan dan Asuransi',
+            identity_number: `323005${SUFFIX}`,
+          }))
+          .expect(201);
+        expect(create.body.status).toBe('DRAFT');
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${create.body.id}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+        expect(detail.body.person.industry_category).toBe('Aktivitas Keuangan dan Asuransi');
+      });
+
+      it('V3-06: industry_category = RBA V01 name, submit → COMPLETE, Bidang Industri mapped with correct score', async () => {
+        const { computeRbaV01 } = require('../../src/modules/applications/rba-v01.engine');
+        // Verify engine resolves exact RBA industry name (score 3)
+        const result = computeRbaV01({
+          type: 'INDIVIDUAL',
+          occupation: 'Profesional',
+          source_of_funds: 'Gaji',
+          industry_category: 'Aktivitas Keuangan dan Asuransi',
+          business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+          province_name: 'DKI Jakarta',
+          distribution_channel: 'Outlet Fisik',
+          name_screening_result: 'CLEAR',
+        });
+        expect(result.rba_calculation_status).toBe('COMPLETE');
+        const industryParam = result.rba_components.customer.parameters.find((p: any) => p.name === 'Bidang Industri');
+        expect(industryParam).toBeDefined();
+        expect(industryParam.score).toBe(3);
+        expect(industryParam.mapped_to).toBe('Aktivitas Keuangan dan Asuransi');
+      });
     });
   });
 
@@ -6845,6 +7116,391 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(String(res.body.transfer_id)).toBe(String(tx.transfer_id));
       expect(res.body.transaction_reference).toBe(tx.transaction_reference);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // R. RBA V01 — strict risk scoring
+  // ══════════════════════════════════════════════════════════
+  describe('R. RBA V01 strict', () => {
+
+    // Helper: create + upload docs + submit individual, with optional RBA fields
+    async function createRbaIndividual(tag: string, extra: Record<string, any> = {}): Promise<string> {
+      const phone = `081${tag.replace(/\D/g, '').padEnd(9, '1').slice(0, 9)}`;
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `RBA Test ${tag}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3175${tag.replace(/\D/g, '').padEnd(12, '0').slice(0, 12)}`,
+          address_identity: 'Jl. RBA No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/rba_sig.png',
+          ...extra,
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      // Upload identity doc + face photos
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/ktp.jpg' })
+        .expect(201);
+      await uploadFacePhotoDocs(appId);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      return appId;
+    }
+
+    // ── R-01: Reference endpoints return only workbook values ─────────────────
+    it('R-01: GET /references/rba/occupations → Excel values, each has score/risk_level/source_sheet', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/rba/occupations`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data.length).toBeGreaterThan(0);
+      for (const item of res.body.data) {
+        expect([1, 2, 3]).toContain(item.score);
+        expect(['LOW', 'MEDIUM', 'HIGH']).toContain(item.risk_level);
+        expect(item.source_sheet).toBe('1. Customer Profile');
+      }
+      const pns = res.body.data.find((d: any) => d.code === 'Pegawai Negeri Sipil (PNS)');
+      expect(pns?.score).toBe(3);
+      const profesional = res.body.data.find((d: any) => d.code === 'Profesional');
+      expect(profesional?.score).toBe(1);
+    });
+
+    it('R-01b: GET /references/rba/distributions → exactly 3 values from Excel', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/rba/distributions`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.data.length).toBe(3);
+      const codes = res.body.data.map((d: any) => d.code);
+      expect(codes).toContain('Aplikasi Digital');
+      expect(codes).toContain('Agen Pihak Ketiga');
+      expect(codes).toContain('Outlet Fisik');
+      expect(res.body.data.find((d: any) => d.code === 'Aplikasi Digital').score).toBe(3);
+      expect(res.body.data.find((d: any) => d.code === 'Outlet Fisik').score).toBe(2);
+    });
+
+    it('R-01c: GET /references/rba/products → only Produk Remitansi = 3', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/rba/products`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.data.length).toBe(1);
+      expect(res.body.data[0].code).toBe('Produk Remitansi');
+      expect(res.body.data[0].score).toBe(3);
+      expect(res.body.data[0].source_sheet).toBe('2. Product');
+    });
+
+    it('R-01d: GET /references/rba/industries → 14 industries from Excel, correct scores', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/rba/industries`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.data.length).toBe(14);
+      expect(res.body.data.find((d: any) => d.name === 'Aktivitas Keuangan dan Asuransi')?.score).toBe(3);
+      expect(res.body.data.find((d: any) => d.name === 'Real Estat')?.score).toBe(3);
+      expect(res.body.data.find((d: any) => d.name === 'Pendidikan')?.score).toBe(1);
+      expect(res.body.data.find((d: any) => d.name === 'Pertanian, Kehutanan, dan Perikanan')?.score).toBe(1);
+    });
+
+    it('R-01e: GET /references/rba/geographies → 34 provinces, DKI Jakarta = 3', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/rba/geographies`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.data.length).toBe(34);
+      expect(res.body.data.find((d: any) => d.name === 'DKI Jakarta')?.score).toBe(3);
+      expect(res.body.data.find((d: any) => d.name === 'Aceh')?.score).toBe(1);
+    });
+
+    it('R-01f: GET /references/rba/source-of-funds → Gaji = 1, Investasi = 3', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/references/rba/source-of-funds`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.data.find((d: any) => d.code === 'Gaji')?.score).toBe(1);
+      expect(res.body.data.find((d: any) => d.code === 'Investasi')?.score).toBe(3);
+    });
+
+    // ── R-02: Individual complete mappable data computes COMPLETE ─────────────
+    it('R-02: Individual with all RBA fields mapped → COMPLETE + rba_score_v01 not null', async () => {
+      // province_code 31 = DKI Jakarta (score 3)
+      const appId = await createRbaIndividual(`R02${SUFFIX}`, {
+        occupation: 'Karyawan Swasta',           // score 3
+        source_of_funds: 'Gaji',                  // score 1
+        industry_category: 'Makanan dan Minuman',  // → Penyediaan Akomodasi score 2
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_code: '31',                       // DKI Jakarta → province_name filled by service
+        distribution_channel: 'Outlet Fisik',      // score 2
+      });
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const risk = detail.body.risk;
+      expect(risk.rba_calculation_status).toBe('COMPLETE');
+      expect(risk.rba_score_v01).not.toBeNull();
+      expect(typeof risk.rba_score_v01).toBe('number');
+      // rba_score_v01 must be within 1–3 range
+      expect(risk.rba_score_v01).toBeGreaterThanOrEqual(1);
+      expect(risk.rba_score_v01).toBeLessThanOrEqual(3);
+      // risk_level must match threshold
+      expect(['LOW', 'MEDIUM', 'HIGH']).toContain(risk.risk_level);
+      // Name Screening / Watchlist is mapped (CLEAR → score 1), appears in customer.parameters
+      const nsParam = (risk.rba_components?.customer?.parameters ?? []).find((p: any) => p.name === 'Name Screening / Watchlist');
+      expect(nsParam).toBeDefined();
+      expect(nsParam.score).toBe(1);
+      expect(nsParam.weight).toBe(0.01);
+      // Name Screening is NOT in unmapped_parameters when mapped
+      const nsUnmapped = (risk.rba_unmapped_parameters ?? []).find((p: any) => p.parameter === 'Name Screening / Watchlist');
+      expect(nsUnmapped).toBeUndefined();
+    });
+
+    // ── R-03: Business complete mappable data computes COMPLETE ───────────────
+    it('R-03: Business with all RBA fields mapped → COMPLETE rba_calculation_status', async () => {
+      const sfx = `R03${SUFFIX}`;
+      const biz = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          legal_name: `PT RBA Complete ${sfx}`,
+          legal_form: 'PT',
+          incorporation_place: 'Jakarta',
+          incorporation_date: '2020-01-01',
+          nib: `1234567890${sfx.replace(/\D/g, '').slice(0, 3).padEnd(3, '0')}`,
+          npwp: `01.234.567.8-${sfx.replace(/\D/g, '').slice(0, 3).padEnd(3, '0')}.001`,
+          address_line: 'Jl. Test RBA No. 3',
+          city: 'Jakarta',
+          province: 'DKI Jakarta',
+          postal_code: '12345',
+          phone: `02112${sfx.replace(/\D/g, '').padEnd(5, '1').slice(0, 5)}`,
+          business_activity: 'Layanan Finansial - Bank (Konvensional & Digital)',
+          source_of_funds: 'Hasil usaha',
+          business_relationship_purpose: 'Kegiatan usaha atau transaksi bisnis',
+          distribution_channel: 'Aplikasi Digital',
+        })
+        .expect(201);
+
+      const appId = String(biz.body.id);
+      // Add BO party
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ role: 'BO', full_name: `BO RBA ${sfx}`, identity_type: 'KTP', identity_number: `3175999${sfx.replace(/\D/g, '').padEnd(9, '0').slice(0, 9)}`, dob: '1985-05-15', nationality: 'ID', phone: `0813${sfx.replace(/\D/g, '').padEnd(8, '0').slice(0, 8)}` });
+      // Upload required business docs + BO doc (required when BO party exists)
+      for (const dt of ['BUSINESS_DEED_ESTABLISHMENT_AMENDMENT', 'BUSINESS_LICENSE', 'BUSINESS_NPWP', 'BUSINESS_MANAGEMENT_IDENTITY', 'BUSINESS_BO_DOCUMENT']) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: dt, file_uri: `https://storage.test/${dt}.pdf` })
+          .expect(201);
+      }
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.risk.rba_calculation_status).toBe('COMPLETE');
+      expect(detail.body.risk.rba_score_v01).not.toBeNull();
+    });
+
+    // ── R-04: Unmapped occupation → INCOMPLETE ────────────────────────────────
+    it('R-04: Occupation not in Excel → INCOMPLETE, rba_score_v01 null, Profil Pekerja in unmapped', async () => {
+      const appId = await createRbaIndividual(`R04${SUFFIX}`, {
+        occupation: 'Pilot Helikopter Militer',  // NOT in Excel
+        source_of_funds: 'Gaji',
+        industry_category: 'Makanan dan Minuman',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_code: '31',
+        distribution_channel: 'Outlet Fisik',
+      });
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.risk.rba_calculation_status).toBe('INCOMPLETE');
+      expect(detail.body.risk.rba_score_v01).toBeNull();
+      const occ = (detail.body.risk.rba_unmapped_parameters ?? []).find((p: any) => p.parameter === 'Profil Pekerja');
+      expect(occ).toBeDefined();
+      expect(occ.value).toBe('Pilot Helikopter Militer');
+    });
+
+    // ── R-05: Province not in Excel → INCOMPLETE (engine unit test) ────────────
+    it('R-05: Province not in RBA geography map → Area Geografis INCOMPLETE', () => {
+      const { computeRbaV01 } = require('../../src/modules/applications/rba-v01.engine');
+      const result = computeRbaV01({
+        type: 'INDIVIDUAL',
+        occupation: 'Karyawan Swasta',
+        source_of_funds: 'Gaji',
+        industry_category: 'Makanan dan Minuman',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_name: 'Atlantis Selatan',  // NOT in sheet 3
+        distribution_channel: 'Outlet Fisik',
+      });
+      expect(result.rba_calculation_status).toBe('INCOMPLETE');
+      expect(result.rba_score_v01).toBeNull();
+      const geo = result.rba_unmapped_parameters.find((p: any) => p.parameter === 'Area Geografis');
+      expect(geo).toBeDefined();
+      expect(geo.value).toBe('Atlantis Selatan');
+    });
+
+    // ── R-06: Missing distribution_channel → INCOMPLETE ───────────────────────
+    it('R-06: Missing distribution_channel → Distribution INCOMPLETE', async () => {
+      const appId = await createRbaIndividual(`R06${SUFFIX}`, {
+        occupation: 'Karyawan Swasta',
+        source_of_funds: 'Gaji',
+        industry_category: 'Makanan dan Minuman',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_code: '31',
+        // distribution_channel: omitted intentionally
+      });
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.risk.rba_calculation_status).toBe('INCOMPLETE');
+      const dist = (detail.body.risk.rba_unmapped_parameters ?? []).find((p: any) => p.parameter === 'Distribution');
+      expect(dist).toBeDefined();
+    });
+
+    // ── R-07: Name Screening / Watchlist scoring behavior ────────────────────
+    it('R-07: Name Screening uses weight 0.01; CLEAR=1, NO_MATCH=1, NEAR_MATCH=2, MATCH=3, null→INCOMPLETE', () => {
+      const { computeRbaV01, CUSTOMER_WEIGHTS_INDIVIDUAL } = require('../../src/modules/applications/rba-v01.engine');
+
+      expect(CUSTOMER_WEIGHTS_INDIVIDUAL.name_screening).toBe(0.01);
+
+      const base = {
+        type: 'INDIVIDUAL',
+        occupation: 'Profesional',
+        source_of_funds: 'Gaji',
+        industry_category: 'Pertanian',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_name: 'DKI Jakarta',
+        distribution_channel: 'Outlet Fisik',
+      };
+
+      // CLEAR → score 1, COMPLETE, appears in customer.parameters
+      const clear = computeRbaV01({ ...base, name_screening_result: 'CLEAR' });
+      expect(clear.rba_calculation_status).toBe('COMPLETE');
+      const clearNS = clear.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist');
+      expect(clearNS?.score).toBe(1);
+      expect(clearNS?.weight).toBe(0.01);
+
+      // NO_MATCH → score 1
+      const noMatch = computeRbaV01({ ...base, name_screening_result: 'NO_MATCH' });
+      expect(noMatch.rba_calculation_status).toBe('COMPLETE');
+      expect(noMatch.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(1);
+
+      // NEAR_MATCH → score 2
+      const near = computeRbaV01({ ...base, name_screening_result: 'NEAR_MATCH' });
+      expect(near.rba_calculation_status).toBe('COMPLETE');
+      expect(near.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(2);
+
+      // MATCH → score 3
+      const match = computeRbaV01({ ...base, name_screening_result: 'MATCH' });
+      expect(match.rba_calculation_status).toBe('COMPLETE');
+      expect(match.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(3);
+
+      // CONFIRMED_MATCH → score 3
+      const confirmed = computeRbaV01({ ...base, name_screening_result: 'CONFIRMED_MATCH' });
+      expect(confirmed.rba_calculation_status).toBe('COMPLETE');
+      expect(confirmed.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(3);
+
+      // null → INCOMPLETE, in unmapped_parameters
+      const noResult = computeRbaV01({ ...base, name_screening_result: null });
+      expect(noResult.rba_calculation_status).toBe('INCOMPLETE');
+      expect(noResult.rba_score_v01).toBeNull();
+      const nsUnmapped = noResult.rba_unmapped_parameters.find((p: any) => p.parameter === 'Name Screening / Watchlist');
+      expect(nsUnmapped).toBeDefined();
+      expect(nsUnmapped.reason).toContain('not provided');
+
+      // unknown value → INCOMPLETE, in unmapped_parameters with actual value
+      const unknown = computeRbaV01({ ...base, name_screening_result: 'UNKNOWN_STATUS' });
+      expect(unknown.rba_calculation_status).toBe('INCOMPLETE');
+      const nsUnknown = unknown.rba_unmapped_parameters.find((p: any) => p.parameter === 'Name Screening / Watchlist');
+      expect(nsUnknown).toBeDefined();
+      expect(nsUnknown.value).toBe('UNKNOWN_STATUS');
+      expect(nsUnknown.reason).toContain('not mapped');
+    });
+
+    // ── R-08: Threshold verification via engine function ─────────────────────
+    it('R-08: getRbaLevel threshold: <=1.50 LOW, >1.50-2.50 MEDIUM, >2.50 HIGH', () => {
+      const { getRbaLevel } = require('../../src/modules/applications/rba-v01.engine');
+      expect(getRbaLevel(0)).toBe('LOW');
+      expect(getRbaLevel(1.00)).toBe('LOW');
+      expect(getRbaLevel(1.50)).toBe('LOW');
+      expect(getRbaLevel(1.51)).toBe('MEDIUM');
+      expect(getRbaLevel(2.00)).toBe('MEDIUM');
+      expect(getRbaLevel(2.50)).toBe('MEDIUM');
+      expect(getRbaLevel(2.51)).toBe('HIGH');
+      expect(getRbaLevel(3.00)).toBe('HIGH');
+    });
+
+    // ── R-09: Submit without RBA fields succeeds (INCOMPLETE, not blocked) ────
+    it('R-09: Submit without RBA fields succeeds — INCOMPLETE does not block submit', async () => {
+      const appId = await createRbaIndividual(`R09${SUFFIX}`, {
+        occupation: 'Karyawan Swasta',
+        // No source_of_funds, business_relationship_purpose, province_code, distribution_channel
+      });
+      // createRbaIndividual already calls submit with expect(200) — if we get here, submit succeeded
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      // INCOMPLETE does not block submit — rba_calculation_status is INCOMPLETE
+      expect(detail.body.risk.rba_calculation_status).toBe('INCOMPLETE');
+      expect(detail.body.risk.rba_score_v01).toBeNull();
+    });
+
+    // ── R-10: rba_components has all 4 sub-components, product always remittance
+    it('R-10: rba_components always has customer/product/geography/distribution; product = Produk Remitansi (3)', async () => {
+      const appId = await createRbaIndividual(`R10${SUFFIX}`, {
+        occupation: 'Karyawan Swasta',
+        source_of_funds: 'Gaji',
+        industry_category: 'Makanan dan Minuman',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_code: '31',
+        distribution_channel: 'Outlet Fisik',
+      });
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const comp = detail.body.risk?.rba_components ?? {};
+      expect(comp).toHaveProperty('customer');
+      expect(comp).toHaveProperty('product');
+      expect(comp).toHaveProperty('geography');
+      expect(comp).toHaveProperty('distribution');
+      expect(comp.product?.value).toBe('Produk Remitansi');
+      expect(comp.product?.score).toBe(3);
+      expect(comp.product?.weight).toBe(0.20);
     });
   });
 });
