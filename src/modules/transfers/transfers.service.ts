@@ -545,10 +545,19 @@ export class TransfersService {
       throw new ForbiddenException("Only FinanceManager can approve/reject");
     }
 
-    if (!["SUBMITTED", "PENDING_FINANCE_MANAGER_APPROVAL"].includes(row.status)) {
-      throw new BadRequestException(
-        "Hanya transfer berstatus SUBMITTED atau PENDING_FINANCE_MANAGER_APPROVAL yang dapat diputuskan.",
-      );
+    if (FULL_ACCESS_ROLES.includes(user.role)) {
+      if (!["SUBMITTED", "PENDING_FINANCE_MANAGER_APPROVAL"].includes(row.status)) {
+        throw new BadRequestException(
+          "Hanya transfer berstatus SUBMITTED atau PENDING_FINANCE_MANAGER_APPROVAL yang dapat diputuskan.",
+        );
+      }
+    } else {
+      // FinanceManager strict ordering — must go through OperationSupervisor + FinanceStaff first.
+      if (row.status !== "PENDING_FINANCE_MANAGER_APPROVAL") {
+        throw new BadRequestException(
+          "Transfer harus melalui review OperationSupervisor dan FinanceStaff terlebih dahulu sebelum dapat diputuskan.",
+        );
+      }
     }
 
     const decisionNotes = dto.decision_notes ?? dto.note ?? null;
@@ -556,11 +565,14 @@ export class TransfersService {
 
     let next;
     if (dto.decision === "APPROVE") {
+      // FinanceManager final approval directly completes the transfer as SUCCESS.
       next = await this.pool.query(
         `UPDATE transfers SET
-          status='APPROVED',
+          status='COMPLETED',
+          result='SUCCESS',
           approved_by=$2,
           approved_at=now(),
+          completed_at=now(),
           decision_notes=$3,
           updated_at=now()
         WHERE id=$1
@@ -615,8 +627,8 @@ export class TransfersService {
       throw new ForbiddenException("Only FinanceManager can set result");
     }
 
-    if (row.status !== "APPROVED") {
-      throw new BadRequestException("Only APPROVED can be completed");
+    if (!["APPROVED", "COMPLETED"].includes(row.status)) {
+      throw new BadRequestException("Only APPROVED or COMPLETED can have result set");
     }
 
     if (dto.result !== "SUCCESS" && dto.result !== "FAILED") {

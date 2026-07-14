@@ -1285,7 +1285,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('PENDING_FINANCE_MANAGER_APPROVAL');
     });
 
-    it('FW-04: FinanceManager dapat final approve transfer → APPROVED', async () => {
+    it('FW-04: FinanceManager dapat final approve transfer → COMPLETED/SUCCESS', async () => {
       const senderAppId = await createApprovedSenderForTransfer(`FW04${SUFFIX}`);
       const txId = await createAndSubmitTransfer(senderAppId);
 
@@ -1306,7 +1306,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${financeManagerToken}`)
         .send({ decision: 'APPROVE' })
         .expect(201);
-      expect(res.body.status).toBe('APPROVED');
+      expect(res.body.status).toBe('COMPLETED');
+      expect(res.body.result).toBe('SUCCESS');
     });
 
     it('FW-05: OperationSupervisor dapat reject transfer layer 1 → REJECTED', async () => {
@@ -3580,6 +3581,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${financeStaffToken}`)
         .expect(201);
 
+      // Full 3-step: supervisor → finance → manager
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${id}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${id}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${id}/decision`)
         .set('Authorization', `Bearer ${financeManagerToken}`)
@@ -3683,17 +3697,32 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.submitted_at).not.toBeNull();
     });
 
-    it('N-05: approve → APPROVED + approved_by/approved_at/decision_notes', async () => {
+    it('N-05: approve → COMPLETED/SUCCESS + approved_by/approved_at/decision_notes', async () => {
+      // Must go through full 3-step flow for FinanceManager strict ordering
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txAutoRef}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txAutoRef}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txAutoRef}/decision`)
         .set('Authorization', `Bearer ${financeManagerToken}`)
         .send({ decision: 'APPROVE', decision_notes: 'Approved by manager' })
         .expect(201);
 
-      expect(res.body.status).toBe('APPROVED');
+      expect(res.body.status).toBe('COMPLETED');
+      expect(res.body.result).toBe('SUCCESS');
       expect(res.body.approved_by).not.toBeNull();
       expect(String(res.body.approved_by)).toMatch(/^\d+$/);
       expect(res.body.approved_at).not.toBeNull();
+      expect(res.body.completed_at).not.toBeNull();
       expect(res.body.decision_notes).toBe('Approved by manager');
     });
 
@@ -3715,6 +3744,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txReject}/submit`)
         .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+
+      // Full 3-step flow before FinanceManager can act
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txReject}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txReject}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
         .expect(201);
 
       const res = await request(app.getHttpServer())
@@ -3805,7 +3847,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'APPROVE' })
         .expect(201);
 
-      // SystemAdmin boleh set result (txSnap sekarang APPROVED)
+      // SystemAdmin boleh set result (txSnap sekarang COMPLETED — bypass strict ordering)
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txSnap}/result`)
         .set('Authorization', `Bearer ${sysAdminToken}`)
@@ -3895,13 +3937,26 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     it('N-17: FrontDesk POST /transfers/:id/result → 403 (tidak boleh update result)', async () => {
-      // Approve dulu via manager agar status APPROVED (bukan untuk FrontDesk)
+      // Go through full 3-step flow then FinanceManager approve → COMPLETED/SUCCESS
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${fdTransferId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${fdTransferId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${fdTransferId}/decision`)
         .set('Authorization', `Bearer ${financeManagerToken}`)
         .send({ decision: 'APPROVE', decision_notes: 'ok' })
         .expect(201);
 
+      // FrontDesk cannot call /result regardless of transfer status
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${fdTransferId}/result`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -4037,7 +4092,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.applicant_snapshot.customer_category).toBe('INDIVIDUAL');
     });
 
-    it('O-06: FrontDesk PATCH /edd draft (partial) → 200, data tersimpan + snapshot dari init tetap ada', async () => {
+    it('O-06: FrontDesk PATCH /edd draft (partial, bagian I-III) → 200, data tersimpan + snapshot tetap ada', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -4045,16 +4100,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           high_risk_reasons: {
             customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'],
           },
-          officer_analysis: {
-            overall_risk_summary: 'HIGH',
-            follow_up_recommendations: ['REQUEST_ADDITIONAL_DOCUMENTS'],
-          },
         })
         .expect(200);
 
       expect(res.body.edd_completed).toBe(false);
       expect(res.body.high_risk_reasons.customer_characteristics).toContain('HIGH_RISK_OCCUPATION_OR_BUSINESS');
-      expect(res.body.officer_analysis.overall_risk_summary).toBe('HIGH');
       // snapshot dari initEddForHighRisk harus tetap ada
       expect(res.body.applicant_snapshot.full_name).toBe(EDD_PERSON_NAME);
     });
@@ -4073,12 +4123,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.errors.length).toBeGreaterThan(0);
     });
 
-    it('O-08: FrontDesk PATCH /edd complete=true dengan semua field wajib → 200, edd_completed=true', async () => {
-      const res = await request(app.getHttpServer())
+    it('O-08: FrontDesk isi I-III lalu ComplianceLead isi IV-VII+complete → edd_completed=true', async () => {
+      // Step 1: FrontDesk fills sections I–III (with new required dropdown fields)
+      await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
-          complete: true,
           applicant_snapshot: {
             full_name: EDD_PERSON_NAME,
             identity_number: `31890000${SUFFIX}`,
@@ -4088,6 +4138,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           high_risk_reasons: {
             customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'],
           },
+          additional_information: {
+            source_of_funds: 'Gaji',
+            business_relationship_purpose: 'Kegiatan usaha atau transaksi bisnis',
+          },
+        })
+        .expect(200);
+
+      // Step 2: ComplianceLead fills sections IV–VII with complete=true
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          complete: true,
           officer_analysis: {
             overall_risk_summary: 'HIGH',
             follow_up_recommendations: ['REQUEST_ADDITIONAL_DOCUMENTS'],
@@ -4188,21 +4251,21 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.edd_completed).toBe(true);
     });
 
-    it('O-13: FrontDesk PATCH /edd draft → 200 (Frontline pengisi EDD)', async () => {
+    it('O-13: FrontDesk PATCH /edd bagian I-III → 200 (Frontline dapat mengisi I–III)', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ officer_analysis: { overall_risk_summary: 'LOW' } })
+        .send({ additional_information: { notes: 'catatan tambahan dari frontdesk' } })
         .expect(200);
 
       expect(res.body.edd_completed).toBe(true);
     });
 
-    it('O-13c: ComplianceLead PATCH /edd → 403 (Lead hanya approval aplikasi)', async () => {
+    it('O-13c: ComplianceLead PATCH /edd bagian I-III → 403 (bagian I-III hanya untuk FrontDesk)', async () => {
       await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
         .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ officer_analysis: { overall_risk_summary: 'LOW' } })
+        .send({ applicant_snapshot: { hacked: true } })
         .expect(403);
     });
 
@@ -4223,13 +4286,25 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
-      const res = await request(app.getHttpServer())
+      // FrontDesk pre-fills I–III (required for completion validation)
+      await request(app.getHttpServer())
         .patch(`${BASE}/applications/${condAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
-          complete: true,
-          applicant_snapshot: { full_name: EDD_PERSON_NAME },
           high_risk_reasons: { customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'] },
+          additional_information: {
+            source_of_funds: 'Gaji',
+            business_relationship_purpose: 'Kegiatan usaha atau transaksi bisnis',
+          },
+        })
+        .expect(200);
+
+      // ComplianceLead sends IV–VII with complete=true but NOT_CONSISTENT without consistency_notes → 400
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${condAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          complete: true,
           officer_analysis: {
             overall_risk_summary: 'HIGH',
             follow_up_recommendations: ['CONTINUE_RELATIONSHIP_OR_TRANSACTION'],
@@ -4253,6 +4328,323 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.edd_required).toBe(false);
       expect(res.body.edd_completed).toBe(false);
       expect(res.body.applicant_snapshot).toEqual({});
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // GF. EDD role ownership, dropdown fields, & transfer final flow
+  // ══════════════════════════════════════════════════════════
+  describe('GF. EDD role ownership + dropdown fields + transfer final flow', () => {
+    let gfAppId: string;
+
+    async function createGfHighRiskApp(identNum: string, phone: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GF Risk Test ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: identNum,
+          address_identity: 'Jl. GF No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1975-01-01',
+          nationality: 'ID',
+          phone,
+          occupation: 'casino dealer',
+          gender: 'M',
+          signature_uri: 'https://storage.test/gf_sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      const { rows } = await pgPool.query('SELECT person_id FROM applications WHERE id=$1', [appId]);
+      await pgPool.query('UPDATE persons SET pep_self_declared=true WHERE id=$1', [rows[0].person_id]);
+      const docRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/gf_ktp.jpg' })
+        .expect(201);
+      await pgPool.query('UPDATE documents SET status=$1 WHERE id=$2', ['REJECTED', docRes.body.id]);
+      await uploadFacePhotoDocs(appId);
+      return appId;
+    }
+
+    it('GF-01: setup — create HIGH RISK app and submit', async () => {
+      gfAppId = await createGfHighRiskApp(`31897001${SUFFIX}`, `087701${SUFFIX}`);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.risk.risk_level).toBe('HIGH');
+    });
+
+    it('GF-02: FrontDesk PATCH EDD sections I-III → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          high_risk_reasons: { customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'] },
+        })
+        .expect(200);
+      expect(res.body.high_risk_reasons.customer_characteristics).toContain('HIGH_RISK_OCCUPATION_OR_BUSINESS');
+    });
+
+    it('GF-03: FrontDesk PATCH EDD sections IV-VII → 403 "Frontline hanya dapat mengisi EDD bagian I sampai III."', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ officer_analysis: { overall_risk_summary: 'HIGH' } })
+        .expect(403);
+      expect(res.body.message).toContain('Frontline hanya dapat mengisi EDD bagian I sampai III');
+    });
+
+    it('GF-04: ComplianceLead PATCH EDD sections IV-VII → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ officer_analysis: { overall_risk_summary: 'HIGH' } })
+        .expect(200);
+      expect(res.body.officer_analysis.overall_risk_summary).toBe('HIGH');
+    });
+
+    it('GF-05: ComplianceLead PATCH EDD sections I-III → 403 "Lead Compliance hanya dapat mengisi EDD bagian IV sampai VII."', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ high_risk_reasons: { customer_characteristics: ['HACK'] } })
+        .expect(403);
+      expect(res.body.message).toContain('Lead Compliance hanya dapat mengisi EDD bagian IV sampai VII');
+    });
+
+    it('GF-06: Auditor PATCH EDD → 403 (read-only)', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ high_risk_reasons: {} })
+        .expect(403);
+    });
+
+    it('GF-07: FrontDesk saves source_of_funds dropdown in additional_information', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          additional_information: {
+            source_of_funds: 'Gaji',
+            business_relationship_purpose: 'Kegiatan usaha atau transaksi bisnis',
+          },
+        })
+        .expect(200);
+      expect(res.body.additional_information.source_of_funds).toBe('Gaji');
+      expect(res.body.additional_information.business_relationship_purpose).toBe('Kegiatan usaha atau transaksi bisnis');
+    });
+
+    it('GF-08: source_of_funds_other required when "Pendapatan lain/Lainnya" → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          additional_information: {
+            source_of_funds: 'Pendapatan lain/Lainnya',
+          },
+        })
+        .expect(400);
+      expect(res.body.message).toContain('source_of_funds_other');
+    });
+
+    it('GF-09: business_relationship_purpose dropdown saves + other required when "Lainnya"', async () => {
+      // store valid value first
+      const res1 = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          additional_information: {
+            source_of_funds: 'Investasi',
+            business_relationship_purpose: 'Lainnya',
+          },
+        })
+        .expect(400);
+      expect(res1.body.message).toContain('business_relationship_purpose_other');
+    });
+
+    it('GF-10: source_of_funds_other provided → saves correctly', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          additional_information: {
+            source_of_funds: 'Pendapatan lain/Lainnya',
+            source_of_funds_other: 'Royalti karya tulis',
+            business_relationship_purpose: 'Lainnya',
+            business_relationship_purpose_other: 'Pembayaran konsultasi',
+          },
+        })
+        .expect(200);
+      expect(res.body.additional_information.source_of_funds).toBe('Pendapatan lain/Lainnya');
+      expect(res.body.additional_information.source_of_funds_other).toBe('Royalti karya tulis');
+      expect(res.body.additional_information.business_relationship_purpose).toBe('Lainnya');
+      expect(res.body.additional_information.business_relationship_purpose_other).toBe('Pembayaran konsultasi');
+    });
+
+    it('GF-11: EDD complete requires source_of_funds and business_relationship_purpose', async () => {
+      // Create a fresh HIGH RISK app and try to complete EDD without the new required fields
+      const freshAppId = await createGfHighRiskApp(`31897002${SUFFIX}`, `087702${SUFFIX}`);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${freshAppId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      // FrontDesk fills I-III without new dropdown fields
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${freshAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          high_risk_reasons: { customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'] },
+        })
+        .expect(200);
+
+      // ComplianceLead tries complete=true without source_of_funds and business_relationship_purpose → 400
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${freshAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          complete: true,
+          officer_analysis: {
+            overall_risk_summary: 'HIGH',
+            follow_up_recommendations: ['REQUEST_ADDITIONAL_DOCUMENTS'],
+            cdd_edd_consistency: 'CONSISTENT',
+          },
+          compliance_decision: { decision: 'APPROVED' },
+          internal_checklist: { edd_form_completed: true },
+        })
+        .expect(400);
+
+      expect(res.body.errors.some((e: string) => e.includes('source_of_funds'))).toBe(true);
+      expect(res.body.errors.some((e: string) => e.includes('business_relationship_purpose'))).toBe(true);
+    });
+
+    it('GF-12: Full 4-step transfer flow → COMPLETED/SUCCESS', async () => {
+      // Create approved sender
+      const senderApp = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GF Transfer Sender ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `31897901${SUFFIX}`,
+          address_identity: 'Jl. GF Transfer No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0877901${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/gf_trx_sig.png',
+        })
+        .expect(201);
+      const senderAppId = String(senderApp.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [senderAppId]);
+
+      // Create transfer
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 100_000,
+          sender_application_id: Number(senderAppId),
+          beneficiaryBankName: 'Bank GF',
+          beneficiaryAccountNumber: '1234567890',
+          beneficiaryAccountName: 'Penerima GF',
+        })
+        .expect(201);
+      const txId = String(createRes.body.id);
+      expect(createRes.body.status).toBe('DRAFT');
+
+      // Submit
+      const submitRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+      expect(submitRes.body.status).toBe('SUBMITTED');
+
+      // OperationSupervisor layer 1
+      const supRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'dokumen lengkap' })
+        .expect(201);
+      expect(supRes.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+
+      // FinanceStaff layer 2
+      const staffRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'siap disetujui' })
+        .expect(201);
+      expect(staffRes.body.status).toBe('PENDING_FINANCE_MANAGER_APPROVAL');
+
+      // FinanceManager final → COMPLETED/SUCCESS
+      const finalRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE', decision_notes: 'disetujui manager' })
+        .expect(201);
+      expect(finalRes.body.status).toBe('COMPLETED');
+      expect(finalRes.body.result).toBe('SUCCESS');
+      expect(finalRes.body.approved_at).not.toBeNull();
+      expect(finalRes.body.completed_at).not.toBeNull();
+    });
+
+    it('GF-13: FinanceManager cannot approve before FinanceStaff review → 400', async () => {
+      // Create approved sender
+      const senderApp = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GF Early Approve ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `31897902${SUFFIX}`,
+          address_identity: 'Jl. GF Early No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0877902${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/gf_early_sig.png',
+        })
+        .expect(201);
+      const senderAppId = String(senderApp.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [senderAppId]);
+
+      // Create + submit transfer (SUBMITTED)
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 50_000,
+          sender_application_id: Number(senderAppId),
+          beneficiaryBankName: 'Bank Early',
+          beneficiaryAccountNumber: '9999888777',
+          beneficiaryAccountName: 'Penerima Early',
+        })
+        .expect(201);
+      const txId = String(createRes.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+
+      // FinanceManager tries to approve SUBMITTED transfer (bypassing supervisor+finance) → 400
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(400);
+      expect(res.body.message).toContain('OperationSupervisor');
     });
   });
 

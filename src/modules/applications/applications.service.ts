@@ -2784,8 +2784,31 @@ export class ApplicationsService {
     return rows[0];
   }
 
-  async saveEdd(appId: number, body: any, userId: number) {
+  async saveEdd(
+    appId: number,
+    body: any,
+    user: { sub?: number | string; id?: number | string; role: string },
+  ) {
     const { complete = false } = body;
+    const userId = Number(user.sub ?? (user as any).id);
+    const role = user.role;
+
+    // Section-based RBAC: FrontDesk fills I–III, ComplianceLead fills IV–VII.
+    const FULL_ACCESS = ["SystemAdmin", "Director"];
+    const SECTIONS_I_III = ["applicant_snapshot", "high_risk_reasons", "additional_information"];
+    const SECTIONS_IV_VII = ["beneficial_owner", "officer_analysis", "compliance_decision", "director_decision", "internal_checklist"];
+    if (!FULL_ACCESS.includes(role)) {
+      const hasKey = (k: string) => Object.prototype.hasOwnProperty.call(body, k);
+      if (role === "FrontDesk") {
+        if (SECTIONS_IV_VII.some(hasKey)) {
+          throw new ForbiddenException("Frontline hanya dapat mengisi EDD bagian I sampai III.");
+        }
+      } else if (role === "ComplianceLead") {
+        if (SECTIONS_I_III.some(hasKey)) {
+          throw new ForbiddenException("Lead Compliance hanya dapat mengisi EDD bagian IV sampai VII.");
+        }
+      }
+    }
 
     const { rows: apps } = await this.pool.query(
       `SELECT id FROM applications WHERE id=$1`,
@@ -2825,6 +2848,27 @@ export class ApplicationsService {
       internal_checklist:
         body.internal_checklist ?? curr?.internal_checklist ?? {},
     };
+
+    // Dropdown companion validation for additional_information
+    const addInfoMerged = merged.additional_information ?? {};
+    const sofStr = typeof addInfoMerged.source_of_funds === "string" ? addInfoMerged.source_of_funds : null;
+    if (sofStr === "Pendapatan lain/Lainnya") {
+      const sofOther = String(addInfoMerged.source_of_funds_other ?? "").trim();
+      if (!sofOther) {
+        throw new BadRequestException(
+          "additional_information.source_of_funds_other wajib diisi untuk Pendapatan lain/Lainnya.",
+        );
+      }
+    }
+    const brpStr = typeof addInfoMerged.business_relationship_purpose === "string" ? addInfoMerged.business_relationship_purpose : null;
+    if (brpStr === "Lainnya") {
+      const brpOther = String(addInfoMerged.business_relationship_purpose_other ?? "").trim();
+      if (!brpOther) {
+        throw new BadRequestException(
+          "additional_information.business_relationship_purpose_other wajib diisi jika Tujuan Hubungan Usaha = Lainnya.",
+        );
+      }
+    }
 
     if (complete) this.validateEddCompletion(merged);
 
@@ -2965,6 +3009,19 @@ export class ApplicationsService {
       errors.push(
         "additional_information.wealth_information_other wajib diisi jika OTHER dipilih",
       );
+
+    // New required dropdown fields (single-value string format)
+    const eddSof = addInfo.source_of_funds;
+    if (!eddSof || (typeof eddSof === "string" && !eddSof.trim()))
+      errors.push("additional_information.source_of_funds wajib diisi");
+    if (typeof eddSof === "string" && eddSof === "Pendapatan lain/Lainnya" && !addInfo.source_of_funds_other)
+      errors.push("additional_information.source_of_funds_other wajib diisi jika Pendapatan lain/Lainnya");
+
+    const eddBrp = addInfo.business_relationship_purpose;
+    if (!eddBrp || (typeof eddBrp === "string" && !eddBrp.trim()))
+      errors.push("additional_information.business_relationship_purpose wajib diisi");
+    if (typeof eddBrp === "string" && eddBrp === "Lainnya" && !addInfo.business_relationship_purpose_other)
+      errors.push("additional_information.business_relationship_purpose_other wajib diisi jika Lainnya");
 
     if (errors.length)
       throw new BadRequestException({

@@ -239,14 +239,14 @@ export class ApplicationsController {
     return this.svc.getEdd(appId);
   }
 
-  @Roles("FrontDesk")
+  @Roles("FrontDesk", "ComplianceLead")
   @Patch(":id/edd")
   async saveEdd(
     @Param("id", ParseIntPipe) appId: number,
     @Body() body: any,
     @Req() req: any,
   ) {
-    return this.svc.saveEdd(appId, body, req.user.sub);
+    return this.svc.saveEdd(appId, body, req.user);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
