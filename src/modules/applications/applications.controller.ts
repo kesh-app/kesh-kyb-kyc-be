@@ -220,15 +220,26 @@ export class ApplicationsController {
     return { ...saved, file_url: fileUrl };
   }
 
+
+  @Roles("FrontDesk", "ComplianceLead")
+  @Patch(":id")
+  async updateCdd(
+    @Param("id", ParseIntPipe) appId: number,
+    @Body() body: any,
+    @Req() req: any,
+  ) {
+    return this.svc.updateIndividualCdd(appId, body, req.user.sub);
+  }
+
   // ── EDD endpoints ────────────────────────────────────────────────────────
 
-  @Roles("ComplianceLead", "Auditor")
+  @Roles("FrontDesk", "ComplianceLead", "Auditor")
   @Get(":id/edd")
   async getEdd(@Param("id", ParseIntPipe) appId: number) {
     return this.svc.getEdd(appId);
   }
 
-  @Roles("ComplianceLead")
+  @Roles("FrontDesk")
   @Patch(":id/edd")
   async saveEdd(
     @Param("id", ParseIntPipe) appId: number,
@@ -247,7 +258,7 @@ export class ApplicationsController {
   }
 
   // KYC/KYB decision: OperationSupervisor untuk LOW/MEDIUM risk,
-  // ComplianceLead untuk HIGH risk + semua risk, Director/SystemAdmin via bypass.
+  // ComplianceLead untuk HIGH risk, Director/SystemAdmin via bypass.
   @Roles("OperationSupervisor", "ComplianceLead")
   @Patch(":id/decision")
   async decide(

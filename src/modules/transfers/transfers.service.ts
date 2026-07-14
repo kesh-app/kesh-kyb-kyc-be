@@ -24,6 +24,8 @@ import { MonitoringService } from "../monitoring/monitoring.service";
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
 const FULL_ACCESS_ROLES = ["SystemAdmin", "Director"];
+const WIC_TRANSFER_MAX_AMOUNT = 100_000_000;
+const WIC_LIMIT_ERROR = "Walk-In Customer (WIC) memiliki limit transaksi maksimal Rp100.000.000.";
 
 @Injectable()
 export class TransfersService {
@@ -96,9 +98,11 @@ export class TransfersService {
     }
 
     const { rows } = await this.pool.query(
-      `SELECT id, person_id, business_id, status
-         FROM applications
-        WHERE id = $1`,
+      `SELECT a.id, a.person_id, a.business_id, a.status, a.type,
+              p.cif_relationship_type
+         FROM applications a
+         LEFT JOIN persons p ON p.id = a.person_id
+        WHERE a.id = $1`,
       [applicationId],
     );
 
@@ -116,6 +120,28 @@ export class TransfersService {
     return senderApp;
   }
 
+  private async assertWicTransferLimit(
+    applicationId: number | string | null | undefined,
+    amount: number | string | null | undefined,
+  ) {
+    if (applicationId === null || applicationId === undefined) return;
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount)) return;
+
+    const { rows } = await this.pool.query(
+      `SELECT p.cif_relationship_type
+         FROM applications a
+         JOIN persons p ON p.id = a.person_id
+        WHERE a.id = $1 AND a.type = 'INDIVIDUAL'
+        LIMIT 1`,
+      [applicationId],
+    );
+
+    if (rows[0]?.cif_relationship_type === 'WIC' && numericAmount > WIC_TRANSFER_MAX_AMOUNT) {
+      throw new BadRequestException(WIC_LIMIT_ERROR);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // CREATE DRAFT
   // ---------------------------------------------------------------------------
@@ -129,6 +155,7 @@ export class TransfersService {
 
     // ✅ validasi sender_application_id — harus ada & KYC/KYB APPROVED
     await this.assertSenderApproved(dto.sender_application_id);
+    await this.assertWicTransferLimit(dto.sender_application_id, dto.amount);
 
     // ── SNAP-ready derivations ──────────────────────────────────────────
     const partnerRef = await this.resolvePartnerReferenceNo(
@@ -245,6 +272,7 @@ export class TransfersService {
     // Hard guard: pengirim draft harus tetap APPROVED. Mencegah update draft
     // lama yang pengirimnya sudah tidak APPROVED lagi.
     await this.assertSenderApproved(row.sender_application_id);
+    await this.assertWicTransferLimit(row.sender_application_id, dto.amount ?? row.amount);
 
     // partner_reference_no tidak pernah di-regenerate setelah create.
     const amountCurrency = normalizeCurrency(dto.currency ?? row.amount_currency);
@@ -347,6 +375,7 @@ export class TransfersService {
     // Hard guard: pengirim wajib tetap APPROVED saat submit. Mencegah draft
     // lama dengan pengirim non-APPROVED lolos ke tahap SUBMITTED.
     await this.assertSenderApproved(row.sender_application_id);
+    await this.assertWicTransferLimit(row.sender_application_id, row.amount);
 
     // Jangan izinkan submit jika field transfer wajib belum lengkap.
     const missing: string[] = [];
@@ -692,7 +721,8 @@ export class TransfersService {
          t.completed_at, t.failed_at,
          t.source_of_funds, t.transaction_purpose,
          COALESCE(p.full_name, b.legal_name) AS sender_name,
-         COALESCE(p.cif_no, b.cif_no)       AS sender_cif_no,
+         CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS sender_cif_no,
+         p.cif_relationship_type AS sender_cif_relationship_type,
          a.type                              AS sender_type
        FROM transfers t
        LEFT JOIN applications a ON a.id = t.sender_application_id
@@ -721,7 +751,8 @@ export class TransfersService {
     const q = await this.pool.query(
       `SELECT t.*,
               COALESCE(p.full_name, b.legal_name) AS sender_name,
-              COALESCE(p.cif_no, b.cif_no)       AS sender_cif_no,
+              CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS sender_cif_no,
+              p.cif_relationship_type AS sender_cif_relationship_type,
               a.type                              AS sender_type
        FROM transfers t
        LEFT JOIN applications a ON a.id = t.sender_application_id
@@ -779,6 +810,7 @@ export class TransfersService {
        WHERE a.status = 'APPROVED'
          AND ($1 = '' OR COALESCE(p.full_name, b.legal_name) ILIKE $2
               OR COALESCE(p.cif_no, b.cif_no) ILIKE $2
+              OR COALESCE(p.cif_relationship_type, '') ILIKE $2
               OR COALESCE(p.identity_number, '') ILIKE $2
               OR COALESCE(b.nib, '') ILIKE $2
               OR COALESCE(b.npwp, '') ILIKE $2)`,
@@ -788,7 +820,8 @@ export class TransfersService {
     const dataQ = await this.pool.query(
       `SELECT a.id AS application_id, a.type AS application_type, a.status,
               COALESCE(p.full_name, b.legal_name) AS display_name,
-              COALESCE(p.cif_no, b.cif_no) AS cif_no,
+              CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS cif_no,
+              p.cif_relationship_type,
               COALESCE(p.identity_number, b.nib) AS identity_number_or_business_number
        FROM applications a
        LEFT JOIN persons p ON p.id = a.person_id
@@ -796,6 +829,7 @@ export class TransfersService {
        WHERE a.status = 'APPROVED'
          AND ($1 = '' OR COALESCE(p.full_name, b.legal_name) ILIKE $2
               OR COALESCE(p.cif_no, b.cif_no) ILIKE $2
+              OR COALESCE(p.cif_relationship_type, '') ILIKE $2
               OR COALESCE(p.identity_number, '') ILIKE $2
               OR COALESCE(b.nib, '') ILIKE $2
               OR COALESCE(b.npwp, '') ILIKE $2)

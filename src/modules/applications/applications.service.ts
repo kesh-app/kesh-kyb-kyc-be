@@ -16,43 +16,81 @@ const SIMILARITY_THRESHOLD = 0.35;
 
 // Bobot per faktor (satuan poin, cap total 100)
 const W = {
-  DTTOT_CONFIRMED:   100,
-  PPPSPM_CONFIRMED:  100,
-  PEP_CONFIRMED:      40,
-  PEP_CANDIDATE:      20,
-  DTTOT_CANDIDATE:    50,
-  PPPSPM_CANDIDATE:   50,
-  DOC_MISSING:        10,
-  DOC_REJECTED:       15,
+  DTTOT_CONFIRMED: 100,
+  PPPSPM_CONFIRMED: 100,
+  PEP_CONFIRMED: 40,
+  PEP_CANDIDATE: 20,
+  DTTOT_CANDIDATE: 50,
+  PPPSPM_CANDIDATE: 50,
+  DOC_MISSING: 10,
+  DOC_REJECTED: 15,
   HIGH_RISK_OCCUPATION: 15,
-  PEP_SELF_DECLARED:  40,
+  PEP_SELF_DECLARED: 40,
   HIGH_RISK_ACTIVITY: 20,
   HIGH_RISK_LEGAL_FORM: 10,
-  BO_MISSING:         30,
-  GEOGRAPHY:          15,
-  RBA_OCC_HIGH:       20,
-  RBA_OCC_MEDIUM:     10,
-  RBA_GEO_HIGH:       15,
-  RBA_GEO_MEDIUM:      7,
+  BO_MISSING: 30,
+  GEOGRAPHY: 15,
+  RBA_OCC_HIGH: 20,
+  RBA_OCC_MEDIUM: 10,
+  RBA_GEO_HIGH: 15,
+  RBA_GEO_MEDIUM: 7,
 };
 
 // Kata kunci pekerjaan berisiko tinggi (individual)
 const HIGH_RISK_OCCUPATIONS = [
-  'money changer', 'remittance', 'crypto', 'casino', 'gambling',
-  'precious metal', 'arms', 'nonprofit', 'charity', 'politician', 'public official',
-  'pejabat', 'politisi', 'kasino', 'judi', 'logam mulia', 'senjata', 'tukar valas',
+  "money changer",
+  "remittance",
+  "crypto",
+  "casino",
+  "gambling",
+  "precious metal",
+  "arms",
+  "nonprofit",
+  "charity",
+  "politician",
+  "public official",
+  "pejabat",
+  "politisi",
+  "kasino",
+  "judi",
+  "logam mulia",
+  "senjata",
+  "tukar valas",
 ];
 
 // Kata kunci kegiatan usaha berisiko tinggi (bisnis)
 const HIGH_RISK_ACTIVITIES = [
-  'money changer', 'remittance', 'crypto', 'virtual asset', 'casino', 'gambling',
-  'precious metal', 'arms', 'weapon', 'nonprofit', 'charity', 'foundation',
-  'yayasan', 'donation', 'cash intensive', 'judi', 'kasino', 'logam mulia',
-  'senjata', 'donasi', 'amal', 'tukar valas',
+  "money changer",
+  "remittance",
+  "crypto",
+  "virtual asset",
+  "casino",
+  "gambling",
+  "precious metal",
+  "arms",
+  "weapon",
+  "nonprofit",
+  "charity",
+  "foundation",
+  "yayasan",
+  "donation",
+  "cash intensive",
+  "judi",
+  "kasino",
+  "logam mulia",
+  "senjata",
+  "donasi",
+  "amal",
+  "tukar valas",
 ];
 
 // Bentuk hukum berisiko tinggi
-const HIGH_RISK_LEGAL_FORMS = ['YAYASAN', 'FOUNDATION', 'NONPROFIT', 'KOPERASI'];
+const HIGH_RISK_LEGAL_FORMS = [
+  "YAYASAN",
+  "FOUNDATION",
+  "NONPROFIT",
+  "KOPERASI",
+];
 
 // Placeholder daftar negara berisiko tinggi — dipelihara oleh compliance (FATF/BI)
 const HIGH_RISK_COUNTRIES: string[] = [];
@@ -62,104 +100,108 @@ const HIGH_RISK_COUNTRIES: string[] = [];
 const RBA_OCCUPATION_GEOGRAPHY_ENABLED = false;
 
 // ── RBA Occupation mapping — profil pekerjaan (RBA internal)
-const RBA_OCCUPATION_MAP = ([
-  // HIGH (+20)
-  { name: 'pejabat lembaga legislatif dan pemerintah', risk: 'HIGH' },
-  { name: 'legislative and government officials', risk: 'HIGH' },
-  { name: 'government officials', risk: 'HIGH' },
-  { name: 'pegawai negeri sipil', risk: 'HIGH' },
-  { name: 'pejabat pemerintah', risk: 'HIGH' },
-  { name: 'civil servant', risk: 'HIGH' },
-  { name: 'private employees', risk: 'HIGH' },
-  { name: 'private employee', risk: 'HIGH' },
-  { name: 'self-employed', risk: 'HIGH' },
-  { name: 'self employed', risk: 'HIGH' },
-  { name: 'pegawai swasta', risk: 'HIGH' },
-  { name: 'wiraswasta', risk: 'HIGH' },
-  { name: 'pns', risk: 'HIGH' },
-  // MEDIUM (+10)
-  { name: 'political party administrators', risk: 'MEDIUM' },
-  { name: 'political party administrator', risk: 'MEDIUM' },
-  { name: 'pegawai bumn/bumd', risk: 'MEDIUM' },
-  { name: 'pengurus parpol', risk: 'MEDIUM' },
-  { name: 'pegawai bumn', risk: 'MEDIUM' },
-  { name: 'pegawai bumd', risk: 'MEDIUM' },
-  { name: 'bumn', risk: 'MEDIUM' },
-  { name: 'bumd', risk: 'MEDIUM' },
-  // LOW (+0, info)
-  { name: 'profesional dan konsultan', risk: 'LOW' },
-  { name: 'bank employees', risk: 'LOW' },
-  { name: 'bank employee', risk: 'LOW' },
-  { name: 'pegawai bank', risk: 'LOW' },
-  { name: 'profesional', risk: 'LOW' },
-  { name: 'professional', risk: 'LOW' },
-  { name: 'konsultan', risk: 'LOW' },
-  { name: 'consultant', risk: 'LOW' },
-  { name: 'polri', risk: 'LOW' },
-  { name: 'police', risk: 'LOW' },
-  { name: 'army', risk: 'LOW' },
-  { name: 'tni', risk: 'LOW' },
-] as { name: string; risk: 'HIGH' | 'MEDIUM' | 'LOW' }[]).sort((a, b) => b.name.length - a.name.length);
+const RBA_OCCUPATION_MAP = (
+  [
+    // HIGH (+20)
+    { name: "pejabat lembaga legislatif dan pemerintah", risk: "HIGH" },
+    { name: "legislative and government officials", risk: "HIGH" },
+    { name: "government officials", risk: "HIGH" },
+    { name: "pegawai negeri sipil", risk: "HIGH" },
+    { name: "pejabat pemerintah", risk: "HIGH" },
+    { name: "civil servant", risk: "HIGH" },
+    { name: "private employees", risk: "HIGH" },
+    { name: "private employee", risk: "HIGH" },
+    { name: "self-employed", risk: "HIGH" },
+    { name: "self employed", risk: "HIGH" },
+    { name: "pegawai swasta", risk: "HIGH" },
+    { name: "wiraswasta", risk: "HIGH" },
+    { name: "pns", risk: "HIGH" },
+    // MEDIUM (+10)
+    { name: "political party administrators", risk: "MEDIUM" },
+    { name: "political party administrator", risk: "MEDIUM" },
+    { name: "pegawai bumn/bumd", risk: "MEDIUM" },
+    { name: "pengurus parpol", risk: "MEDIUM" },
+    { name: "pegawai bumn", risk: "MEDIUM" },
+    { name: "pegawai bumd", risk: "MEDIUM" },
+    { name: "bumn", risk: "MEDIUM" },
+    { name: "bumd", risk: "MEDIUM" },
+    // LOW (+0, info)
+    { name: "profesional dan konsultan", risk: "LOW" },
+    { name: "bank employees", risk: "LOW" },
+    { name: "bank employee", risk: "LOW" },
+    { name: "pegawai bank", risk: "LOW" },
+    { name: "profesional", risk: "LOW" },
+    { name: "professional", risk: "LOW" },
+    { name: "konsultan", risk: "LOW" },
+    { name: "consultant", risk: "LOW" },
+    { name: "polri", risk: "LOW" },
+    { name: "police", risk: "LOW" },
+    { name: "army", risk: "LOW" },
+    { name: "tni", risk: "LOW" },
+  ] as { name: string; risk: "HIGH" | "MEDIUM" | "LOW" }[]
+).sort((a, b) => b.name.length - a.name.length);
 
 // ── RBA Geography mapping — area domisili individu (RBA internal)
 // Sorted longest-first untuk cegah false positive substring match (Kepulauan Riau vs Riau).
-const RBA_GEOGRAPHY_MAP = ([
-  // HIGH (+15)
-  { name: 'dki jakarta', risk: 'HIGH' },
-  { name: 'sumatera utara', risk: 'HIGH' },
-  { name: 'north sumatra', risk: 'HIGH' },
-  { name: 'jawa timur', risk: 'HIGH' },
-  { name: 'jawa barat', risk: 'HIGH' },
-  { name: 'jawa tengah', risk: 'HIGH' },
-  { name: 'central java', risk: 'HIGH' },
-  { name: 'east java', risk: 'HIGH' },
-  { name: 'west java', risk: 'HIGH' },
-  { name: 'jakarta', risk: 'HIGH' },
-  { name: 'banten', risk: 'HIGH' },
-  // MEDIUM (+7)
-  { name: 'sulawesi selatan', risk: 'MEDIUM' },
-  { name: 'south sulawesi', risk: 'MEDIUM' },
-  { name: 'kepulauan riau', risk: 'MEDIUM' },
-  { name: 'riau islands', risk: 'MEDIUM' },
-  { name: 'kalimantan timur', risk: 'MEDIUM' },
-  { name: 'east kalimantan', risk: 'MEDIUM' },
-  { name: 'sumatera selatan', risk: 'MEDIUM' },
-  { name: 'south sumatra', risk: 'MEDIUM' },
-  { name: 'daerah istimewa yogyakarta', risk: 'MEDIUM' },
-  { name: 'di yogyakarta', risk: 'MEDIUM' },
-  { name: 'yogyakarta', risk: 'MEDIUM' },
-  { name: 'bengkulu', risk: 'MEDIUM' },
-  { name: 'lampung', risk: 'MEDIUM' },
-  { name: 'bali', risk: 'MEDIUM' },
-  { name: 'riau', risk: 'MEDIUM' },
-  { name: 'diy', risk: 'MEDIUM' },
-  // LOW (+0, info)
-  { name: 'nanggroe aceh darussalam', risk: 'LOW' },
-  { name: 'kalimantan tengah', risk: 'LOW' },
-  { name: 'central kalimantan', risk: 'LOW' },
-  { name: 'kalimantan barat', risk: 'LOW' },
-  { name: 'west kalimantan', risk: 'LOW' },
-  { name: 'nusa tenggara timur', risk: 'LOW' },
-  { name: 'east nusa tenggara', risk: 'LOW' },
-  { name: 'nusa tenggara barat', risk: 'LOW' },
-  { name: 'west nusa tenggara', risk: 'LOW' },
-  { name: 'kalimantan selatan', risk: 'LOW' },
-  { name: 'south kalimantan', risk: 'LOW' },
-  { name: 'sulawesi utara', risk: 'LOW' },
-  { name: 'north sulawesi', risk: 'LOW' },
-  { name: 'sulawesi tengah', risk: 'LOW' },
-  { name: 'central sulawesi', risk: 'LOW' },
-  { name: 'sulawesi tenggara', risk: 'LOW' },
-  { name: 'southeast sulawesi', risk: 'LOW' },
-  { name: 'maluku utara', risk: 'LOW' },
-  { name: 'north maluku', risk: 'LOW' },
-  { name: 'bangka belitung', risk: 'LOW' },
-  { name: 'gorontalo', risk: 'LOW' },
-  { name: 'papua', risk: 'LOW' },
-  { name: 'aceh', risk: 'LOW' },
-  { name: 'ntt', risk: 'LOW' },
-  { name: 'ntb', risk: 'LOW' },
-] as { name: string; risk: 'HIGH' | 'MEDIUM' | 'LOW' }[]).sort((a, b) => b.name.length - a.name.length);
+const RBA_GEOGRAPHY_MAP = (
+  [
+    // HIGH (+15)
+    { name: "dki jakarta", risk: "HIGH" },
+    { name: "sumatera utara", risk: "HIGH" },
+    { name: "north sumatra", risk: "HIGH" },
+    { name: "jawa timur", risk: "HIGH" },
+    { name: "jawa barat", risk: "HIGH" },
+    { name: "jawa tengah", risk: "HIGH" },
+    { name: "central java", risk: "HIGH" },
+    { name: "east java", risk: "HIGH" },
+    { name: "west java", risk: "HIGH" },
+    { name: "jakarta", risk: "HIGH" },
+    { name: "banten", risk: "HIGH" },
+    // MEDIUM (+7)
+    { name: "sulawesi selatan", risk: "MEDIUM" },
+    { name: "south sulawesi", risk: "MEDIUM" },
+    { name: "kepulauan riau", risk: "MEDIUM" },
+    { name: "riau islands", risk: "MEDIUM" },
+    { name: "kalimantan timur", risk: "MEDIUM" },
+    { name: "east kalimantan", risk: "MEDIUM" },
+    { name: "sumatera selatan", risk: "MEDIUM" },
+    { name: "south sumatra", risk: "MEDIUM" },
+    { name: "daerah istimewa yogyakarta", risk: "MEDIUM" },
+    { name: "di yogyakarta", risk: "MEDIUM" },
+    { name: "yogyakarta", risk: "MEDIUM" },
+    { name: "bengkulu", risk: "MEDIUM" },
+    { name: "lampung", risk: "MEDIUM" },
+    { name: "bali", risk: "MEDIUM" },
+    { name: "riau", risk: "MEDIUM" },
+    { name: "diy", risk: "MEDIUM" },
+    // LOW (+0, info)
+    { name: "nanggroe aceh darussalam", risk: "LOW" },
+    { name: "kalimantan tengah", risk: "LOW" },
+    { name: "central kalimantan", risk: "LOW" },
+    { name: "kalimantan barat", risk: "LOW" },
+    { name: "west kalimantan", risk: "LOW" },
+    { name: "nusa tenggara timur", risk: "LOW" },
+    { name: "east nusa tenggara", risk: "LOW" },
+    { name: "nusa tenggara barat", risk: "LOW" },
+    { name: "west nusa tenggara", risk: "LOW" },
+    { name: "kalimantan selatan", risk: "LOW" },
+    { name: "south kalimantan", risk: "LOW" },
+    { name: "sulawesi utara", risk: "LOW" },
+    { name: "north sulawesi", risk: "LOW" },
+    { name: "sulawesi tengah", risk: "LOW" },
+    { name: "central sulawesi", risk: "LOW" },
+    { name: "sulawesi tenggara", risk: "LOW" },
+    { name: "southeast sulawesi", risk: "LOW" },
+    { name: "maluku utara", risk: "LOW" },
+    { name: "north maluku", risk: "LOW" },
+    { name: "bangka belitung", risk: "LOW" },
+    { name: "gorontalo", risk: "LOW" },
+    { name: "papua", risk: "LOW" },
+    { name: "aceh", risk: "LOW" },
+    { name: "ntt", risk: "LOW" },
+    { name: "ntb", risk: "LOW" },
+  ] as { name: string; risk: "HIGH" | "MEDIUM" | "LOW" }[]
+).sort((a, b) => b.name.length - a.name.length);
 
 /** Ubah angka 0..100 ke level (threshold dipertahankan dari v1) */
 function levelOf(score: number) {
@@ -192,24 +234,39 @@ export class ApplicationsService {
     return digits.slice(-6).padStart(6, "0");
   }
 
-  private async generateIndividualCif(identityNumber: string | null | undefined): Promise<string> {
+  private async generateIndividualCif(
+    identityNumber: string | null | undefined,
+  ): Promise<string> {
     const last6 = this.extractLast6Digits(identityNumber);
-    const { rows } = await this.pool.query(`SELECT nextval('cif_individual_seq') AS seq`);
+    const { rows } = await this.pool.query(
+      `SELECT nextval('cif_individual_seq') AS seq`,
+    );
     const seq = String(rows[0].seq).padStart(5, "0");
     return `KSHI${last6}${seq}`;
   }
 
-  private async generateBusinessCif(nib: string | null | undefined, npwp: string | null | undefined): Promise<string> {
+  private async generateBusinessCif(
+    nib: string | null | undefined,
+    npwp: string | null | undefined,
+  ): Promise<string> {
     const last6 = this.extractLast6Digits(nib || npwp);
-    const { rows } = await this.pool.query(`SELECT nextval('cif_business_seq') AS seq`);
+    const { rows } = await this.pool.query(
+      `SELECT nextval('cif_business_seq') AS seq`,
+    );
     const seq = String(rows[0].seq).padStart(5, "0");
     return `KSHB${last6}${seq}`;
+  }
+
+  private normalizeCifRelationshipType(value: unknown): "OUR_CUSTOMER" | "WIC" {
+    return value === "WIC" ? "WIC" : "OUR_CUSTOMER";
   }
 
   // Look up an existing CIF assigned to any person or BO party with the same
   // digit-normalized identity number. Prevents duplicate CIF for the same person
   // across OUR_CUSTOMER and BO contexts.
-  private async resolveCifForIdentity(rawIdentityNumber: string | null | undefined): Promise<string | null> {
+  private async resolveCifForIdentity(
+    rawIdentityNumber: string | null | undefined,
+  ): Promise<string | null> {
     const norm = (rawIdentityNumber ?? "").replace(/\D/g, "");
     if (!norm) return null;
 
@@ -298,61 +355,96 @@ export class ApplicationsService {
 
     if (province_code) {
       const { rows } = await this.pool.query(
-        `SELECT code FROM ref_provinces WHERE code=$1`, [province_code]);
-      if (!rows[0]) throw new BadRequestException(`province_code '${province_code}' tidak ditemukan`);
+        `SELECT code FROM ref_provinces WHERE code=$1`,
+        [province_code],
+      );
+      if (!rows[0])
+        throw new BadRequestException(
+          `province_code '${province_code}' tidak ditemukan`,
+        );
     }
 
     if (city_code) {
       const q: any[] = [city_code];
       let sql = `SELECT code, province_code FROM ref_regencies WHERE code=$1`;
       const { rows } = await this.pool.query(sql, q);
-      if (!rows[0]) throw new BadRequestException(`city_code '${city_code}' tidak ditemukan`);
+      if (!rows[0])
+        throw new BadRequestException(
+          `city_code '${city_code}' tidak ditemukan`,
+        );
       if (province_code && rows[0].province_code !== province_code) {
-        throw new BadRequestException(`city_code '${city_code}' bukan bagian dari province_code '${province_code}'`);
+        throw new BadRequestException(
+          `city_code '${city_code}' bukan bagian dari province_code '${province_code}'`,
+        );
       }
     }
 
     if (district_code) {
       const { rows } = await this.pool.query(
-        `SELECT code, regency_code FROM ref_districts WHERE code=$1`, [district_code]);
-      if (!rows[0]) throw new BadRequestException(`district_code '${district_code}' tidak ditemukan`);
+        `SELECT code, regency_code FROM ref_districts WHERE code=$1`,
+        [district_code],
+      );
+      if (!rows[0])
+        throw new BadRequestException(
+          `district_code '${district_code}' tidak ditemukan`,
+        );
       if (city_code && rows[0].regency_code !== city_code) {
-        throw new BadRequestException(`district_code '${district_code}' bukan bagian dari city_code '${city_code}'`);
+        throw new BadRequestException(
+          `district_code '${district_code}' bukan bagian dari city_code '${city_code}'`,
+        );
       }
     }
 
     if (village_code) {
       const { rows } = await this.pool.query(
-        `SELECT code, district_code FROM ref_villages WHERE code=$1`, [village_code]);
-      if (!rows[0]) throw new BadRequestException(`village_code '${village_code}' tidak ditemukan`);
+        `SELECT code, district_code FROM ref_villages WHERE code=$1`,
+        [village_code],
+      );
+      if (!rows[0])
+        throw new BadRequestException(
+          `village_code '${village_code}' tidak ditemukan`,
+        );
       if (district_code && rows[0].district_code !== district_code) {
-        throw new BadRequestException(`village_code '${village_code}' bukan bagian dari district_code '${district_code}'`);
+        throw new BadRequestException(
+          `village_code '${village_code}' bukan bagian dari district_code '${district_code}'`,
+        );
       }
     }
   }
 
   private async resolveRegionNames(dto: any) {
     const names: Record<string, string | null> = {
-      province_name: null, city_name: null, district_name: null, village_name: null,
+      province_name: null,
+      city_name: null,
+      district_name: null,
+      village_name: null,
     };
     if (dto.province_code) {
       const { rows } = await this.pool.query(
-        `SELECT name FROM ref_provinces WHERE code=$1`, [dto.province_code]);
+        `SELECT name FROM ref_provinces WHERE code=$1`,
+        [dto.province_code],
+      );
       names.province_name = rows[0]?.name ?? null;
     }
     if (dto.city_code) {
       const { rows } = await this.pool.query(
-        `SELECT name FROM ref_regencies WHERE code=$1`, [dto.city_code]);
+        `SELECT name FROM ref_regencies WHERE code=$1`,
+        [dto.city_code],
+      );
       names.city_name = rows[0]?.name ?? null;
     }
     if (dto.district_code) {
       const { rows } = await this.pool.query(
-        `SELECT name FROM ref_districts WHERE code=$1`, [dto.district_code]);
+        `SELECT name FROM ref_districts WHERE code=$1`,
+        [dto.district_code],
+      );
       names.district_name = rows[0]?.name ?? null;
     }
     if (dto.village_code) {
       const { rows } = await this.pool.query(
-        `SELECT name FROM ref_villages WHERE code=$1`, [dto.village_code]);
+        `SELECT name FROM ref_villages WHERE code=$1`,
+        [dto.village_code],
+      );
       names.village_name = rows[0]?.name ?? null;
     }
     return names;
@@ -370,19 +462,27 @@ export class ApplicationsService {
     // Validate industry_category if provided.
     // Accepts: old INDUSTRY_CATEGORIES values (legacy) OR exact RBA V01 industry names from INDUSTRY_MAP.
     if (dto.industry_category) {
-      const { INDUSTRY_CATEGORIES } = await import('../references/references.service');
+      const { INDUSTRY_CATEGORIES } =
+        await import("../references/references.service");
       const validOld = INDUSTRY_CATEGORIES.includes(dto.industry_category);
-      const validRba = INDUSTRY_MAP.some(e => e.industry === dto.industry_category);
+      const validRba = INDUSTRY_MAP.some(
+        (e) => e.industry === dto.industry_category,
+      );
       if (!validOld && !validRba) {
-        throw new BadRequestException(`industry_category tidak valid: ${dto.industry_category}`);
+        throw new BadRequestException(
+          `industry_category tidak valid: ${dto.industry_category}`,
+        );
       }
     }
 
     // Validate monthly_income_range if provided
     if (dto.monthly_income_range) {
-      const { MONTHLY_INCOME_RANGES } = await import('../references/references.service');
+      const { MONTHLY_INCOME_RANGES } =
+        await import("../references/references.service");
       if (!MONTHLY_INCOME_RANGES.includes(dto.monthly_income_range)) {
-        throw new BadRequestException(`monthly_income_range tidak valid: ${dto.monthly_income_range}`);
+        throw new BadRequestException(
+          `monthly_income_range tidak valid: ${dto.monthly_income_range}`,
+        );
       }
     }
 
@@ -390,17 +490,50 @@ export class ApplicationsService {
     const regionNames = await this.resolveRegionNames(dto);
 
     // Derive address_identity from structured fields if not explicitly provided
-    const effectiveAddressIdentity: string | null = dto.address_identity || [
-      dto.street_address,
-      dto.house_number ? `No. ${dto.house_number}` : null,
-      dto.rt_rw ? `RT/RW ${dto.rt_rw}` : null,
-      dto.apartment_block,
-      regionNames.village_name,
-      regionNames.district_name,
-      regionNames.city_name,
-      regionNames.province_name,
-      dto.address_landmark ? `Patokan: ${dto.address_landmark}` : null,
-    ].filter(Boolean).join(', ') || null;
+    const effectiveAddressIdentity: string | null =
+      dto.address_identity ||
+      [
+        dto.street_address,
+        dto.house_number ? `No. ${dto.house_number}` : null,
+        dto.rt_rw ? `RT/RW ${dto.rt_rw}` : null,
+        dto.apartment_block,
+        regionNames.village_name,
+        regionNames.district_name,
+        regionNames.city_name,
+        regionNames.province_name,
+        dto.address_landmark ? `Patokan: ${dto.address_landmark}` : null,
+      ]
+        .filter(Boolean)
+        .join(", ") ||
+      null;
+
+    const relType = this.normalizeCifRelationshipType(
+      dto.cif_relationship_type,
+    );
+
+    // WIC (Walk-In Customer) minimum person fields. When an existing person is
+    // reused (same identity_type + identity_number) the INSERT above is skipped,
+    // so these must be applied on the reuse path too — otherwise a WIC created on
+    // an existing identity would lack Tujuan Transaksi / Hubungan Penerima and
+    // fail submit. COALESCE preserves current values when the payload omits them
+    // (never wipes). cif_no is forced NULL because WIC must not carry a CIF.
+    const wicPersonUpdateSql = `UPDATE persons SET
+          cif_no = NULL,
+          cif_relationship_type = 'WIC',
+          wic_transaction_purpose = COALESCE($2, wic_transaction_purpose),
+          wic_recipient_relationship = COALESCE($3, wic_recipient_relationship),
+          address_identity = COALESCE($4, address_identity),
+          pob = COALESCE($5, pob),
+          dob = COALESCE($6::date, dob)
+        WHERE id = $1`;
+    const wicPersonUpdateParams = (pid: number) => [
+      pid,
+      dto.wic_transaction_purpose || null,
+      dto.wic_recipient_relationship || null,
+      effectiveAddressIdentity,
+      dto.pob || null,
+      dto.dob || null,
+    ];
 
     const client = await this.pool.connect();
     try {
@@ -410,7 +543,7 @@ export class ApplicationsService {
       let personId: number | null = null;
       let personHasCif = false;
       const { rows: found } = await client.query(
-        `SELECT id, cif_no FROM persons WHERE identity_type = $1 AND identity_number = $2 LIMIT 1`,
+        `SELECT id, cif_no, cif_relationship_type FROM persons WHERE identity_type = $1 AND identity_number = $2 LIMIT 1`,
         [dto.identity_type, dto.identity_number],
       );
       if (found[0]) {
@@ -431,11 +564,12 @@ export class ApplicationsService {
             pob, dob, nationality, phone, occupation,
             industry_category, company_name, company_address, monthly_income_range,
             gender, email, signature_uri,
-            source_of_funds, business_relationship_purpose, distribution_channel
+            source_of_funds, business_relationship_purpose, distribution_channel,
+            wic_transaction_purpose, wic_recipient_relationship
           ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
-            $35,$36,$37
+            $35,$36,$37,$38,$39
           ) RETURNING id`,
           [
             dto.full_name,
@@ -475,20 +609,39 @@ export class ApplicationsService {
             dto.source_of_funds || null,
             dto.business_relationship_purpose || null,
             dto.distribution_channel || null,
+            dto.wic_transaction_purpose || null,
+            dto.wic_recipient_relationship || null,
           ],
         );
         personId = ins.rows[0].id;
       }
 
-      // 3) Ensure person has a CIF. Covers: new person, and existing person created
-      //    via addParty (e.g. as DIRECTOR) who never received a CIF.
-      if (!personHasCif) {
-        const existingCif = await this.resolveCifForIdentity(dto.identity_number);
-        const cif = existingCif ?? (await this.generateIndividualCif(dto.identity_number));
-        const relType = (dto.cif_relationship_type as string) || "OUR_CUSTOMER";
+      // 3) CIF relationship handling.
+      //    OUR_CUSTOMER gets a CIF. WIC (Walk-In Customer) must NOT get a CIF.
+      //    If the same identity already has CIF, do not allow it to be downgraded
+      //    into WIC because CIF is person-level data and may be used by other apps.
+      if (relType === "WIC") {
+        if (personHasCif) {
+          throw new BadRequestException(
+            "Identitas ini sudah memiliki CIF dan tidak dapat didaftarkan sebagai Walk-In Customer (WIC).",
+          );
+        }
+        await client.query(wicPersonUpdateSql, wicPersonUpdateParams(personId!));
+      } else if (!personHasCif) {
+        const existingCif = await this.resolveCifForIdentity(
+          dto.identity_number,
+        );
+        const cif =
+          existingCif ??
+          (await this.generateIndividualCif(dto.identity_number));
         await client.query(
-          `UPDATE persons SET cif_no = $1, cif_relationship_type = $2 WHERE id = $3 AND cif_no IS NULL`,
-          [cif, relType, personId],
+          `UPDATE persons SET cif_no = $1, cif_relationship_type = 'OUR_CUSTOMER' WHERE id = $2 AND cif_no IS NULL`,
+          [cif, personId],
+        );
+      } else {
+        await client.query(
+          `UPDATE persons SET cif_relationship_type = COALESCE(cif_relationship_type, 'OUR_CUSTOMER') WHERE id = $1`,
+          [personId],
         );
       }
 
@@ -515,6 +668,33 @@ export class ApplicationsService {
         );
         const personId = rows[0]?.id;
         if (personId) {
+          const { rows: pRows } = await this.pool.query(
+            `SELECT cif_no FROM persons WHERE id=$1`,
+            [personId],
+          );
+          if (relType === "WIC") {
+            if (pRows[0]?.cif_no) {
+              throw new BadRequestException(
+                "Identitas ini sudah memiliki CIF dan tidak dapat didaftarkan sebagai Walk-In Customer (WIC).",
+              );
+            }
+            await this.pool.query(
+              wicPersonUpdateSql,
+              wicPersonUpdateParams(personId),
+            );
+          } else if (!pRows[0]?.cif_no) {
+            const existingCif = await this.resolveCifForIdentity(
+              dto.identity_number,
+            );
+            const cif =
+              existingCif ??
+              (await this.generateIndividualCif(dto.identity_number));
+            await this.pool.query(
+              `UPDATE persons SET cif_no=$1, cif_relationship_type='OUR_CUSTOMER' WHERE id=$2 AND cif_no IS NULL`,
+              [cif, personId],
+            );
+          }
+
           const appRes = await this.pool.query(
             `INSERT INTO applications (type, status, branch_id, created_by, person_id)
            VALUES ('INDIVIDUAL','DRAFT',$1,$2,$3)
@@ -550,6 +730,221 @@ export class ApplicationsService {
     );
 
     return (q.rowCount ?? 0) > 0; // true kalau ada di watchlist
+  }
+
+  async updateIndividualCdd(appId: number, dto: any, userId: number) {
+    void userId;
+    const { rows: apps } = await this.pool.query(
+      `SELECT id, type, status, person_id FROM applications WHERE id=$1`,
+      [appId],
+    );
+    const app = apps[0];
+    if (!app) throw new NotFoundException("Application not found");
+    if (app.type !== "INDIVIDUAL" || !app.person_id) {
+      throw new BadRequestException(
+        "Update CDD hanya berlaku untuk aplikasi Individual",
+      );
+    }
+    if (app.status !== "DRAFT") {
+      throw new BadRequestException(
+        "Data CDD hanya dapat diubah saat status DRAFT",
+      );
+    }
+
+    const clean = (v: any) =>
+      typeof v === "string" && v.trim() === "" ? null : (v ?? null);
+    const normKtp = (v: any) =>
+      typeof v === "string" ? v.replace(/\D+/g, "").trim() : v;
+
+    if (dto.ktp_number) {
+      dto.ktp_number = normKtp(dto.ktp_number);
+      if (!/^\d{15,16}$/.test(dto.ktp_number)) {
+        throw new BadRequestException("ktp_number harus 15-16 digit angka");
+      }
+    }
+    if (dto.sim_number && String(dto.sim_number).length > 20) {
+      throw new BadRequestException("sim_number maksimal 20 karakter");
+    }
+    if (dto.passport_number && String(dto.passport_number).length > 20) {
+      throw new BadRequestException("passport_number maksimal 20 karakter");
+    }
+
+    await this.validateRegionHierarchy(dto);
+
+    if (dto.industry_category) {
+      const { INDUSTRY_CATEGORIES } =
+        await import("../references/references.service");
+      const validOld = INDUSTRY_CATEGORIES.includes(dto.industry_category);
+      const validRba = INDUSTRY_MAP.some(
+        (e) => e.industry === dto.industry_category,
+      );
+      if (!validOld && !validRba) {
+        throw new BadRequestException(
+          `industry_category tidak valid: ${dto.industry_category}`,
+        );
+      }
+    }
+
+    if (dto.monthly_income_range) {
+      const { MONTHLY_INCOME_RANGES } =
+        await import("../references/references.service");
+      if (!MONTHLY_INCOME_RANGES.includes(dto.monthly_income_range)) {
+        throw new BadRequestException(
+          `monthly_income_range tidak valid: ${dto.monthly_income_range}`,
+        );
+      }
+    }
+
+    const validDistributions = [
+      "Aplikasi Digital",
+      "Agen Pihak Ketiga",
+      "Outlet Fisik",
+    ];
+    if (
+      dto.distribution_channel &&
+      !validDistributions.includes(dto.distribution_channel)
+    ) {
+      throw new BadRequestException(
+        `distribution_channel tidak valid: ${dto.distribution_channel}`,
+      );
+    }
+
+    const relType = this.normalizeCifRelationshipType(
+      dto.cif_relationship_type,
+    );
+
+    const regionNames = await this.resolveRegionNames(dto);
+    const effectiveAddressIdentity: string | null =
+      dto.address_identity ||
+      [
+        dto.street_address,
+        dto.house_number ? `No. ${dto.house_number}` : null,
+        dto.rt_rw ? `RT/RW ${dto.rt_rw}` : null,
+        dto.apartment_block,
+        regionNames.village_name,
+        regionNames.district_name,
+        regionNames.city_name,
+        regionNames.province_name,
+        dto.address_landmark ? `Patokan: ${dto.address_landmark}` : null,
+      ]
+        .filter(Boolean)
+        .join(", ") ||
+      null;
+
+    await this.pool.query(
+      `UPDATE persons SET
+          alias = $1,
+          ktp_number = $2,
+          identity_number = COALESCE($3, identity_number),
+          sim_number = $4,
+          passport_number = $5,
+          province_code = $6,
+          province_name = $7,
+          city_code = $8,
+          city_name = $9,
+          district_code = $10,
+          district_name = $11,
+          village_code = $12,
+          village_name = $13,
+          street_address = $14,
+          house_number = $15,
+          rt_rw = $16,
+          apartment_block = $17,
+          address_landmark = $18,
+          address_identity = $19,
+          nationality = $20,
+          occupation = $21,
+          industry_category = $22,
+          company_name = $23,
+          company_address = $24,
+          monthly_income_range = $25,
+          source_of_funds = $26,
+          business_relationship_purpose = $27,
+          distribution_channel = $28
+       WHERE id = $29`,
+      [
+        clean(dto.alias),
+        clean(dto.ktp_number),
+        clean(dto.ktp_number),
+        clean(dto.sim_number),
+        clean(dto.passport_number),
+        clean(dto.province_code),
+        regionNames.province_name,
+        clean(dto.city_code),
+        regionNames.city_name,
+        clean(dto.district_code),
+        regionNames.district_name,
+        clean(dto.village_code),
+        regionNames.village_name,
+        clean(dto.street_address),
+        clean(dto.house_number),
+        clean(dto.rt_rw),
+        clean(dto.apartment_block),
+        clean(dto.address_landmark),
+        effectiveAddressIdentity,
+        clean(dto.nationality),
+        clean(dto.occupation),
+        clean(dto.industry_category),
+        clean(dto.company_name),
+        clean(dto.company_address),
+        clean(dto.monthly_income_range),
+        clean(dto.source_of_funds),
+        clean(dto.business_relationship_purpose),
+        clean(dto.distribution_channel),
+        app.person_id,
+      ],
+    );
+
+    // WIC minimum CDD fields (Tujuan Transaksi & Hubungan dengan Penerima) are
+    // only touched when the PATCH body actually carries the key. Omitting them
+    // must PRESERVE the values saved at create time — otherwise an unrelated
+    // edit on the detail page would wipe them and block WIC submit. An explicit
+    // value (including empty → null) is still honoured when sent.
+    const hasKey = (k: string) =>
+      Object.prototype.hasOwnProperty.call(dto, k);
+    if (hasKey("wic_transaction_purpose")) {
+      await this.pool.query(
+        `UPDATE persons SET wic_transaction_purpose = $1 WHERE id = $2`,
+        [clean(dto.wic_transaction_purpose), app.person_id],
+      );
+    }
+    if (hasKey("wic_recipient_relationship")) {
+      await this.pool.query(
+        `UPDATE persons SET wic_recipient_relationship = $1 WHERE id = $2`,
+        [clean(dto.wic_recipient_relationship), app.person_id],
+      );
+    }
+
+    if (relType === "WIC") {
+      await this.pool.query(
+        `UPDATE persons SET cif_no = NULL, cif_relationship_type = 'WIC' WHERE id = $1`,
+        [app.person_id],
+      );
+    } else {
+      const { rows: personRows } = await this.pool.query(
+        `SELECT identity_number, cif_no FROM persons WHERE id = $1`,
+        [app.person_id],
+      );
+      if (!personRows[0]?.cif_no) {
+        const existingCif = await this.resolveCifForIdentity(
+          personRows[0]?.identity_number,
+        );
+        const cif =
+          existingCif ??
+          (await this.generateIndividualCif(personRows[0]?.identity_number));
+        await this.pool.query(
+          `UPDATE persons SET cif_no = $1, cif_relationship_type = 'OUR_CUSTOMER' WHERE id = $2 AND cif_no IS NULL`,
+          [cif, app.person_id],
+        );
+      } else {
+        await this.pool.query(
+          `UPDATE persons SET cif_relationship_type = 'OUR_CUSTOMER' WHERE id = $1`,
+          [app.person_id],
+        );
+      }
+    }
+
+    return this.getDetail(appId);
   }
 
   async createBusiness(dto: any, userId: number, branchId?: number) {
@@ -599,7 +994,10 @@ export class ApplicationsService {
 
       // Generate CIF — sequence is non-transactional, safe to call outside transaction
       const cif = await this.generateBusinessCif(dto.nib, dto.npwp);
-      await client.query(`UPDATE business_entities SET cif_no = $1 WHERE id = $2`, [cif, businessId]);
+      await client.query(
+        `UPDATE business_entities SET cif_no = $1 WHERE id = $2`,
+        [cif, businessId],
+      );
 
       const appRes = await client.query(
         `INSERT INTO applications (type, status, branch_id, created_by, business_id)
@@ -649,9 +1047,9 @@ export class ApplicationsService {
    */
   private async getBusinessWatchlistStatuses(appId: number) {
     const result = {
-      company_watchlist_status: 'CLEAR',
-      management_watchlist_status: 'CLEAR',
-      shareholder_watchlist_status: 'CLEAR',
+      company_watchlist_status: "CLEAR",
+      management_watchlist_status: "CLEAR",
+      shareholder_watchlist_status: "CLEAR",
     };
 
     const { rows } = await this.pool.query(
@@ -667,25 +1065,27 @@ export class ApplicationsService {
 
     const rank: Record<string, number> = { CLEAR: 0, NEAR_MATCH: 1, MATCH: 2 };
     const classify = (review_status: string) => {
-      if (['FALSE_POSITIVE', 'DISMISSED'].includes(review_status)) return 'CLEAR';
-      return review_status === 'CONFIRMED' ? 'MATCH' : 'NEAR_MATCH';
+      if (["FALSE_POSITIVE", "DISMISSED"].includes(review_status))
+        return "CLEAR";
+      return review_status === "CONFIRMED" ? "MATCH" : "NEAR_MATCH";
     };
     const bump = (key: keyof typeof result, status: string) => {
       if (rank[status] > rank[result[key]]) result[key] = status;
     };
 
-    const MGMT = ['DIRECTOR', 'COMMISSIONER', 'MANAGER', 'AUTHORIZED_REP'];
-    const SHAREHOLDERS = ['SHAREHOLDER', 'BO'];
+    const MGMT = ["DIRECTOR", "COMMISSIONER", "MANAGER", "AUTHORIZED_REP"];
+    const SHAREHOLDERS = ["SHAREHOLDER", "BO"];
 
     for (const r of rows) {
       const status = classify(r.review_status);
-      if (status === 'CLEAR') continue;
-      if (r.subject_type === 'BUSINESS') {
-        bump('company_watchlist_status', status);
-      } else if (r.subject_type === 'PARTY') {
-        if (MGMT.includes(r.role)) bump('management_watchlist_status', status);
-        else if (SHAREHOLDERS.includes(r.role)) bump('shareholder_watchlist_status', status);
-        else bump('management_watchlist_status', status);
+      if (status === "CLEAR") continue;
+      if (r.subject_type === "BUSINESS") {
+        bump("company_watchlist_status", status);
+      } else if (r.subject_type === "PARTY") {
+        if (MGMT.includes(r.role)) bump("management_watchlist_status", status);
+        else if (SHAREHOLDERS.includes(r.role))
+          bump("shareholder_watchlist_status", status);
+        else bump("management_watchlist_status", status);
       }
     }
 
@@ -708,6 +1108,8 @@ export class ApplicationsService {
                 ktp_number, sim_number, passport_number,
                 pob, dob, nationality, phone, email, gender,
                 occupation, industry_category, company_name, company_address, monthly_income_range,
+                source_of_funds, business_relationship_purpose, distribution_channel,
+                wic_transaction_purpose, wic_recipient_relationship,
                 address_identity, address_residential,
                 province_code, province_name, city_code, city_name,
                 district_code, district_name, village_code, village_name,
@@ -789,10 +1191,21 @@ export class ApplicationsService {
       [appId],
     );
     const edd = eddRows[0]
-      ? { edd_required: eddRows[0].edd_required, edd_completed: eddRows[0].edd_completed }
+      ? {
+          edd_required: eddRows[0].edd_required,
+          edd_completed: eddRows[0].edd_completed,
+        }
       : { edd_required: false, edd_completed: false };
 
-    return { application: app, person, business, documents: docs, parties, risk, edd };
+    return {
+      application: app,
+      person,
+      business,
+      documents: docs,
+      parties,
+      risk,
+      edd,
+    };
   }
 
   async validateBeforeSubmit(appId: number) {
@@ -813,20 +1226,72 @@ export class ApplicationsService {
 
     if (app.type === "INDIVIDUAL") {
       const missing: string[] = [];
-      const hasPhotoKtp =
-        docSet.has("INDIVIDUAL_KTP_PHOTO") ||
-        docSet.has("KTP") ||
-        docSet.has("SIM") ||
-        docSet.has("PASPOR");
-      if (!hasPhotoKtp) missing.push("dokumen foto KTP (INDIVIDUAL_KTP_PHOTO)");
-      if (!docSet.has("INDIVIDUAL_FACE_PHOTO"))
-        missing.push("dokumen foto wajah (INDIVIDUAL_FACE_PHOTO)");
-      if (!docSet.has("INDIVIDUAL_FACE_WITH_KTP_PHOTO"))
-        missing.push("dokumen foto wajah dengan KTP (INDIVIDUAL_FACE_WITH_KTP_PHOTO)");
+
+      const { rows: relRows } = await this.pool.query(
+        `SELECT COALESCE(cif_relationship_type, 'OUR_CUSTOMER') AS cif_relationship_type,
+                full_name, identity_type, identity_number, address_identity,
+                pob, dob, wic_transaction_purpose, wic_recipient_relationship
+           FROM persons WHERE id=$1`,
+        [app.person_id],
+      );
+      const person = relRows[0] ?? {};
+      const isWic = person.cif_relationship_type === "WIC";
+
+      if (isWic) {
+        // WIC follows the minimum CDD from the walk-in customer form: identity +
+        // place/date of birth + transaction purpose + recipient relationship, plus
+        // the two WIC documents. It must NOT be blocked by full KYC fields (phone,
+        // nationality, occupation, gender) or the selfie / selfie-with-ID photos.
+        const blank = (v: unknown) =>
+          v === null || v === undefined || String(v).trim().length === 0;
+
+        if (blank(person.full_name)) missing.push("Nama Lengkap");
+        if (blank(person.identity_type) || blank(person.identity_number))
+          missing.push("Nomor Identitas (KTP/SIM/Paspor)");
+        if (blank(person.address_identity))
+          missing.push("Alamat sesuai identitas");
+        if (blank(person.pob) || blank(person.dob))
+          missing.push("Tempat & Tanggal Lahir");
+        if (blank(person.wic_transaction_purpose))
+          missing.push("Tujuan Transaksi");
+        if (blank(person.wic_recipient_relationship))
+          missing.push("Hubungan dengan Penerima");
+
+        const hasIdentityDoc =
+          docSet.has("WIC_IDENTITY_DOCUMENT") ||
+          docSet.has("INDIVIDUAL_KTP_PHOTO") ||
+          docSet.has("KTP") ||
+          docSet.has("SIM") ||
+          docSet.has("PASPOR");
+        const hasSignatureOrBiometric =
+          docSet.has("WIC_SIGNATURE_BIOMETRIC") ||
+          docSet.has("WIC_SIGNATURE") ||
+          docSet.has("SIGNATURE") ||
+          docSet.has("BIOMETRIC");
+
+        if (!hasIdentityDoc) missing.push("Dokumen Identitas WIC");
+        if (!hasSignatureOrBiometric)
+          missing.push("Tanda Tangan / Biometrik WIC");
+      } else {
+        const hasPhotoKtp =
+          docSet.has("INDIVIDUAL_KTP_PHOTO") ||
+          docSet.has("KTP") ||
+          docSet.has("SIM") ||
+          docSet.has("PASPOR");
+        if (!hasPhotoKtp) missing.push("dokumen foto KTP (INDIVIDUAL_KTP_PHOTO)");
+        if (!docSet.has("INDIVIDUAL_FACE_PHOTO"))
+          missing.push("dokumen foto wajah (INDIVIDUAL_FACE_PHOTO)");
+        if (!docSet.has("INDIVIDUAL_FACE_WITH_KTP_PHOTO"))
+          missing.push(
+            "dokumen foto wajah dengan KTP (INDIVIDUAL_FACE_WITH_KTP_PHOTO)",
+          );
+      }
 
       if (missing.length) {
         throw new BadRequestException({
-          message: "INDIVIDUAL belum lengkap untuk submit",
+          message: isWic
+            ? `WIC CDD minimum belum lengkap: ${missing.join(", ")}`
+            : "INDIVIDUAL belum lengkap untuk submit",
           missing,
         });
       }
@@ -838,7 +1303,10 @@ export class ApplicationsService {
       // Legacy alias hanya ada untuk 3 core doc; management/shareholder/BO adalah
       // tipe dokumen baru sehingga tidak punya alias lama.
       const hasAny = (aliases: string[]) => aliases.some((a) => docSet.has(a));
-      const hasDeed = hasAny(["AKTA_PENDIRIAN", "BUSINESS_DEED_ESTABLISHMENT_AMENDMENT"]);
+      const hasDeed = hasAny([
+        "AKTA_PENDIRIAN",
+        "BUSINESS_DEED_ESTABLISHMENT_AMENDMENT",
+      ]);
       const hasLicense = hasAny(["NIB_SIUP", "BUSINESS_LICENSE"]);
       const hasNpwp = hasAny(["NPWP_BADAN", "BUSINESS_NPWP"]);
       const hasManagement = hasAny(["BUSINESS_MANAGEMENT_IDENTITY"]);
@@ -947,13 +1415,26 @@ export class ApplicationsService {
         `SELECT id, full_name AS name, dob::text AS dob, nationality FROM persons WHERE id=$1`,
         [app.person_id],
       );
-      if (p[0]) subjects.push({ subject_type: "INDIVIDUAL", name: p[0].name, dob: p[0].dob, nationality: p[0].nationality, ref: p[0].id });
+      if (p[0])
+        subjects.push({
+          subject_type: "INDIVIDUAL",
+          name: p[0].name,
+          dob: p[0].dob,
+          nationality: p[0].nationality,
+          ref: p[0].id,
+        });
     } else if (app.type === "BUSINESS") {
       const { rows: b } = await this.pool.query(
         `SELECT id, legal_name AS name, country AS nationality FROM business_entities WHERE id=$1`,
         [app.business_id],
       );
-      if (b[0]) subjects.push({ subject_type: "BUSINESS", name: b[0].name, nationality: b[0].nationality || null, ref: b[0].id });
+      if (b[0])
+        subjects.push({
+          subject_type: "BUSINESS",
+          name: b[0].name,
+          nationality: b[0].nationality || null,
+          ref: b[0].id,
+        });
 
       const { rows: parties } = await this.pool.query(
         `SELECT bp.id as party_id, p.full_name as name, p.dob::text as dob, p.nationality
@@ -962,11 +1443,21 @@ export class ApplicationsService {
          WHERE bp.business_id=$1 AND bp.is_active = TRUE`,
         [app.business_id],
       );
-      for (const r of parties) subjects.push({ subject_type: "PARTY", name: r.name, dob: r.dob, nationality: r.nationality, ref: r.party_id });
+      for (const r of parties)
+        subjects.push({
+          subject_type: "PARTY",
+          name: r.name,
+          dob: r.dob,
+          nationality: r.nationality,
+          ref: r.party_id,
+        });
     }
 
     // ── 3. Bersihkan screening lama & jalankan screening baru ──
-    await this.pool.query(`DELETE FROM screening_results WHERE application_id=$1`, [appId]);
+    await this.pool.query(
+      `DELETE FROM screening_results WHERE application_id=$1`,
+      [appId],
+    );
 
     for (const s of subjects) {
       const expr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
@@ -982,8 +1473,7 @@ export class ApplicationsService {
       for (const c of candidates) {
         if (Number(c.score) < SIMILARITY_THRESHOLD) continue;
         // entity_ref CHECK constraint: 'PERSON' | 'BUSINESS' | 'BO'
-        const entityRef =
-          s.subject_type === "BUSINESS" ? "BUSINESS" : "PERSON";
+        const entityRef = s.subject_type === "BUSINESS" ? "BUSINESS" : "PERSON";
 
         await this.pool.query(
           `INSERT INTO screening_results
@@ -991,9 +1481,19 @@ export class ApplicationsService {
               list_type, watchlist_id,
               matched_name, matched_dob, matched_nationality, score)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-          [appId, s.subject_type, entityRef, s.ref || null, s.ref,
-           c.list_type, c.id,
-           c.name, c.date_of_birth || null, c.nationality || null, c.score],
+          [
+            appId,
+            s.subject_type,
+            entityRef,
+            s.ref || null,
+            s.ref,
+            c.list_type,
+            c.id,
+            c.name,
+            c.date_of_birth || null,
+            c.nationality || null,
+            c.score,
+          ],
         );
       }
     }
@@ -1013,12 +1513,17 @@ export class ApplicationsService {
 
     // Derive overall screening status for RBA V01 Name Screening parameter.
     // Rank: MATCH > NEAR_MATCH > CLEAR. Ignored statuses (FALSE_POSITIVE/DISMISSED) count as CLEAR.
-    const _nsRank: Record<string, number> = { CLEAR: 0, NEAR_MATCH: 1, MATCH: 2 };
-    let rbaNameScreeningResult = 'CLEAR';
+    const _nsRank: Record<string, number> = {
+      CLEAR: 0,
+      NEAR_MATCH: 1,
+      MATCH: 2,
+    };
+    let rbaNameScreeningResult = "CLEAR";
     for (const h of hitRows) {
-      if (['FALSE_POSITIVE', 'DISMISSED'].includes(h.review_status)) continue;
-      const s = h.review_status === 'CONFIRMED' ? 'MATCH' : 'NEAR_MATCH';
-      if (_nsRank[s] > _nsRank[rbaNameScreeningResult]) rbaNameScreeningResult = s;
+      if (["FALSE_POSITIVE", "DISMISSED"].includes(h.review_status)) continue;
+      const s = h.review_status === "CONFIRMED" ? "MATCH" : "NEAR_MATCH";
+      if (_nsRank[s] > _nsRank[rbaNameScreeningResult])
+        rbaNameScreeningResult = s;
     }
 
     // ── 5. Faktor: watchlist / sanctions ──
@@ -1033,15 +1538,48 @@ export class ApplicationsService {
       if (h.list_type === "DTTOT") {
         const pts = confirmed ? W.DTTOT_CONFIRMED : W.DTTOT_CANDIDATE;
         score += pts;
-        riskFactors.push({ code: confirmed ? "WATCHLIST_DTTOT_CONFIRMED" : "WATCHLIST_DTTOT_CANDIDATE", label: confirmed ? "DTTOT confirmed match" : "DTTOT candidate match (belum direview)", score: pts, severity: confirmed ? "CRITICAL" : "HIGH", source: "screening", details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}` });
+        riskFactors.push({
+          code: confirmed
+            ? "WATCHLIST_DTTOT_CONFIRMED"
+            : "WATCHLIST_DTTOT_CANDIDATE",
+          label: confirmed
+            ? "DTTOT confirmed match"
+            : "DTTOT candidate match (belum direview)",
+          score: pts,
+          severity: confirmed ? "CRITICAL" : "HIGH",
+          source: "screening",
+          details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}`,
+        });
       } else if (h.list_type === "PPPSPM") {
         const pts = confirmed ? W.PPPSPM_CONFIRMED : W.PPPSPM_CANDIDATE;
         score += pts;
-        riskFactors.push({ code: confirmed ? "WATCHLIST_PPPSPM_CONFIRMED" : "WATCHLIST_PPPSPM_CANDIDATE", label: confirmed ? "PPPSPM confirmed match" : "PPPSPM candidate match (belum direview)", score: pts, severity: confirmed ? "CRITICAL" : "HIGH", source: "screening", details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}` });
+        riskFactors.push({
+          code: confirmed
+            ? "WATCHLIST_PPPSPM_CONFIRMED"
+            : "WATCHLIST_PPPSPM_CANDIDATE",
+          label: confirmed
+            ? "PPPSPM confirmed match"
+            : "PPPSPM candidate match (belum direview)",
+          score: pts,
+          severity: confirmed ? "CRITICAL" : "HIGH",
+          source: "screening",
+          details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}`,
+        });
       } else if (h.list_type === "PEP") {
         const pts = confirmed ? W.PEP_CONFIRMED : W.PEP_CANDIDATE;
         score += pts;
-        riskFactors.push({ code: confirmed ? "WATCHLIST_PEP_CONFIRMED" : "WATCHLIST_PEP_CANDIDATE", label: confirmed ? "PEP confirmed match" : "PEP candidate match (belum direview)", score: pts, severity: confirmed ? "HIGH" : "MEDIUM", source: "screening", details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}` });
+        riskFactors.push({
+          code: confirmed
+            ? "WATCHLIST_PEP_CONFIRMED"
+            : "WATCHLIST_PEP_CANDIDATE",
+          label: confirmed
+            ? "PEP confirmed match"
+            : "PEP candidate match (belum direview)",
+          score: pts,
+          severity: confirmed ? "HIGH" : "MEDIUM",
+          source: "screening",
+          details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}`,
+        });
       }
     }
 
@@ -1055,28 +1593,51 @@ export class ApplicationsService {
 
       if (p.pep_self_declared) {
         score += W.PEP_SELF_DECLARED;
-        riskFactors.push({ code: "INDIVIDUAL_PEP_SELF_DECLARED", label: "PEP self-declared oleh pemohon", score: W.PEP_SELF_DECLARED, severity: "HIGH", source: "profile" });
+        riskFactors.push({
+          code: "INDIVIDUAL_PEP_SELF_DECLARED",
+          label: "PEP self-declared oleh pemohon",
+          score: W.PEP_SELF_DECLARED,
+          severity: "HIGH",
+          source: "profile",
+        });
       }
 
       const occ = (p.occupation || "").toLowerCase();
       const matchedOcc = HIGH_RISK_OCCUPATIONS.find((k) => occ.includes(k));
       if (matchedOcc) {
         score += W.HIGH_RISK_OCCUPATION;
-        riskFactors.push({ code: "INDIVIDUAL_HIGH_RISK_OCCUPATION", label: "Pekerjaan berisiko tinggi", score: W.HIGH_RISK_OCCUPATION, severity: "MEDIUM", source: "profile", details: `Pekerjaan: ${p.occupation}` });
+        riskFactors.push({
+          code: "INDIVIDUAL_HIGH_RISK_OCCUPATION",
+          label: "Pekerjaan berisiko tinggi",
+          score: W.HIGH_RISK_OCCUPATION,
+          severity: "MEDIUM",
+          source: "profile",
+          details: `Pekerjaan: ${p.occupation}`,
+        });
       }
 
       if (RBA_OCCUPATION_GEOGRAPHY_ENABLED) {
         // ── RBA: profil pekerjaan (occupation risk) ──
         const occNorm = (p.occupation || "").trim().toLowerCase();
-        const rbaOcc = RBA_OCCUPATION_MAP.find(e => occNorm.includes(e.name));
+        const rbaOcc = RBA_OCCUPATION_MAP.find((e) => occNorm.includes(e.name));
         if (rbaOcc) {
-          const pts = rbaOcc.risk === "HIGH" ? W.RBA_OCC_HIGH : rbaOcc.risk === "MEDIUM" ? W.RBA_OCC_MEDIUM : 0;
+          const pts =
+            rbaOcc.risk === "HIGH"
+              ? W.RBA_OCC_HIGH
+              : rbaOcc.risk === "MEDIUM"
+                ? W.RBA_OCC_MEDIUM
+                : 0;
           score += pts;
           riskFactors.push({
             code: `INDIVIDUAL_OCCUPATION_${rbaOcc.risk}_RBA`,
             label: `Profil pekerjaan ${rbaOcc.risk.toLowerCase()} risk (RBA)`,
             score: pts,
-            severity: rbaOcc.risk === "HIGH" ? "HIGH" : rbaOcc.risk === "MEDIUM" ? "MEDIUM" : "LOW",
+            severity:
+              rbaOcc.risk === "HIGH"
+                ? "HIGH"
+                : rbaOcc.risk === "MEDIUM"
+                  ? "MEDIUM"
+                  : "LOW",
             source: "rba_occupation",
             metadata: { matched: rbaOcc.name, source: "occupation" },
           });
@@ -1084,20 +1645,32 @@ export class ApplicationsService {
 
         // ── RBA: area geografis domisili (address risk) ──
         const addrIdent = (p.address_identity || "").trim().toLowerCase();
-        const addrResi  = (p.address_residential || "").trim().toLowerCase();
-        const addrText  = `${addrIdent} ${addrResi}`.trim();
-        const rbaGeo = RBA_GEOGRAPHY_MAP.find(e => addrText.includes(e.name));
+        const addrResi = (p.address_residential || "").trim().toLowerCase();
+        const addrText = `${addrIdent} ${addrResi}`.trim();
+        const rbaGeo = RBA_GEOGRAPHY_MAP.find((e) => addrText.includes(e.name));
         if (rbaGeo) {
-          const pts = rbaGeo.risk === "HIGH" ? W.RBA_GEO_HIGH : rbaGeo.risk === "MEDIUM" ? W.RBA_GEO_MEDIUM : 0;
+          const pts =
+            rbaGeo.risk === "HIGH"
+              ? W.RBA_GEO_HIGH
+              : rbaGeo.risk === "MEDIUM"
+                ? W.RBA_GEO_MEDIUM
+                : 0;
           score += pts;
-          const geoSource = addrIdent.includes(rbaGeo.name) ? "address_identity"
-            : addrResi.includes(rbaGeo.name) ? "address_residential"
-            : "address";
+          const geoSource = addrIdent.includes(rbaGeo.name)
+            ? "address_identity"
+            : addrResi.includes(rbaGeo.name)
+              ? "address_residential"
+              : "address";
           riskFactors.push({
             code: `GEOGRAPHY_${rbaGeo.risk}_RBA`,
             label: `Area geografis ${rbaGeo.risk.toLowerCase()} risk berdasarkan RBA`,
             score: pts,
-            severity: rbaGeo.risk === "HIGH" ? "HIGH" : rbaGeo.risk === "MEDIUM" ? "MEDIUM" : "LOW",
+            severity:
+              rbaGeo.risk === "HIGH"
+                ? "HIGH"
+                : rbaGeo.risk === "MEDIUM"
+                  ? "MEDIUM"
+                  : "LOW",
             source: "rba_geography",
             metadata: { matched: rbaGeo.name, source: geoSource },
           });
@@ -1107,7 +1680,14 @@ export class ApplicationsService {
       const nat = (p.nationality || "").toUpperCase();
       if (HIGH_RISK_COUNTRIES.length && HIGH_RISK_COUNTRIES.includes(nat)) {
         score += W.GEOGRAPHY;
-        riskFactors.push({ code: "GEOGRAPHY_HIGH_RISK_NATIONALITY", label: "Kewarganegaraan negara berisiko tinggi", score: W.GEOGRAPHY, severity: "MEDIUM", source: "geography", details: `Nationality: ${nat}` });
+        riskFactors.push({
+          code: "GEOGRAPHY_HIGH_RISK_NATIONALITY",
+          label: "Kewarganegaraan negara berisiko tinggi",
+          score: W.GEOGRAPHY,
+          severity: "MEDIUM",
+          source: "geography",
+          details: `Nationality: ${nat}`,
+        });
       }
     }
 
@@ -1123,13 +1703,27 @@ export class ApplicationsService {
       const matchedAct = HIGH_RISK_ACTIVITIES.find((k) => activity.includes(k));
       if (matchedAct) {
         score += W.HIGH_RISK_ACTIVITY;
-        riskFactors.push({ code: "BUSINESS_HIGH_RISK_ACTIVITY", label: "Kegiatan usaha berisiko tinggi", score: W.HIGH_RISK_ACTIVITY, severity: "MEDIUM", source: "profile", details: `Kegiatan: ${biz.business_activity}` });
+        riskFactors.push({
+          code: "BUSINESS_HIGH_RISK_ACTIVITY",
+          label: "Kegiatan usaha berisiko tinggi",
+          score: W.HIGH_RISK_ACTIVITY,
+          severity: "MEDIUM",
+          source: "profile",
+          details: `Kegiatan: ${biz.business_activity}`,
+        });
       }
 
       const lf = (biz.legal_form || "").toUpperCase();
       if (HIGH_RISK_LEGAL_FORMS.some((f) => lf.includes(f))) {
         score += W.HIGH_RISK_LEGAL_FORM;
-        riskFactors.push({ code: "BUSINESS_HIGH_RISK_LEGAL_FORM", label: "Bentuk hukum berisiko tinggi", score: W.HIGH_RISK_LEGAL_FORM, severity: "LOW", source: "profile", details: `Bentuk hukum: ${biz.legal_form}` });
+        riskFactors.push({
+          code: "BUSINESS_HIGH_RISK_LEGAL_FORM",
+          label: "Bentuk hukum berisiko tinggi",
+          score: W.HIGH_RISK_LEGAL_FORM,
+          severity: "LOW",
+          source: "profile",
+          details: `Bentuk hukum: ${biz.legal_form}`,
+        });
       }
 
       const { rows: boRows } = await this.pool.query(
@@ -1138,13 +1732,26 @@ export class ApplicationsService {
       );
       if (!boRows.length) {
         score += W.BO_MISSING;
-        riskFactors.push({ code: "BUSINESS_BO_MISSING", label: "Beneficial Owner (BO) belum terdaftar", score: W.BO_MISSING, severity: "HIGH", source: "profile" });
+        riskFactors.push({
+          code: "BUSINESS_BO_MISSING",
+          label: "Beneficial Owner (BO) belum terdaftar",
+          score: W.BO_MISSING,
+          severity: "HIGH",
+          source: "profile",
+        });
       }
 
       const country = (biz.country || "").toUpperCase();
       if (HIGH_RISK_COUNTRIES.length && HIGH_RISK_COUNTRIES.includes(country)) {
         score += W.GEOGRAPHY;
-        riskFactors.push({ code: "GEOGRAPHY_HIGH_RISK_COUNTRY", label: "Negara asal/domisili bisnis berisiko tinggi", score: W.GEOGRAPHY, severity: "MEDIUM", source: "geography", details: `Country: ${country}` });
+        riskFactors.push({
+          code: "GEOGRAPHY_HIGH_RISK_COUNTRY",
+          label: "Negara asal/domisili bisnis berisiko tinggi",
+          score: W.GEOGRAPHY,
+          severity: "MEDIUM",
+          source: "geography",
+          details: `Country: ${country}`,
+        });
       }
     }
 
@@ -1156,22 +1763,45 @@ export class ApplicationsService {
     const docTypes = new Set(docRows.map((d: any) => d.doc_type as string));
 
     if (app.type === "INDIVIDUAL") {
-      if (!["INDIVIDUAL_KTP_PHOTO", "KTP", "SIM", "PASPOR"].some((d) => docTypes.has(d))) {
+      if (
+        !["INDIVIDUAL_KTP_PHOTO", "KTP", "SIM", "PASPOR"].some((d) =>
+          docTypes.has(d),
+        )
+      ) {
         score += W.DOC_MISSING;
-        riskFactors.push({ code: "DOC_IDENTITY_MISSING", label: "Dokumen identitas belum diunggah", score: W.DOC_MISSING, severity: "MEDIUM", source: "document" });
+        riskFactors.push({
+          code: "DOC_IDENTITY_MISSING",
+          label: "Dokumen identitas belum diunggah",
+          score: W.DOC_MISSING,
+          severity: "MEDIUM",
+          source: "document",
+        });
       }
     } else {
       for (const req of ["AKTA_PENDIRIAN", "NIB_SIUP", "NPWP_BADAN"]) {
         if (!docTypes.has(req)) {
           score += W.DOC_MISSING;
-          riskFactors.push({ code: `DOC_${req}_MISSING`, label: `Dokumen wajib belum ada: ${req}`, score: W.DOC_MISSING, severity: "MEDIUM", source: "document" });
+          riskFactors.push({
+            code: `DOC_${req}_MISSING`,
+            label: `Dokumen wajib belum ada: ${req}`,
+            score: W.DOC_MISSING,
+            severity: "MEDIUM",
+            source: "document",
+          });
         }
       }
     }
 
     for (const doc of docRows.filter((d: any) => d.status === "REJECTED")) {
       score += W.DOC_REJECTED;
-      riskFactors.push({ code: "DOC_REJECTED", label: "Dokumen ditolak", score: W.DOC_REJECTED, severity: "MEDIUM", source: "document", details: `Tipe: ${doc.doc_type}` });
+      riskFactors.push({
+        code: "DOC_REJECTED",
+        label: "Dokumen ditolak",
+        score: W.DOC_REJECTED,
+        severity: "MEDIUM",
+        source: "document",
+        details: `Tipe: ${doc.doc_type}`,
+      });
     }
 
     // ── 9. Faktor netral: channel onboarding ──
@@ -1181,7 +1811,8 @@ export class ApplicationsService {
       score: 0,
       severity: "INFO",
       source: "channel",
-      details: "Diasumsikan offline direct; kolom onboarding_channel belum ada di schema",
+      details:
+        "Diasumsikan offline direct; kolom onboarding_channel belum ada di schema",
     });
 
     // ── 10. Cap 0..100, tentukan level ──
@@ -1200,18 +1831,25 @@ export class ApplicationsService {
 
     // ── 11. Legacy factors (backward compat untuk kolom factors) ──
     const hitSummary = hitRows
-      .filter((h: any) => !["FALSE_POSITIVE", "DISMISSED"].includes(h.review_status))
-      .reduce((acc: any, h: any) => {
-        if (h.list_type === "PEP") acc.pep += h.cnt;
-        if (h.list_type === "DTTOT") acc.dttot += h.cnt;
-        if (h.list_type === "PPPSPM") acc.pppspm += h.cnt;
-        return acc;
-      }, { pep: 0, dttot: 0, pppspm: 0 });
+      .filter(
+        (h: any) => !["FALSE_POSITIVE", "DISMISSED"].includes(h.review_status),
+      )
+      .reduce(
+        (acc: any, h: any) => {
+          if (h.list_type === "PEP") acc.pep += h.cnt;
+          if (h.list_type === "DTTOT") acc.dttot += h.cnt;
+          if (h.list_type === "PPPSPM") acc.pppspm += h.cnt;
+          return acc;
+        },
+        { pep: 0, dttot: 0, pppspm: 0 },
+      );
 
     const factors = {
       version: "rba_v2",
       hits: hitSummary,
-      score_breakdown: riskFactors.filter((f) => f.score > 0).map((f) => ({ code: f.code, score: f.score })),
+      score_breakdown: riskFactors
+        .filter((f) => f.score > 0)
+        .map((f) => ({ code: f.code, score: f.score })),
       threshold: SIMILARITY_THRESHOLD,
     };
 
@@ -1228,14 +1866,15 @@ export class ApplicationsService {
         );
         const rp = rbaP[0] ?? {};
         rbaInput = {
-          type: 'INDIVIDUAL',
-          occupation:                   rp.occupation ?? null,
-          source_of_funds:              rp.source_of_funds ?? null,
-          industry_category:            rp.industry_category ?? null,
-          business_relationship_purpose: rp.business_relationship_purpose ?? null,
-          province_name:                rp.province_name ?? null,
-          distribution_channel:         rp.distribution_channel ?? null,
-          name_screening_result:        rbaNameScreeningResult,
+          type: "INDIVIDUAL",
+          occupation: rp.occupation ?? null,
+          source_of_funds: rp.source_of_funds ?? null,
+          industry_category: rp.industry_category ?? null,
+          business_relationship_purpose:
+            rp.business_relationship_purpose ?? null,
+          province_name: rp.province_name ?? null,
+          distribution_channel: rp.distribution_channel ?? null,
+          name_screening_result: rbaNameScreeningResult,
         };
       } else {
         const { rows: rbaB } = await this.pool.query(
@@ -1246,28 +1885,34 @@ export class ApplicationsService {
         );
         const rb = rbaB[0] ?? {};
         rbaInput = {
-          type: 'BUSINESS',
-          legal_form:                   rb.legal_form ?? null,
-          source_of_funds:              rb.source_of_funds ?? null,
-          industry_category:            rb.industry_category ?? null,
-          business_relationship_purpose: rb.business_relationship_purpose ?? null,
-          province:                     rb.province ?? null,
-          distribution_channel:         rb.distribution_channel ?? null,
-          name_screening_result:        rbaNameScreeningResult,
+          type: "BUSINESS",
+          legal_form: rb.legal_form ?? null,
+          source_of_funds: rb.source_of_funds ?? null,
+          industry_category: rb.industry_category ?? null,
+          business_relationship_purpose:
+            rb.business_relationship_purpose ?? null,
+          province: rb.province ?? null,
+          distribution_channel: rb.distribution_channel ?? null,
+          name_screening_result: rbaNameScreeningResult,
         };
       }
       rbaResult = computeRbaV01(rbaInput);
     } catch (e: any) {
-      this.logger.warn(`RBA V01 compute failed for app ${appId}: ${e?.message}`);
+      this.logger.warn(
+        `RBA V01 compute failed for app ${appId}: ${e?.message}`,
+      );
     }
 
     // ── 13. Simpan ke DB ──────────────────────────────────────────────────────
-    const finalRiskScore = rbaResult?.rba_calculation_status === 'COMPLETE' && rbaResult.rba_score_v01 !== null
-      ? Math.round((rbaResult.rba_score_v01 / 3) * 100)
-      : score;
-    const finalRiskLevel = rbaResult?.rba_calculation_status === 'COMPLETE' && rbaResult.risk_level
-      ? rbaResult.risk_level
-      : risk_level;
+    const finalRiskScore =
+      rbaResult?.rba_calculation_status === "COMPLETE" &&
+      rbaResult.rba_score_v01 !== null
+        ? Math.round((rbaResult.rba_score_v01 / 3) * 100)
+        : score;
+    const finalRiskLevel =
+      rbaResult?.rba_calculation_status === "COMPLETE" && rbaResult.risk_level
+        ? rbaResult.risk_level
+        : risk_level;
 
     await this.pool.query(
       `INSERT INTO application_risk
@@ -1287,11 +1932,14 @@ export class ApplicationsService {
          rba_components            = EXCLUDED.rba_components,
          created_at                = now()`,
       [
-        appId, finalRiskScore, finalRiskLevel,
-        JSON.stringify(factors), JSON.stringify(riskFactors),
-        rbaResult?.rba_version ?? 'RBA_V01',
+        appId,
+        finalRiskScore,
+        finalRiskLevel,
+        JSON.stringify(factors),
+        JSON.stringify(riskFactors),
+        rbaResult?.rba_version ?? "RBA_V01",
         rbaResult?.rba_score_v01 ?? null,
-        rbaResult?.rba_calculation_status ?? 'INCOMPLETE',
+        rbaResult?.rba_calculation_status ?? "INCOMPLETE",
         JSON.stringify(rbaResult?.rba_unmapped_parameters ?? []),
         JSON.stringify(rbaResult?.rba_components ?? {}),
       ],
@@ -1302,9 +1950,9 @@ export class ApplicationsService {
       risk_level: finalRiskLevel,
       factors,
       risk_factors: riskFactors,
-      rba_version: rbaResult?.rba_version ?? 'RBA_V01',
+      rba_version: rbaResult?.rba_version ?? "RBA_V01",
       rba_score_v01: rbaResult?.rba_score_v01 ?? null,
-      rba_calculation_status: rbaResult?.rba_calculation_status ?? 'INCOMPLETE',
+      rba_calculation_status: rbaResult?.rba_calculation_status ?? "INCOMPLETE",
       rba_unmapped_parameters: rbaResult?.rba_unmapped_parameters ?? [],
       rba_components: rbaResult?.rba_components ?? {},
     };
@@ -1352,7 +2000,9 @@ export class ApplicationsService {
 
     // Normalise KTP number (strip non-digits) consistent with createIndividual
     if (dto.identity_type === "KTP")
-      dto.identity_number = (dto.identity_number || "").replace(/\D+/g, "").trim();
+      dto.identity_number = (dto.identity_number || "")
+        .replace(/\D+/g, "")
+        .trim();
 
     // cari existing person by (identity_type, identity_number)
     const { rows: existing } = await this.pool.query(
@@ -1556,16 +2206,18 @@ export class ApplicationsService {
     );
   }
 
-  async list(query: {
-    q?: string;
-    cif?: string;
-    date_from?: string;
-    date_to?: string;
-    application_type?: 'INDIVIDUAL' | 'BUSINESS';
-    status?: string;
-    page?: number;
-    limit?: number;
-  } = {}) {
+  async list(
+    query: {
+      q?: string;
+      cif?: string;
+      date_from?: string;
+      date_to?: string;
+      application_type?: "INDIVIDUAL" | "BUSINESS";
+      status?: string;
+      page?: number;
+      limit?: number;
+    } = {},
+  ) {
     const {
       q,
       cif,
@@ -1598,11 +2250,13 @@ export class ApplicationsService {
 
     if (date_to) {
       params.push(date_to);
-      conditions.push(`a.created_at < ($${params.length}::date + interval '1 day')`);
+      conditions.push(
+        `a.created_at < ($${params.length}::date + interval '1 day')`,
+      );
     }
 
     if (cif) {
-      const normalizedCif = cif.replace(/-/g, '').toUpperCase();
+      const normalizedCif = cif.replace(/-/g, "").toUpperCase();
       params.push(normalizedCif);
       const idx = params.length;
       conditions.push(
@@ -1612,7 +2266,7 @@ export class ApplicationsService {
 
     if (q) {
       const pattern = `%${q}%`;
-      const cifPattern = `%${q.replace(/-/g, '')}%`;
+      const cifPattern = `%${q.replace(/-/g, "")}%`;
       params.push(pattern);
       const pi = params.length;
       params.push(cifPattern);
@@ -1629,7 +2283,8 @@ export class ApplicationsService {
       )`);
     }
 
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const baseJoin = `
       FROM applications a
@@ -1648,7 +2303,8 @@ export class ApplicationsService {
           a.created_at,
           a.updated_at,
           COALESCE(ar.override_level, ar.risk_level) AS risk_level,
-          CASE WHEN a.type = 'INDIVIDUAL' THEN p.cif_no ELSE b.cif_no END AS cif_no,
+          CASE WHEN a.type = 'INDIVIDUAL' AND p.cif_relationship_type = 'WIC' THEN NULL WHEN a.type = 'INDIVIDUAL' THEN p.cif_no ELSE b.cif_no END AS cif_no,
+          CASE WHEN a.type = 'INDIVIDUAL' THEN p.cif_relationship_type ELSE 'OUR_CUSTOMER' END AS cif_relationship_type,
           CASE WHEN a.type = 'INDIVIDUAL' THEN p.full_name ELSE b.legal_name END AS display_name,
           CASE WHEN a.type = 'INDIVIDUAL' THEN 'Individual' ELSE 'Badan Usaha' END AS display_type
         ${baseJoin}
@@ -1798,7 +2454,7 @@ export class ApplicationsService {
       `SELECT type FROM applications WHERE id=$1`,
       [appId],
     );
-    if (!rows[0]) throw new NotFoundException('Application not found');
+    if (!rows[0]) throw new NotFoundException("Application not found");
     return rows[0].type as string;
   }
 
@@ -1857,15 +2513,30 @@ export class ApplicationsService {
     );
     const curr = existing[0];
 
+    const { rows: riskRowsForEdd } = await this.pool.query(
+      `SELECT COALESCE(override_level, risk_level) AS effective_level
+       FROM application_risk WHERE application_id=$1`,
+      [appId],
+    );
+    const eddRequired =
+      Boolean(curr?.edd_required) ||
+      riskRowsForEdd[0]?.effective_level === "HIGH";
+
     const merged = {
-      applicant_snapshot:     body.applicant_snapshot     ?? curr?.applicant_snapshot     ?? {},
-      high_risk_reasons:      body.high_risk_reasons      ?? curr?.high_risk_reasons      ?? {},
-      additional_information: body.additional_information ?? curr?.additional_information ?? {},
-      beneficial_owner:       body.beneficial_owner       ?? curr?.beneficial_owner       ?? {},
-      officer_analysis:       body.officer_analysis       ?? curr?.officer_analysis       ?? {},
-      compliance_decision:    body.compliance_decision    ?? curr?.compliance_decision    ?? {},
-      director_decision:      body.director_decision      ?? curr?.director_decision      ?? {},
-      internal_checklist:     body.internal_checklist     ?? curr?.internal_checklist     ?? {},
+      applicant_snapshot:
+        body.applicant_snapshot ?? curr?.applicant_snapshot ?? {},
+      high_risk_reasons:
+        body.high_risk_reasons ?? curr?.high_risk_reasons ?? {},
+      additional_information:
+        body.additional_information ?? curr?.additional_information ?? {},
+      beneficial_owner: body.beneficial_owner ?? curr?.beneficial_owner ?? {},
+      officer_analysis: body.officer_analysis ?? curr?.officer_analysis ?? {},
+      compliance_decision:
+        body.compliance_decision ?? curr?.compliance_decision ?? {},
+      director_decision:
+        body.director_decision ?? curr?.director_decision ?? {},
+      internal_checklist:
+        body.internal_checklist ?? curr?.internal_checklist ?? {},
     };
 
     if (complete) this.validateEddCompletion(merged);
@@ -1877,7 +2548,7 @@ export class ApplicationsService {
           beneficial_owner, officer_analysis, compliance_decision,
           director_decision, internal_checklist,
           completed_by, completed_at, created_by, updated_by, created_at, updated_at)
-       VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+       VALUES ($1, $14, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                $11, $12, $13, $13, now(), now())
        ON CONFLICT (application_id) DO UPDATE SET
          edd_completed          = CASE WHEN $2 THEN true ELSE application_edd.edd_completed END,
@@ -1907,6 +2578,7 @@ export class ApplicationsService {
         complete ? userId : null,
         complete ? new Date().toISOString() : null,
         userId,
+        eddRequired,
       ],
     );
 
@@ -1915,24 +2587,36 @@ export class ApplicationsService {
 
   private validateEddCompletion(merged: any) {
     const errors: string[] = [];
-    const snapshot   = merged.applicant_snapshot     ?? {};
-    const hr         = merged.high_risk_reasons      ?? {};
-    const addInfo    = merged.additional_information ?? {};
-    const officer    = merged.officer_analysis       ?? {};
-    const compliance = merged.compliance_decision    ?? {};
-    const checklist  = merged.internal_checklist     ?? {};
+    const snapshot = merged.applicant_snapshot ?? {};
+    const hr = merged.high_risk_reasons ?? {};
+    const addInfo = merged.additional_information ?? {};
+    const officer = merged.officer_analysis ?? {};
+    const compliance = merged.compliance_decision ?? {};
+    const checklist = merged.internal_checklist ?? {};
 
     if (!snapshot.full_name && !snapshot.cdd_reference_no)
-      errors.push("applicant_snapshot: full_name atau cdd_reference_no wajib diisi");
+      errors.push(
+        "applicant_snapshot: full_name atau cdd_reference_no wajib diisi",
+      );
 
-    const hrCats = ["customer_characteristics", "transaction_patterns", "screening_results", "clarification_requests"];
+    const hrCats = [
+      "customer_characteristics",
+      "transaction_patterns",
+      "screening_results",
+      "clarification_requests",
+    ];
     if (!hrCats.some((c) => Array.isArray(hr[c]) && hr[c].length > 0))
-      errors.push("high_risk_reasons: minimal 1 kategori dengan minimal 1 alasan");
+      errors.push(
+        "high_risk_reasons: minimal 1 kategori dengan minimal 1 alasan",
+      );
 
     if (!officer.overall_risk_summary)
       errors.push("officer_analysis.overall_risk_summary wajib diisi");
 
-    if (!Array.isArray(officer.follow_up_recommendations) || officer.follow_up_recommendations.length === 0)
+    if (
+      !Array.isArray(officer.follow_up_recommendations) ||
+      officer.follow_up_recommendations.length === 0
+    )
       errors.push("officer_analysis.follow_up_recommendations minimal 1 item");
 
     if (!compliance.decision)
@@ -1941,29 +2625,65 @@ export class ApplicationsService {
     if (!checklist.edd_form_completed)
       errors.push("internal_checklist.edd_form_completed harus true");
 
-    if (officer.cdd_edd_consistency === "NOT_CONSISTENT" && !officer.consistency_notes)
-      errors.push("officer_analysis.consistency_notes wajib diisi jika cdd_edd_consistency = NOT_CONSISTENT");
+    if (
+      officer.cdd_edd_consistency === "NOT_CONSISTENT" &&
+      !officer.consistency_notes
+    )
+      errors.push(
+        "officer_analysis.consistency_notes wajib diisi jika cdd_edd_consistency = NOT_CONSISTENT",
+      );
 
-    if (officer.transaction_profile_reasonableness === "NOT_REASONABLE" && !officer.transaction_notes)
-      errors.push("officer_analysis.transaction_notes wajib diisi jika transaction_profile_reasonableness = NOT_REASONABLE");
+    if (
+      officer.transaction_profile_reasonableness === "NOT_REASONABLE" &&
+      !officer.transaction_notes
+    )
+      errors.push(
+        "officer_analysis.transaction_notes wajib diisi jika transaction_profile_reasonableness = NOT_REASONABLE",
+      );
 
-    if (officer.occupation_source_funds_wealth_assessment === "NOT_ADEQUATE" && !officer.source_funds_wealth_notes)
-      errors.push("officer_analysis.source_funds_wealth_notes wajib diisi jika occupation_source_funds_wealth_assessment = NOT_ADEQUATE");
+    if (
+      officer.occupation_source_funds_wealth_assessment === "NOT_ADEQUATE" &&
+      !officer.source_funds_wealth_notes
+    )
+      errors.push(
+        "officer_analysis.source_funds_wealth_notes wajib diisi jika occupation_source_funds_wealth_assessment = NOT_ADEQUATE",
+      );
 
     const relPurpose = addInfo.relationship_or_transaction_purpose;
-    if (Array.isArray(relPurpose) && relPurpose.includes("OTHER") && !addInfo.relationship_or_transaction_purpose_other)
-      errors.push("additional_information.relationship_or_transaction_purpose_other wajib diisi jika OTHER dipilih");
+    if (
+      Array.isArray(relPurpose) &&
+      relPurpose.includes("OTHER") &&
+      !addInfo.relationship_or_transaction_purpose_other
+    )
+      errors.push(
+        "additional_information.relationship_or_transaction_purpose_other wajib diisi jika OTHER dipilih",
+      );
 
     const srcFunds = addInfo.source_of_funds;
-    if (Array.isArray(srcFunds) && srcFunds.includes("OTHER") && !addInfo.source_of_funds_other)
-      errors.push("additional_information.source_of_funds_other wajib diisi jika OTHER dipilih");
+    if (
+      Array.isArray(srcFunds) &&
+      srcFunds.includes("OTHER") &&
+      !addInfo.source_of_funds_other
+    )
+      errors.push(
+        "additional_information.source_of_funds_other wajib diisi jika OTHER dipilih",
+      );
 
     const wealth = addInfo.wealth_information;
-    if (Array.isArray(wealth) && wealth.includes("OTHER") && !addInfo.wealth_information_other)
-      errors.push("additional_information.wealth_information_other wajib diisi jika OTHER dipilih");
+    if (
+      Array.isArray(wealth) &&
+      wealth.includes("OTHER") &&
+      !addInfo.wealth_information_other
+    )
+      errors.push(
+        "additional_information.wealth_information_other wajib diisi jika OTHER dipilih",
+      );
 
     if (errors.length)
-      throw new BadRequestException({ message: "EDD belum memenuhi syarat untuk diselesaikan", errors });
+      throw new BadRequestException({
+        message: "EDD belum memenuhi syarat untuk diselesaikan",
+        errors,
+      });
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -1989,30 +2709,60 @@ export class ApplicationsService {
       );
     }
 
-    // OperationSupervisor hanya boleh memutuskan aplikasi LOW/MEDIUM risk.
-    // HIGH risk hanya untuk ComplianceLead (atau SystemAdmin/Director via guard bypass).
+    // Approval matrix berdasarkan hasil profiling risk:
+    // LOW/MEDIUM  → hanya Operation Supervisor.
+    // HIGH        → EDD diisi Frontline, approval hanya Lead Compliance.
+    // SystemAdmin/Director tetap full-access via guard bypass.
     const fullAccessRoles = ["SystemAdmin", "Director"];
-    if (user.role === "OperationSupervisor") {
-      const { rows: riskRows } = await this.pool.query(
+    let { rows: riskRows } = await this.pool.query(
+      `SELECT COALESCE(override_level, risk_level) AS effective_level
+       FROM application_risk WHERE application_id=$1`,
+      [appId],
+    );
+
+    if (!riskRows[0]?.effective_level) {
+      await this.screenAndComputeRisk(appId);
+      ({ rows: riskRows } = await this.pool.query(
         `SELECT COALESCE(override_level, risk_level) AS effective_level
          FROM application_risk WHERE application_id=$1`,
         [appId],
+      ));
+    }
+
+    const effectiveLevel = riskRows[0]?.effective_level as
+      "LOW" | "MEDIUM" | "HIGH" | undefined;
+    const isFullAccessRole = fullAccessRoles.includes(user.role);
+
+    if (!effectiveLevel) {
+      throw new BadRequestException(
+        "Risk profiling belum lengkap. Jalankan pra-pemeriksaan atau submit ulang aplikasi terlebih dahulu.",
       );
-      const effectiveLevel = riskRows[0]?.effective_level;
-      if (effectiveLevel === "HIGH") {
+    }
+
+    if (!isFullAccessRole) {
+      if (
+        user.role === "OperationSupervisor" &&
+        !["LOW", "MEDIUM"].includes(effectiveLevel)
+      ) {
         throw new ForbiddenException(
           "KYC/KYB high risk hanya dapat diputuskan oleh Lead Compliance.",
+        );
+      }
+
+      if (user.role === "ComplianceLead" && effectiveLevel !== "HIGH") {
+        throw new ForbiddenException(
+          "KYC/KYB low/medium risk hanya dapat diputuskan oleh Operation Supervisor.",
         );
       }
     }
 
     if (decision === "APPROVED") {
-      // Blokir jika EDD wajib tapi belum selesai (HIGH RISK)
+      // HIGH RISK wajib memiliki EDD lengkap sebelum approval Lead Compliance.
       const { rows: eddRows } = await this.pool.query(
         `SELECT edd_required, edd_completed FROM application_edd WHERE application_id=$1`,
         [appId],
       );
-      if (eddRows[0]?.edd_required && !eddRows[0]?.edd_completed) {
+      if (effectiveLevel === "HIGH" && !eddRows[0]?.edd_completed) {
         throw new BadRequestException(
           "Application HIGH RISK wajib memiliki EDD lengkap sebelum disetujui.",
         );

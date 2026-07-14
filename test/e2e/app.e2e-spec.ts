@@ -778,10 +778,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.message).toContain('DRAFT');
     });
 
-    it('E-02: Decision APPROVE pada app SUBMITTED → 200 APPROVED', async () => {
+    it('E-02: OperationSupervisor APPROVE pada app SUBMITTED LOW/MEDIUM → 200 APPROVED', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${indivAppIdOk}/decision`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'APPROVED', reason: 'Semua dokumen lengkap dan valid' })
         .expect(200);
 
@@ -837,7 +837,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${rejectAppId}/decision`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'REJECTED', reason: 'Data tidak sesuai' })
         .expect(200);
 
@@ -976,14 +976,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body).toBeDefined();
     });
 
-    it('E-08: ComplianceLead reject KYC → 200 REJECTED', async () => {
+    it('E-08: ComplianceLead reject LOW/MEDIUM KYC → 403 (harus OperationSupervisor)', async () => {
       const appId = await createSubmittedIndividual(8);
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ decision: 'REJECTED', reason: 'tidak sesuai' })
-        .expect(200);
-      expect(res.body.status).toBe('REJECTED');
+        .expect(403);
+      expect(res.body.message).toContain('Operation Supervisor');
     });
 
     it('E-09: SystemAdmin approve KYC → 200 APPROVED', async () => {
@@ -1450,10 +1450,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.some((p: any) => p.role === 'DIRECTOR')).toBe(true);
     });
 
-    it('G-07: Decision APPROVE bisnis SUBMITTED → 200 APPROVED', async () => {
+    it('G-07: OperationSupervisor APPROVE bisnis SUBMITTED LOW/MEDIUM → 200 APPROVED', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${bizAppId}/decision`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'APPROVED' })
         .expect(200);
 
@@ -3652,10 +3652,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.applicant_snapshot.customer_category).toBe('INDIVIDUAL');
     });
 
-    it('O-06: PATCH /edd draft (partial) → 200, data tersimpan + snapshot dari init tetap ada', async () => {
+    it('O-06: FrontDesk PATCH /edd draft (partial) → 200, data tersimpan + snapshot dari init tetap ada', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           high_risk_reasons: {
             customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'],
@@ -3674,12 +3674,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.applicant_snapshot.full_name).toBe(EDD_PERSON_NAME);
     });
 
-    it('O-07: PATCH /edd complete=true dengan data tidak lengkap → 400 dengan errors', async () => {
+    it('O-07: FrontDesk PATCH /edd complete=true dengan data tidak lengkap → 400 dengan errors', async () => {
       // Hanya kirim complete=true tanpa field wajib lainnya
       // compliance_decision.decision dan internal_checklist.edd_form_completed masih kosong
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({ complete: true })
         .expect(400);
 
@@ -3688,10 +3688,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.errors.length).toBeGreaterThan(0);
     });
 
-    it('O-08: PATCH /edd complete=true dengan semua field wajib → 200, edd_completed=true', async () => {
+    it('O-08: FrontDesk PATCH /edd complete=true dengan semua field wajib → 200, edd_completed=true', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           complete: true,
           applicant_snapshot: {
@@ -3737,7 +3737,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('APPROVED');
     });
 
-    it('O-10: LOW RISK app dapat APPROVE tanpa EDD', async () => {
+    it('O-10: LOW RISK app dapat APPROVE tanpa EDD oleh OperationSupervisor', async () => {
       const createRes = await request(app.getHttpServer())
         .post(`${BASE}/applications/individual`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -3777,18 +3777,20 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const approveRes = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${lowId}/decision`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'APPROVED' })
         .expect(200);
 
       expect(approveRes.body.status).toBe('APPROVED');
     });
 
-    it('O-11: FrontDesk GET /edd → 403', async () => {
-      return request(app.getHttpServer())
+    it('O-11: FrontDesk GET /edd → 200 (Frontline pengisi EDD)', async () => {
+      const res = await request(app.getHttpServer())
         .get(`${BASE}/applications/${eddHighAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .expect(403);
+        .expect(200);
+
+      expect(res.body.edd_required).toBe(true);
     });
 
     it('O-12: ComplianceLead GET /edd setelah complete → 200, edd_completed=true', async () => {
@@ -3801,10 +3803,20 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.edd_completed).toBe(true);
     });
 
-    it('O-13: FrontDesk PATCH /edd → 403', async () => {
-      return request(app.getHttpServer())
+    it('O-13: FrontDesk PATCH /edd draft → 200 (Frontline pengisi EDD)', async () => {
+      const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ officer_analysis: { overall_risk_summary: 'LOW' } })
+        .expect(200);
+
+      expect(res.body.edd_completed).toBe(true);
+    });
+
+    it('O-13c: ComplianceLead PATCH /edd → 403 (Lead hanya approval aplikasi)', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${eddHighAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .send({ officer_analysis: { overall_risk_summary: 'LOW' } })
         .expect(403);
     });
@@ -3828,7 +3840,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${condAppId}/edd`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           complete: true,
           applicant_snapshot: { full_name: EDD_PERSON_NAME },
@@ -4434,6 +4446,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           gender: 'M',
           signature_uri: 'https://storage.test/wic_sig.png',
           cif_relationship_type: 'WIC',
+          wic_transaction_purpose: 'Pembelian barang',
+          wic_recipient_relationship: 'Keluarga',
         })
         .expect(201);
 
@@ -4478,6 +4492,383 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const bo = res.body.find((p: any) => p.role === 'BO');
       expect(bo.cif_no).toBe(boFirstCifNo);
       expect(bo.cif_relationship_type).toBe('BO');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // RW. WIC (Walk-In Customer) submit — minimum CDD only
+  //   - WIC submits with only WIC identity + signature/biometric docs.
+  //   - WIC must NOT require the full Individual selfie / selfie-with-KTP photos,
+  //     nor occupation / full RBA fields.
+  //   - Missing WIC docs must return a clear 400 (not a 500 from the DB trigger).
+  // ══════════════════════════════════════════════════════════
+  describe('RW. WIC submit — minimum CDD', () => {
+    const auth = () => ['Authorization', `Bearer ${complianceToken}`] as const;
+
+    async function createWic(identNum: string) {
+      const cr = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `WIC Submit ${identNum}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: identNum,
+          address_identity: 'Jl. WIC Submit No. 1, Bandung',
+          pob: 'Bandung',
+          dob: '1990-05-05',
+          cif_relationship_type: 'WIC',
+          wic_transaction_purpose: 'Pembelian barang',
+          wic_recipient_relationship: 'Keluarga',
+          // NOTE: intentionally NO phone / nationality / occupation / gender —
+          // WIC minimum CDD must not require them.
+        })
+        .expect(201);
+      const appId = String(cr.body.id);
+
+      // person must be flagged WIC (no CIF) so the WIC branch is exercised
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.person.cif_relationship_type).toBe('WIC');
+
+      return appId;
+    }
+
+    async function addDoc(appId: string, docType: string) {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set(...auth())
+        .send({ doc_type: docType, file_uri: `https://storage.test/${docType}.jpg` })
+        .expect(201);
+    }
+
+    it('RW-01: WIC with identity + signature/biometric docs → submit 200', async () => {
+      const appId = await createWic(`3399100${SUFFIX}`);
+      await addDoc(appId, 'WIC_IDENTITY_DOCUMENT');
+      await addDoc(appId, 'WIC_SIGNATURE_BIOMETRIC');
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set(...auth())
+        .expect(200);
+
+      expect(res.body.id).toBeDefined();
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+
+    it('RW-02: WIC without WIC_SIGNATURE_BIOMETRIC → 400 with clear message', async () => {
+      const appId = await createWic(`3399200${SUFFIX}`);
+      await addDoc(appId, 'WIC_IDENTITY_DOCUMENT');
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set(...auth())
+        .expect(400);
+
+      expect(res.body.message).toContain('WIC CDD minimum belum lengkap');
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('Tanda Tangan / Biometrik'))).toBe(true);
+      // identity doc present → not reported missing
+      expect(missing.some((m) => m.includes('Dokumen Identitas WIC'))).toBe(false);
+    });
+
+    it('RW-03: WIC without WIC_IDENTITY_DOCUMENT → 400 with clear message', async () => {
+      const appId = await createWic(`3399300${SUFFIX}`);
+      await addDoc(appId, 'WIC_SIGNATURE_BIOMETRIC');
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set(...auth())
+        .expect(400);
+
+      expect(res.body.message).toContain('WIC CDD minimum belum lengkap');
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('Dokumen Identitas WIC'))).toBe(true);
+      expect(missing.some((m) => m.includes('Tanda Tangan / Biometrik'))).toBe(false);
+    });
+
+    it('RW-04: WIC does not require INDIVIDUAL_FACE_PHOTO / FACE_WITH_KTP nor occupation', async () => {
+      const appId = await createWic(`3399400${SUFFIX}`);
+      // Only WIC docs — no selfie / selfie-with-KTP uploaded.
+      await addDoc(appId, 'WIC_IDENTITY_DOCUMENT');
+      await addDoc(appId, 'WIC_SIGNATURE_BIOMETRIC');
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set(...auth())
+        .expect(200);
+
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+
+    it('RW-05: WIC precheck missing both docs → 400 lists both WIC docs (never selfie)', async () => {
+      const appId = await createWic(`3399500${SUFFIX}`);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}/precheck`)
+        .set(...auth())
+        .expect(400);
+
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('Dokumen Identitas WIC'))).toBe(true);
+      expect(missing.some((m) => m.includes('Tanda Tangan / Biometrik'))).toBe(true);
+      // Must never demand full-KYC selfie docs for WIC.
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_PHOTO'))).toBe(false);
+      expect(missing.some((m) => m.includes('INDIVIDUAL_FACE_WITH_KTP_PHOTO'))).toBe(false);
+    });
+
+    it('RW-06: GET detail returns wic fields + cif_relationship_type for WIC', async () => {
+      const appId = await createWic(`3399600${SUFFIX}`);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .expect(200);
+
+      expect(res.body.person.cif_relationship_type).toBe('WIC');
+      expect(res.body.person.wic_transaction_purpose).toBe('Pembelian barang');
+      expect(res.body.person.wic_recipient_relationship).toBe('Keluarga');
+    });
+
+    it('RW-07: PATCH /applications/:id saves wic_transaction_purpose & wic_recipient_relationship', async () => {
+      const appId = await createWic(`3399700${SUFFIX}`);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .send({
+          cif_relationship_type: 'WIC',
+          wic_transaction_purpose: 'Pengiriman uang',
+          wic_recipient_relationship: 'Rekan bisnis',
+        })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .expect(200);
+
+      expect(res.body.person.wic_transaction_purpose).toBe('Pengiriman uang');
+      expect(res.body.person.wic_recipient_relationship).toBe('Rekan bisnis');
+      expect(res.body.person.cif_relationship_type).toBe('WIC');
+    });
+
+    it('RW-08: PATCH omitting wic fields PRESERVES them → WIC can still submit', async () => {
+      const appId = await createWic(`3399800${SUFFIX}`);
+      await addDoc(appId, 'WIC_IDENTITY_DOCUMENT');
+      await addDoc(appId, 'WIC_SIGNATURE_BIOMETRIC');
+
+      // Simulate an unrelated edit on the detail page that does NOT resend the
+      // WIC fields (e.g. only touches the address). These must not be wiped.
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .send({
+          cif_relationship_type: 'WIC',
+          address_identity: 'Jl. WIC Baru No. 9, Bandung',
+        })
+        .expect(200);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .expect(200);
+      expect(detail.body.person.wic_transaction_purpose).toBe('Pembelian barang');
+      expect(detail.body.person.wic_recipient_relationship).toBe('Keluarga');
+
+      const submit = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set(...auth())
+        .expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(submit.body.status);
+    });
+
+    it('RW-09: WIC cannot submit when wic_transaction_purpose is cleared → 400', async () => {
+      const appId = await createWic(`3399900${SUFFIX}`);
+      await addDoc(appId, 'WIC_IDENTITY_DOCUMENT');
+      await addDoc(appId, 'WIC_SIGNATURE_BIOMETRIC');
+
+      // Explicitly clear one required WIC field via PATCH.
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .send({ cif_relationship_type: 'WIC', wic_transaction_purpose: '' })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set(...auth())
+        .expect(400);
+
+      expect(res.body.message).toContain('WIC CDD minimum belum lengkap');
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('Tujuan Transaksi'))).toBe(true);
+    });
+
+    it('RW-10: WIC cannot submit when wic_recipient_relationship is cleared → 400', async () => {
+      const appId = await createWic(`3391000${SUFFIX}`);
+      await addDoc(appId, 'WIC_IDENTITY_DOCUMENT');
+      await addDoc(appId, 'WIC_SIGNATURE_BIOMETRIC');
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .send({ cif_relationship_type: 'WIC', wic_recipient_relationship: '' })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set(...auth())
+        .expect(400);
+
+      expect(res.body.message).toContain('WIC CDD minimum belum lengkap');
+      const missing: string[] = res.body.missing;
+      expect(missing.some((m) => m.includes('Hubungan dengan Penerima'))).toBe(true);
+    });
+
+    // Raw WIC create (own payload, not the shared helper) so reuse scenarios can
+    // send different WIC field values per call.
+    async function createWicRaw(identNum: string, body: Record<string, unknown>) {
+      const cr = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set(...auth())
+        .send({
+          full_name: `WIC Reuse ${identNum}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: identNum,
+          address_identity: 'Jl. WIC Reuse No. 1, Bandung',
+          pob: 'Bandung',
+          dob: '1990-05-05',
+          cif_relationship_type: 'WIC',
+          ...body,
+        })
+        .expect(201);
+      return String(cr.body.id);
+    }
+
+    it('RW-11: create WIC with fresh identity saves WIC purpose/relationship', async () => {
+      const nik = `3392100${SUFFIX}`;
+      const appId = await createWicRaw(nik, {
+        wic_transaction_purpose: 'Beli pulsa',
+        wic_recipient_relationship: 'Teman',
+      });
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .expect(200);
+
+      expect(res.body.person.cif_relationship_type).toBe('WIC');
+      expect(res.body.person.cif_no).toBeNull();
+      expect(res.body.person.wic_transaction_purpose).toBe('Beli pulsa');
+      expect(res.body.person.wic_recipient_relationship).toBe('Teman');
+    });
+
+    it('RW-12: create WIC on EXISTING person also saves WIC purpose/relationship', async () => {
+      const nik = `3392200${SUFFIX}`;
+
+      // First WIC create → person now exists (WIC, no CIF).
+      await createWicRaw(nik, {
+        wic_transaction_purpose: 'Beli A',
+        wic_recipient_relationship: 'Saudara',
+      });
+
+      // Second WIC create with the SAME identity reuses that person. The reuse
+      // path must persist the (different) WIC fields, not silently skip them.
+      const app2 = await createWicRaw(nik, {
+        wic_transaction_purpose: 'Kirim uang B',
+        wic_recipient_relationship: 'Rekan bisnis',
+      });
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${app2}`)
+        .set(...auth())
+        .expect(200);
+
+      expect(res.body.person.cif_relationship_type).toBe('WIC');
+      expect(res.body.person.cif_no).toBeNull();
+      expect(res.body.person.wic_transaction_purpose).toBe('Kirim uang B');
+      expect(res.body.person.wic_recipient_relationship).toBe('Rekan bisnis');
+    });
+
+    it('RW-13: reused WIC person can submit after WIC docs uploaded', async () => {
+      const nik = `3392300${SUFFIX}`;
+
+      await createWicRaw(nik, {
+        wic_transaction_purpose: 'Beli barang',
+        wic_recipient_relationship: 'Keluarga',
+      });
+      const app2 = await createWicRaw(nik, {
+        wic_transaction_purpose: 'Beli barang lagi',
+        wic_recipient_relationship: 'Keluarga',
+      });
+
+      await addDoc(app2, 'WIC_IDENTITY_DOCUMENT');
+      await addDoc(app2, 'WIC_SIGNATURE_BIOMETRIC');
+
+      const submit = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${app2}/submit`)
+        .set(...auth())
+        .expect(200);
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(submit.body.status);
+    });
+
+    it('RW-14: OUR_CUSTOMER reuse unchanged — keeps CIF and OUR_CUSTOMER type', async () => {
+      const nik = `3392400${SUFFIX}`;
+
+      // First OUR_CUSTOMER create → gets a CIF.
+      const app1 = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set(...auth())
+        .send({
+          full_name: `OC Reuse ${nik}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: nik,
+          address_identity: 'Jl. OC Reuse No. 1',
+          pob: 'Jakarta',
+          dob: '1988-02-02',
+          nationality: 'ID',
+          phone: `08123${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'M',
+        })
+        .expect(201);
+      const detail1 = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${String(app1.body.id)}`)
+        .set(...auth())
+        .expect(200);
+      const cif = detail1.body.person.cif_no;
+      expect(cif).toMatch(/^KSHI\d{11}$/);
+      expect(detail1.body.person.cif_relationship_type).toBe('OUR_CUSTOMER');
+
+      // Second OUR_CUSTOMER create with same identity → reuses the same CIF.
+      const app2 = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set(...auth())
+        .send({
+          full_name: `OC Reuse ${nik}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: nik,
+          address_identity: 'Jl. OC Reuse No. 2',
+          pob: 'Jakarta',
+          dob: '1988-02-02',
+          nationality: 'ID',
+          phone: `08124${SUFFIX}`,
+          occupation: 'Wiraswasta',
+          gender: 'M',
+        })
+        .expect(201);
+      const detail2 = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${String(app2.body.id)}`)
+        .set(...auth())
+        .expect(200);
+      expect(detail2.body.person.cif_no).toBe(cif);
+      expect(detail2.body.person.cif_relationship_type).toBe('OUR_CUSTOMER');
     });
   });
 
@@ -4738,7 +5129,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'APPROVED', reason: 'monitoring sender' })
         .expect(200);
 
@@ -5854,7 +6245,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
         await request(app.getHttpServer())
           .patch(`${BASE}/applications/${ufAppId}/decision`)
-          .set('Authorization', `Bearer ${complianceToken}`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
           .send({ decision: 'APPROVED', reason: 'UF test' })
           .expect(200);
 
