@@ -226,6 +226,131 @@ export class ApplicationsService {
 
   constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
 
+  // ── "Lainnya" manual free-text helpers ───────────────────────────────────────
+  // RBA V01 rule: *_other NEVER replaces the dropdown value. The dropdown value
+  // (e.g. source_of_funds = "Lainnya") is preserved for strict RBA scoring; the
+  // typed description lives separately in the matching *_other column.
+
+  /** True only when the dropdown value is exactly "Lainnya" (case-insensitive). */
+  private isLainnya(v: unknown): boolean {
+    return typeof v === "string" && v.trim().toLowerCase() === "lainnya";
+  }
+
+  private cleanText(v: unknown): string | null {
+    return typeof v === "string" && v.trim() === "" ? null : ((v as any) ?? null);
+  }
+
+  /**
+   * CREATE-time resolution of *_other columns for a fixed set of (main, other)
+   * pairs. When the main dropdown value is "Lainnya" the matching *_other must be
+   * present (clear 400 otherwise); when it is anything else the *_other is nulled.
+   */
+  private resolveOtherFieldsCreate(
+    dto: any,
+    pairs: Array<{ main: string; other: string; label: string }>,
+  ): Record<string, string | null> {
+    const out: Record<string, string | null> = {};
+    for (const { main, other, label } of pairs) {
+      if (this.isLainnya(dto[main])) {
+        const v = this.cleanText(dto[other]);
+        if (v === null) {
+          throw new BadRequestException(
+            `Keterangan lainnya wajib diisi untuk ${label}.`,
+          );
+        }
+        out[other] = v;
+      } else {
+        out[other] = null;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * PATCH-time reconciliation of *_other columns on a persons row.
+   *   - main = "Lainnya" + other key present  → write other (empty string → null)
+   *   - main = "Lainnya" + other key omitted   → preserve existing other
+   *   - main != "Lainnya"                       → clear other to null
+   * For `mainConditional` pairs (WIC), when the main key is omitted both main and
+   * other are left untouched (preserve), matching the WIC minimum-CDD PATCH rule.
+   */
+  private async applyOtherFieldsPatch(
+    personId: number,
+    dto: any,
+    pairs: Array<{ main: string; other: string; mainConditional?: boolean }>,
+  ) {
+    const hasKey = (k: string) =>
+      Object.prototype.hasOwnProperty.call(dto, k);
+    for (const { main, other, mainConditional } of pairs) {
+      if (mainConditional && !hasKey(main)) continue; // preserve both
+      if (this.isLainnya(this.cleanText(dto[main]))) {
+        if (hasKey(other)) {
+          await this.pool.query(
+            `UPDATE persons SET ${other} = $1 WHERE id = $2`,
+            [this.cleanText(dto[other]), personId],
+          );
+        }
+        // omitted → preserve existing value
+      } else {
+        await this.pool.query(
+          `UPDATE persons SET ${other} = NULL WHERE id = $1`,
+          [personId],
+        );
+      }
+    }
+  }
+
+  // ── Business "Alamat Kedudukan" province/city dropdown helper ─────────────────
+  // Validates business_province_code / business_city_code against ref tables and
+  // resolves their display names. Mirrors the Individual CDD region behaviour.
+  private async validateAndResolveBusinessRegion(dto: any): Promise<{
+    business_province_code: string | null;
+    business_province_name: string | null;
+    business_city_code: string | null;
+    business_city_name: string | null;
+  }> {
+    const out = {
+      business_province_code: dto.business_province_code || null,
+      business_province_name: null as string | null,
+      business_city_code: dto.business_city_code || null,
+      business_city_name: null as string | null,
+    };
+
+    if (dto.business_province_code) {
+      const { rows } = await this.pool.query(
+        `SELECT name FROM ref_provinces WHERE code=$1`,
+        [dto.business_province_code],
+      );
+      if (!rows[0])
+        throw new BadRequestException(
+          `business_province_code '${dto.business_province_code}' tidak ditemukan`,
+        );
+      out.business_province_name = rows[0].name;
+    }
+
+    if (dto.business_city_code) {
+      const { rows } = await this.pool.query(
+        `SELECT name, province_code FROM ref_regencies WHERE code=$1`,
+        [dto.business_city_code],
+      );
+      if (!rows[0])
+        throw new BadRequestException(
+          `business_city_code '${dto.business_city_code}' tidak ditemukan`,
+        );
+      if (
+        dto.business_province_code &&
+        rows[0].province_code !== dto.business_province_code
+      ) {
+        throw new BadRequestException(
+          `business_city_code '${dto.business_city_code}' bukan bagian dari business_province_code '${dto.business_province_code}'`,
+        );
+      }
+      out.business_city_name = rows[0].name;
+    }
+
+    return out;
+  }
+
   // ── CIF helpers ──────────────────────────────────────────────────────────────
 
   private extractLast6Digits(value: string | null | undefined): string {
@@ -486,6 +611,36 @@ export class ApplicationsService {
       }
     }
 
+    // "Lainnya" companions — validate + resolve (never overrides dropdown value).
+    const indivOther = this.resolveOtherFieldsCreate(dto, [
+      { main: "occupation", other: "occupation_other", label: "Pekerjaan" },
+      {
+        main: "source_of_funds",
+        other: "source_of_funds_other",
+        label: "Sumber Dana",
+      },
+      {
+        main: "business_relationship_purpose",
+        other: "business_relationship_purpose_other",
+        label: "Tujuan Hubungan Usaha",
+      },
+      {
+        main: "industry_category",
+        other: "industry_category_other",
+        label: "Bidang Industri",
+      },
+      {
+        main: "wic_transaction_purpose",
+        other: "wic_transaction_purpose_other",
+        label: "Tujuan Transaksi",
+      },
+      {
+        main: "wic_recipient_relationship",
+        other: "wic_recipient_relationship_other",
+        label: "Hubungan dengan Penerima",
+      },
+    ]);
+
     // Resolve region names from codes
     const regionNames = await this.resolveRegionNames(dto);
 
@@ -565,11 +720,15 @@ export class ApplicationsService {
             industry_category, company_name, company_address, monthly_income_range,
             gender, email, signature_uri,
             source_of_funds, business_relationship_purpose, distribution_channel,
-            wic_transaction_purpose, wic_recipient_relationship
+            wic_transaction_purpose, wic_recipient_relationship,
+            occupation_other, industry_category_other, source_of_funds_other,
+            business_relationship_purpose_other,
+            wic_transaction_purpose_other, wic_recipient_relationship_other
           ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
-            $35,$36,$37,$38,$39
+            $35,$36,$37,$38,$39,
+            $40,$41,$42,$43,$44,$45
           ) RETURNING id`,
           [
             dto.full_name,
@@ -611,6 +770,12 @@ export class ApplicationsService {
             dto.distribution_channel || null,
             dto.wic_transaction_purpose || null,
             dto.wic_recipient_relationship || null,
+            indivOther.occupation_other,
+            indivOther.industry_category_other,
+            indivOther.source_of_funds_other,
+            indivOther.business_relationship_purpose_other,
+            indivOther.wic_transaction_purpose_other,
+            indivOther.wic_recipient_relationship_other,
           ],
         );
         personId = ins.rows[0].id;
@@ -915,6 +1080,29 @@ export class ApplicationsService {
       );
     }
 
+    // "Lainnya" companions. occupation/source_of_funds/business purpose/industry
+    // follow the same full-replace semantics as their main columns above; the WIC
+    // pairs are conditional (preserve when the main key is omitted).
+    await this.applyOtherFieldsPatch(app.person_id, dto, [
+      { main: "occupation", other: "occupation_other" },
+      { main: "source_of_funds", other: "source_of_funds_other" },
+      {
+        main: "business_relationship_purpose",
+        other: "business_relationship_purpose_other",
+      },
+      { main: "industry_category", other: "industry_category_other" },
+      {
+        main: "wic_transaction_purpose",
+        other: "wic_transaction_purpose_other",
+        mainConditional: true,
+      },
+      {
+        main: "wic_recipient_relationship",
+        other: "wic_recipient_relationship_other",
+        mainConditional: true,
+      },
+    ]);
+
     if (relType === "WIC") {
       await this.pool.query(
         `UPDATE persons SET cif_no = NULL, cif_relationship_type = 'WIC' WHERE id = $1`,
@@ -948,6 +1136,56 @@ export class ApplicationsService {
   }
 
   async createBusiness(dto: any, userId: number, branchId?: number) {
+    // ── B.5 NPWP Badan Usaha: wajib tepat 15 digit angka (digits only) ─────────
+    const npwpRaw = typeof dto.npwp === "string" ? dto.npwp.trim() : "";
+    if (!/^\d{15}$/.test(npwpRaw)) {
+      throw new BadRequestException("NPWP Badan Usaha wajib 15 digit angka.");
+    }
+
+    // ── B.1 Nomor Akta Pendirian wajib bila bentuk badan usaha = PT ────────────
+    const legalFormNorm = String(dto.legal_form ?? "")
+      .trim()
+      .replace(/\.$/, "")
+      .toUpperCase();
+    const deedProvided =
+      typeof dto.deed_number === "string" && dto.deed_number.trim().length > 0;
+    if (legalFormNorm === "PT" && !deedProvided) {
+      throw new BadRequestException(
+        "Nomor Akta Pendirian wajib diisi untuk badan usaha PT.",
+      );
+    }
+
+    // ── B.2 Nomor Identitas Pengurus Utama (PIC): maksimal 16 karakter ─────────
+    if (
+      dto.pic_identity_number &&
+      String(dto.pic_identity_number).length > 16
+    ) {
+      throw new BadRequestException("Nomor Identitas maksimal 16 karakter.");
+    }
+
+    // ── B.3 Alamat Kedudukan — validasi & resolusi dropdown provinsi/kota ──────
+    const bizRegion = await this.validateAndResolveBusinessRegion(dto);
+
+    // ── A. "Lainnya" companions — validate + resolve (preserve dropdown value) ─
+    const bizOther = this.resolveOtherFieldsCreate(dto, [
+      { main: "legal_form", other: "legal_form_other", label: "Bentuk Badan Usaha" },
+      {
+        main: "business_activity",
+        other: "business_activity_other",
+        label: "Bidang Usaha",
+      },
+      {
+        main: "source_of_funds",
+        other: "source_of_funds_other",
+        label: "Sumber Dana",
+      },
+      {
+        main: "business_relationship_purpose",
+        other: "business_relationship_purpose_other",
+        label: "Tujuan Hubungan Usaha",
+      },
+    ]);
+
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -958,8 +1196,11 @@ export class ApplicationsService {
           deed_number, company_email,
           pic_name, pic_position, pic_identity_number, pic_identity_type,
           representative_signature_name, verification_officer, supervisor,
-          source_of_funds, business_relationship_purpose, distribution_channel)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+          source_of_funds, business_relationship_purpose, distribution_channel,
+          legal_form_other, business_activity_other, source_of_funds_other, business_relationship_purpose_other,
+          business_province_code, business_province_name, business_city_code, business_city_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+          $27,$28,$29,$30,$31,$32,$33,$34)
          RETURNING id`,
         [
           dto.legal_name,
@@ -988,6 +1229,14 @@ export class ApplicationsService {
           dto.source_of_funds ?? null,
           dto.business_relationship_purpose ?? null,
           dto.distribution_channel ?? null,
+          bizOther.legal_form_other,
+          bizOther.business_activity_other,
+          bizOther.source_of_funds_other,
+          bizOther.business_relationship_purpose_other,
+          bizRegion.business_province_code,
+          bizRegion.business_province_name,
+          bizRegion.business_city_code,
+          bizRegion.business_city_name,
         ],
       );
       const businessId = q.rows[0].id;
@@ -1107,9 +1356,14 @@ export class ApplicationsService {
         `SELECT id, full_name, alias, identity_type, identity_number,
                 ktp_number, sim_number, passport_number,
                 pob, dob, nationality, phone, email, gender,
-                occupation, industry_category, company_name, company_address, monthly_income_range,
-                source_of_funds, business_relationship_purpose, distribution_channel,
-                wic_transaction_purpose, wic_recipient_relationship,
+                occupation, occupation_other,
+                industry_category, industry_category_other,
+                company_name, company_address, monthly_income_range,
+                source_of_funds, source_of_funds_other,
+                business_relationship_purpose, business_relationship_purpose_other,
+                distribution_channel,
+                wic_transaction_purpose, wic_transaction_purpose_other,
+                wic_recipient_relationship, wic_recipient_relationship_other,
                 address_identity, address_residential,
                 province_code, province_name, city_code, city_name,
                 district_code, district_name, village_code, village_name,
@@ -1126,11 +1380,16 @@ export class ApplicationsService {
     let business: any = null;
     if (app.business_id) {
       const { rows: biz } = await this.pool.query(
-        `SELECT id, legal_name, legal_form,
+        `SELECT id, legal_name, legal_form, legal_form_other,
                 incorporation_place, incorporation_date,
                 deed_number, business_license_number, company_email,
                 nib, npwp, address_line, city, province, postal_code,
-                phone, industry_code, business_activity, cif_no,
+                business_province_code, business_province_name,
+                business_city_code, business_city_name,
+                phone, industry_code, business_activity, business_activity_other, cif_no,
+                source_of_funds, source_of_funds_other,
+                business_relationship_purpose, business_relationship_purpose_other,
+                distribution_channel,
                 pic_name, pic_position, pic_identity_number, pic_identity_type,
                 representative_signature_name, verification_officer, supervisor
          FROM business_entities WHERE id=$1`,
@@ -1140,6 +1399,7 @@ export class ApplicationsService {
       if (business) {
         // Alias label form terbaru (tanpa menduplikasi kolom fisik).
         business.business_form = business.legal_form;
+        business.business_form_other = business.legal_form_other;
         // Ringkasan status watchlist per kategori (opsional; default CLEAR).
         const wl = await this.getBusinessWatchlistStatuses(appId);
         business.company_watchlist_status = wl.company_watchlist_status;
@@ -1162,7 +1422,9 @@ export class ApplicationsService {
         `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
                 bp.cif_no, bp.cif_relationship_type,
                 bp.ownership_percentage, bp.address,
-                bp.identity_document_type, bp.source_of_funds, bp.source_of_wealth,
+                bp.identity_document_type,
+                bp.source_of_funds, bp.source_of_funds_other,
+                bp.source_of_wealth, bp.source_of_wealth_other,
                 p.id as person_id, p.full_name, p.identity_type, p.identity_number
          FROM business_parties bp
          JOIN persons p ON p.id = bp.person_id
@@ -2004,6 +2266,25 @@ export class ApplicationsService {
         .replace(/\D+/g, "")
         .trim();
 
+    // B.2 Nomor Identitas Pengurus/BO/Pemegang Saham: maksimal 16 karakter.
+    if (dto.identity_number && String(dto.identity_number).length > 16) {
+      throw new BadRequestException("Nomor Identitas maksimal 16 karakter.");
+    }
+
+    // A. "Lainnya" companions untuk party (tidak menggantikan nilai dropdown).
+    const partyOther = this.resolveOtherFieldsCreate(dto, [
+      {
+        main: "source_of_funds",
+        other: "source_of_funds_other",
+        label: "Sumber Dana",
+      },
+      {
+        main: "source_of_wealth",
+        other: "source_of_wealth_other",
+        label: "Sumber Kekayaan",
+      },
+    ]);
+
     // cari existing person by (identity_type, identity_number)
     const { rows: existing } = await this.pool.query(
       `SELECT id FROM persons WHERE identity_type=$1 AND identity_number=$2 LIMIT 1`,
@@ -2066,9 +2347,10 @@ export class ApplicationsService {
     const party = await this.pool.query(
       `INSERT INTO business_parties (
          business_id, person_id, role, is_active, cif_no, cif_relationship_type,
-         ownership_percentage, address, identity_document_type, source_of_funds, source_of_wealth
+         ownership_percentage, address, identity_document_type,
+         source_of_funds, source_of_wealth, source_of_funds_other, source_of_wealth_other
        )
-     VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10)
+     VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      ON CONFLICT (business_id, person_id, role) DO UPDATE
        SET is_active = TRUE,
            cif_no = COALESCE(business_parties.cif_no, EXCLUDED.cif_no),
@@ -2076,9 +2358,12 @@ export class ApplicationsService {
            address = COALESCE(EXCLUDED.address, business_parties.address),
            identity_document_type = COALESCE(EXCLUDED.identity_document_type, business_parties.identity_document_type),
            source_of_funds = COALESCE(EXCLUDED.source_of_funds, business_parties.source_of_funds),
-           source_of_wealth = COALESCE(EXCLUDED.source_of_wealth, business_parties.source_of_wealth)
+           source_of_wealth = COALESCE(EXCLUDED.source_of_wealth, business_parties.source_of_wealth),
+           source_of_funds_other = EXCLUDED.source_of_funds_other,
+           source_of_wealth_other = EXCLUDED.source_of_wealth_other
      RETURNING id, business_id, person_id, role, is_active, created_at, cif_no, cif_relationship_type,
-               ownership_percentage, address, identity_document_type, source_of_funds, source_of_wealth`,
+               ownership_percentage, address, identity_document_type,
+               source_of_funds, source_of_wealth, source_of_funds_other, source_of_wealth_other`,
       [
         app.business_id,
         personId,
@@ -2090,6 +2375,8 @@ export class ApplicationsService {
         dto.identity_document_type ?? null,
         dto.source_of_funds ?? null,
         dto.source_of_wealth ?? null,
+        partyOther.source_of_funds_other,
+        partyOther.source_of_wealth_other,
       ],
     );
 

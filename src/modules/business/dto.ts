@@ -47,7 +47,9 @@ export class CreateBusinessPartyWithPersonDto {
   @IsOptional() @IsString() address?: string;
   @IsOptional() @IsString() identity_document_type?: string;
   @IsOptional() @IsString() source_of_funds?: string;
+  @IsOptional() @IsString() source_of_funds_other?: string;
   @IsOptional() @IsString() source_of_wealth?: string;
+  @IsOptional() @IsString() source_of_wealth_other?: string;
 }
 
 export class LinkExistingPersonDto {

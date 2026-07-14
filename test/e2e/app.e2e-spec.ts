@@ -29,6 +29,13 @@ const TEST_KTP_NUMBER = '3175001234567890';
 // Suffix 7 digit akhir epoch — unik per test run, hindari konflik unique constraint
 const SUFFIX = Date.now().toString().slice(-7);
 
+// NPWP Badan Usaha wajib tepat 15 digit angka (validasi backend migration 0047).
+// Helper membangun nilai 15 digit dari seed + SUFFIX (npwp tidak unique-constrained).
+function npwp15(seed: string | number = ''): string {
+  const digits = String(seed).replace(/\D/g, '');
+  return (digits + SUFFIX + '000000000000000').slice(0, 15);
+}
+
 describe('KYC/KYB E2E — Priority Tests', () => {
   let app: INestApplication;
   // Pool untuk verifikasi langsung ke DB (mis. cek unique_id tersimpan)
@@ -1363,9 +1370,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           legal_form: 'PT',
           incorporation_place: 'Jakarta',
           incorporation_date: '2020-01-01',
+          deed_number: `AKTA-G01-${SUFFIX}`,
           business_license_number: `BL${SUFFIX}`,
           nib: `NIB${SUFFIX}`,
-          npwp: `NPWP${SUFFIX}`,
+          npwp: npwp15('01'),
           address_line: 'Jl. Bisnis Raya No. 5',
           city: 'Jakarta',
           province: 'DKI Jakarta',
@@ -1473,9 +1481,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         legal_form: 'PT',
         incorporation_place: 'Jakarta',
         incorporation_date: '2019-06-01',
+        deed_number: `AKTA-${tag}-${SUFFIX}`,
         business_license_number: `IZN${tag}${SUFFIX}`,
         nib: `NIB${tag}${SUFFIX}`,
-        npwp: `NPWP${tag}${SUFFIX}`,
+        npwp: npwp15(tag),
         address_line: 'Jl. Kedudukan No. 10',
         city: 'Jakarta',
         province: 'DKI Jakarta',
@@ -1703,9 +1712,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           legal_form: 'PT',
           incorporation_place: 'Jakarta',
           incorporation_date: '2020-03-03',
+          deed_number: `AKTA-${tag}-${u}`,
           business_license_number: `IZN${tag}${u}`,
           nib: `NIB${tag}${u}`,
-          npwp: `NPWP${tag}${u}`,
+          npwp: npwp15(u),
           address_line: 'Jl. ReqDoc No. 7',
           city: 'Jakarta',
           province: 'DKI Jakarta',
@@ -1863,7 +1873,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         legal_form: 'PT',
         incorporation_place: 'Jakarta',
         incorporation_date: '2020-04-04',
-        npwp: `NPWP${tag}${u}`,
+        deed_number: `AKTA-${tag}-${u}`,
+        npwp: npwp15(u),
         address_line: 'Jl. Izin No. 9',
         city: 'Jakarta',
         province: 'DKI Jakarta',
@@ -1935,6 +1946,380 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await prepareForSubmit(appId);
       const res = await submit(appId).expect(400);
       expect(res.body.message).toBe('Nomor Izin Usaha (NIB/OSS/SIUP/dll) wajib diisi.');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // GE. "Lainnya" manual fields & Business/KYB adjustments (0047)
+  //   - RBA V01 rule: *_other TIDAK menggantikan nilai dropdown.
+  // ══════════════════════════════════════════════════════════
+  describe('GE. "Lainnya" fields & Business/KYB adjustments', () => {
+    let geSeq = 0;
+    const uniq = () => `${SUFFIX}${(geSeq += 1)}`;
+
+    function baseBizBody(over: Record<string, unknown> = {}) {
+      const u = uniq();
+      return {
+        legal_name: `PT GE ${u}`,
+        legal_form: 'PT',
+        incorporation_place: 'Jakarta',
+        incorporation_date: '2020-05-05',
+        deed_number: `AKTA-GE-${u}`,
+        business_license_number: `IZN-GE-${u}`,
+        nib: `NIB-GE-${u}`,
+        npwp: npwp15(u),
+        address_line: 'Jl. GE No. 1',
+        city: 'Jakarta',
+        province: 'DKI Jakarta',
+        postal_code: '10110',
+        business_activity: 'Perdagangan Umum',
+        phone: `0219${u}`.slice(0, 15),
+        ...over,
+      };
+    }
+
+    // ── A. Individual "Lainnya" ────────────────────────────────────────────
+    it('GE-01: Individual occupation="Lainnya" → occupation_other tersimpan, occupation tetap "Lainnya"', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GE Indiv Lainnya ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3901100${SUFFIX}`,
+          address_identity: 'Jl. GE Indiv No. 1',
+          pob: 'Jakarta',
+          dob: '1991-02-02',
+          nationality: 'ID',
+          phone: `08131${SUFFIX}`,
+          occupation: 'Lainnya',
+          occupation_other: 'Pengrajin mebel rumahan',
+          gender: 'M',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.person.occupation).toBe('Lainnya');
+      expect(detail.body.person.occupation_other).toBe('Pengrajin mebel rumahan');
+    });
+
+    it('GE-02: RBA field source_of_funds="Lainnya" → dropdown value preserved + source_of_funds_other terpisah', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GE Indiv SOF ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3901200${SUFFIX}`,
+          address_identity: 'Jl. GE Indiv No. 2',
+          pob: 'Jakarta',
+          dob: '1992-03-03',
+          nationality: 'ID',
+          phone: `08132${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'F',
+          source_of_funds: 'Lainnya',
+          source_of_funds_other: 'hasil penjualan aset pribadi',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      // RBA V01 strict: dropdown value MUST stay "Lainnya" (not replaced by text)
+      expect(detail.body.person.source_of_funds).toBe('Lainnya');
+      expect(detail.body.person.source_of_funds_other).toBe('hasil penjualan aset pribadi');
+    });
+
+    it('GE-03: PATCH occupation menjauh dari "Lainnya" → occupation_other di-clear', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GE Indiv Clear ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3901300${SUFFIX}`,
+          address_identity: 'Jl. GE Indiv No. 3',
+          pob: 'Jakarta',
+          dob: '1993-04-04',
+          nationality: 'ID',
+          phone: `08133${SUFFIX}`,
+          occupation: 'Lainnya',
+          occupation_other: 'Freelance desainer',
+          gender: 'M',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const patch = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ occupation: 'Karyawan Swasta' })
+        .expect(200);
+      expect(patch.body.person.occupation).toBe('Karyawan Swasta');
+      expect(patch.body.person.occupation_other).toBeNull();
+    });
+
+    it('GE-04: PATCH mempertahankan occupation="Lainnya" + ubah occupation_other', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GE Indiv Keep ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3901400${SUFFIX}`,
+          address_identity: 'Jl. GE Indiv No. 4',
+          pob: 'Jakarta',
+          dob: '1994-05-05',
+          nationality: 'ID',
+          phone: `08134${SUFFIX}`,
+          occupation: 'Lainnya',
+          occupation_other: 'Awal',
+          gender: 'M',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const patch = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ occupation: 'Lainnya', occupation_other: 'Diperbarui' })
+        .expect(200);
+      expect(patch.body.person.occupation).toBe('Lainnya');
+      expect(patch.body.person.occupation_other).toBe('Diperbarui');
+    });
+
+    it('GE-05: Individual occupation="Lainnya" tanpa occupation_other → 400 pesan jelas', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GE Indiv NoOther ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3901500${SUFFIX}`,
+          address_identity: 'Jl. GE Indiv No. 5',
+          pob: 'Jakarta',
+          dob: '1995-06-06',
+          nationality: 'ID',
+          phone: `08135${SUFFIX}`,
+          occupation: 'Lainnya',
+          gender: 'M',
+        })
+        .expect(400);
+      expect(res.body.message).toBe('Keterangan lainnya wajib diisi untuk Pekerjaan.');
+    });
+
+    // ── B.1 deed_number wajib untuk PT ─────────────────────────────────────
+    it('GE-06: Business PT tanpa deed_number → 400 "Nomor Akta Pendirian wajib..."', async () => {
+      const body = baseBizBody();
+      delete (body as any).deed_number;
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(body)
+        .expect(400);
+      expect(res.body.message).toBe('Nomor Akta Pendirian wajib diisi untuk badan usaha PT.');
+    });
+
+    it('GE-07: Business non-PT (CV) tanpa deed_number → 201', async () => {
+      const body = baseBizBody({ legal_form: 'CV', legal_name: `CV GE ${uniq()}` });
+      delete (body as any).deed_number;
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(body)
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+    });
+
+    // ── B.5 NPWP wajib 15 digit angka ──────────────────────────────────────
+    it('GE-08: Business NPWP non-digit → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ npwp: '01.234.567.8-901.234' }))
+        .expect(400);
+      expect(res.body.message).toBe('NPWP Badan Usaha wajib 15 digit angka.');
+    });
+
+    it('GE-09: Business NPWP bukan 15 digit (14) → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ npwp: '01234567890123' })) // 14 digit
+        .expect(400);
+      expect(res.body.message).toBe('NPWP Badan Usaha wajib 15 digit angka.');
+    });
+
+    it('GE-10: Business NPWP tepat 15 digit → 201', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ npwp: '012345678901234' }))
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+    });
+
+    // ── B.2 Nomor Identitas maksimal 16 karakter ───────────────────────────
+    it('GE-11: Business PIC identity_number > 16 → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ pic_identity_number: '123456789012345678' })) // 18 chars
+        .expect(400);
+      expect(res.body.message).toBe('Nomor Identitas maksimal 16 karakter.');
+    });
+
+    it('GE-12: Party (shareholder) identity_number > 16 → 400', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody())
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'SHAREHOLDER',
+          full_name: `GE SH Long ${SUFFIX}`,
+          identity_type: 'PASPOR',
+          identity_number: 'A1234567890123456', // 17 chars
+        })
+        .expect(400);
+      expect(res.body.message).toBe('Nomor Identitas maksimal 16 karakter.');
+    });
+
+    // ── B.3 Alamat Kedudukan — dropdown provinsi/kota ──────────────────────
+    it('GE-13: Business address province/city codes → tersimpan + nama terkembalikan di detail', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ business_province_code: '31', business_city_code: '3171' }))
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const b = detail.body.business;
+      expect(b.business_province_code).toBe('31');
+      expect(b.business_province_name).toBe('DKI Jakarta');
+      expect(b.business_city_code).toBe('3171');
+      expect(b.business_city_name).toBe('Kota Jakarta Pusat');
+    });
+
+    it('GE-14: Business city_code bukan bagian province_code → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ business_province_code: '32', business_city_code: '3171' }))
+        .expect(400);
+      expect(String(res.body.message)).toContain('business_city_code');
+    });
+
+    // ── B.4 Bidang Usaha memakai nama industri RBA V01 (exact) ──────────────
+    it('GE-15: Business business_activity = nama industri RBA exact → tersimpan', async () => {
+      const rbaName = 'Aktivitas Keuangan dan Asuransi';
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ business_activity: rbaName }))
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.business.business_activity).toBe(rbaName);
+    });
+
+    // ── A. Business "Lainnya" fields ───────────────────────────────────────
+    it('GE-16: Business legal_form="Lainnya" & source_of_funds="Lainnya" → *_other tersimpan, dropdown dipertahankan', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(
+          baseBizBody({
+            legal_name: `Badan GE Lainnya ${uniq()}`,
+            legal_form: 'Lainnya',
+            legal_form_other: 'Badan Layanan Umum Daerah',
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'hibah luar negeri',
+          }),
+        )
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const b = detail.body.business;
+      expect(b.legal_form).toBe('Lainnya');
+      expect(b.legal_form_other).toBe('Badan Layanan Umum Daerah');
+      // alias form terbaru
+      expect(b.business_form).toBe('Lainnya');
+      expect(b.business_form_other).toBe('Badan Layanan Umum Daerah');
+      expect(b.source_of_funds).toBe('Lainnya');
+      expect(b.source_of_funds_other).toBe('hibah luar negeri');
+    });
+
+    it('GE-17: Business legal_form="Lainnya" tanpa legal_form_other → 400 pesan jelas', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ legal_form: 'Lainnya' }))
+        .expect(400);
+      expect(res.body.message).toBe('Keterangan lainnya wajib diisi untuk Bentuk Badan Usaha.');
+    });
+
+    it('GE-18: Party BO source_of_funds="Lainnya" → source_of_funds_other tersimpan + kembali di detail', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody())
+        .expect(201);
+      const appId = String(create.body.id);
+
+      const party = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/parties`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          role: 'BO',
+          full_name: `GE BO Lainnya ${SUFFIX}`,
+          identity_type: 'KTP',
+          identity_number: `3902100${SUFFIX}`,
+          ownership_percentage: 60,
+          source_of_funds: 'Lainnya',
+          source_of_funds_other: 'penjualan properti warisan',
+          source_of_wealth: 'Warisan',
+        })
+        .expect(201);
+      expect(party.body.source_of_funds).toBe('Lainnya');
+      expect(party.body.source_of_funds_other).toBe('penjualan properti warisan');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const bo = detail.body.parties.find((p: any) => p.role === 'BO');
+      expect(bo.source_of_funds).toBe('Lainnya');
+      expect(bo.source_of_funds_other).toBe('penjualan properti warisan');
     });
   });
 
@@ -3086,7 +3471,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           incorporation_date: '2021-01-01',
           business_license_number: `BL_YK_${SUFFIX}`,
           nib: `NIB_YK_${SUFFIX}`,
-          npwp: `NPWP_YK_${SUFFIX}`,
+          npwp: npwp15('93'),
           address_line: 'Jl. Yayasan No. 1',
           city: 'Jakarta',
           province: 'DKI Jakarta',
@@ -4052,7 +4437,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     const CIF_NIB         = `12900099${SUFFIX}`; // NIB
     const CIF_NIB_LAST6   = CIF_NIB.replace(/\D/g, '').slice(-6);
 
-    const CIF_NPWP_NO_NIB = `98.765.432.1-${SUFFIX.slice(0, 3)}.${SUFFIX.slice(3)}`; // NPWP with dots/dash
+    const CIF_NPWP_NO_NIB = npwp15('98765432'); // 15-digit angka (digits only)
     const CIF_NPWP_DIGITS = CIF_NPWP_NO_NIB.replace(/\D/g, '');
     const CIF_NPWP_LAST6  = CIF_NPWP_DIGITS.slice(-6);
 
@@ -4105,9 +4490,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           legal_form: 'PT',
           incorporation_place: 'Jakarta',
           incorporation_date: '2020-01-01',
+          deed_number: `AKTA-CIF-${SUFFIX}`,
           business_license_number: `BL_CIF_${SUFFIX}`,
           nib: CIF_NIB,
-          npwp: `11.111.111.1-${SUFFIX.slice(0, 3)}.${SUFFIX.slice(3)}`,
+          npwp: npwp15('11'),
           address_line: 'Jl. NIB No. 1',
           city: 'Jakarta',
           province: 'DKI Jakarta',
@@ -4255,9 +4641,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           legal_form: 'PT',
           incorporation_place: 'Jakarta',
           incorporation_date: '2022-01-01',
+          deed_number: `AKTA-BOF-${SUFFIX}`,
           business_license_number: `BL_BOF_${SUFFIX}`,
           nib: `9000100${SUFFIX}`,
-          npwp: `22.222.222.2-${SUFFIX.slice(0,3)}.${SUFFIX.slice(3)}`,
+          npwp: npwp15('22'),
           address_line: 'Jl. BO First No. 1',
           city: 'Jakarta',
           province: 'DKI Jakarta',
@@ -4381,9 +4768,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           legal_form: 'PT',
           incorporation_place: 'Surabaya',
           incorporation_date: '2023-03-03',
+          deed_number: `AKTA-IFB-${SUFFIX}`,
           business_license_number: `BL_IFB_${SUFFIX}`,
           nib: `9000200${SUFFIX}`,
-          npwp: `33.333.333.3-${SUFFIX.slice(0,3)}.${SUFFIX.slice(3)}`,
+          npwp: npwp15('33'),
           address_line: 'Jl. Indiv Biz No. 2',
           city: 'Surabaya',
           province: 'Jawa Timur',
@@ -6346,9 +6734,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           legal_form: 'PT',
           incorporation_place: 'Surabaya',
           incorporation_date: '2019-07-01',
+          deed_number: `AKTA-PH1-${SUFFIX}`,
           business_license_number: `BL_PH1_${PH1_SUFFIX}`,
           nib: `99001122${PH1_SUFFIX}`.slice(0, 13),
-          npwp: `11.222.333.4-${PH1_SUFFIX.slice(0, 3)}.${PH1_SUFFIX.slice(3, 6)}`,
+          npwp: npwp15('12'),
           address_line: 'Jl. Bisnis No. 2',
           city: 'Surabaya',
           province: 'Jawa Timur',
@@ -7674,8 +8063,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           legal_form: 'PT',
           incorporation_place: 'Jakarta',
           incorporation_date: '2020-01-01',
+          deed_number: `AKTA-R03-${SUFFIX}`,
           nib: `1234567890${sfx.replace(/\D/g, '').slice(0, 3).padEnd(3, '0')}`,
-          npwp: `01.234.567.8-${sfx.replace(/\D/g, '').slice(0, 3).padEnd(3, '0')}.001`,
+          npwp: npwp15('01'),
           address_line: 'Jl. Test RBA No. 3',
           city: 'Jakarta',
           province: 'DKI Jakarta',

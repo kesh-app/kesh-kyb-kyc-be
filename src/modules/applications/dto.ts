@@ -130,6 +130,16 @@ export class CreateIndividualDto {
   @IsString()
   industry_category?: string;
 
+  // "Lainnya" free-text companions. Diisi hanya bila dropdown terkait bernilai
+  // "Lainnya"; TIDAK menggantikan nilai dropdown (RBA V01 strict).
+  @IsOptional()
+  @IsString()
+  occupation_other?: string;
+
+  @IsOptional()
+  @IsString()
+  industry_category_other?: string;
+
   @IsOptional()
   @IsString()
   company_name?: string;
@@ -171,6 +181,15 @@ export class CreateIndividualDto {
   @IsNotEmpty()
   wic_recipient_relationship?: string;
 
+  // "Lainnya" free-text companions untuk field WIC (bila FE memakai dropdown).
+  @IsOptional()
+  @IsString()
+  wic_transaction_purpose_other?: string;
+
+  @IsOptional()
+  @IsString()
+  wic_recipient_relationship_other?: string;
+
   // ── RBA V01 fields ──────────────────────────────────────────────────────────
   @IsOptional()
   @IsString()
@@ -178,7 +197,15 @@ export class CreateIndividualDto {
 
   @IsOptional()
   @IsString()
+  source_of_funds_other?: string;
+
+  @IsOptional()
+  @IsString()
   business_relationship_purpose?: string;
+
+  @IsOptional()
+  @IsString()
+  business_relationship_purpose_other?: string;
 
   @IsOptional()
   @IsIn(["Aplikasi Digital", "Agen Pihak Ketiga", "Outlet Fisik"])
@@ -198,6 +225,11 @@ export class CreateBusinessDto {
   @IsString()
   @IsNotEmpty()
   legal_form!: string;
+
+  // Keterangan bila legal_form = "Lainnya" (tidak menggantikan nilai dropdown).
+  @IsOptional()
+  @IsString()
+  legal_form_other?: string;
 
   @IsString()
   @IsNotEmpty()
@@ -232,13 +264,28 @@ export class CreateBusinessDto {
   @IsNotEmpty()
   province!: string;
 
+  // Alamat Kedudukan — dropdown provinsi/kota (mirror Individual CDD). Opsional;
+  // kolom bebas address_line/city/province tetap dipakai untuk teks alamat detail.
+  @IsOptional()
+  @IsString()
+  business_province_code?: string;
+
+  @IsOptional()
+  @IsString()
+  business_city_code?: string;
+
   @IsString()
   @IsNotEmpty()
   postal_code!: string;
 
+  // Bidang Usaha — menerima nama industri RBA V01 (exact) maupun nilai legacy.
   @IsString()
   @IsNotEmpty()
   business_activity!: string;
+
+  @IsOptional()
+  @IsString()
+  business_activity_other?: string;
 
   @IsOptional()
   @IsString()
@@ -297,7 +344,15 @@ export class CreateBusinessDto {
 
   @IsOptional()
   @IsString()
+  source_of_funds_other?: string;
+
+  @IsOptional()
+  @IsString()
   business_relationship_purpose?: string;
+
+  @IsOptional()
+  @IsString()
+  business_relationship_purpose_other?: string;
 
   @IsOptional()
   @IsIn(["Aplikasi Digital", "Agen Pihak Ketiga", "Outlet Fisik"])
@@ -443,5 +498,13 @@ export class CreatePartyDto {
 
   @IsOptional()
   @IsString()
+  source_of_funds_other?: string;
+
+  @IsOptional()
+  @IsString()
   source_of_wealth?: string;
+
+  @IsOptional()
+  @IsString()
+  source_of_wealth_other?: string;
 }
