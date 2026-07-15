@@ -60,6 +60,7 @@ export const INDUSTRY_CATEGORIES = [
   'Pemerintah',
   'Bahan Sembako',
   'Hobi, Mainan dan Kerajinan',
+  'Lainnya',
 ];
 
 export const MONTHLY_INCOME_RANGES = [

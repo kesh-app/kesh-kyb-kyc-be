@@ -848,8 +848,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'REJECTED', reason: 'Data tidak sesuai' })
         .expect(200);
 
-      expect(res.body.status).toBe('REJECTED');
-      expect(res.body.decision_reason).toBe('Data tidak sesuai');
+      expect(res.body.status).toBe('REVISION_REQUIRED');
+      expect(res.body.revision_reason).toBe('Data tidak sesuai');
     });
 
     // Helper: create → submit individual, return appId siap di-decide.
@@ -915,14 +915,15 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('APPROVED');
     });
 
-    it('E-07: OperationSupervisor reject KYC (LOW/MEDIUM risk) → 200 REJECTED', async () => {
+    it('E-07: OperationSupervisor reject KYC (LOW/MEDIUM risk) → 200 REVISION_REQUIRED', async () => {
       const appId = await createSubmittedIndividual(7);
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'REJECTED', reason: 'tidak sesuai' })
         .expect(200);
-      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.status).toBe('REVISION_REQUIRED');
+      expect(res.body.revision_reason).toBe('tidak sesuai');
     });
 
     it('E-10: OperationSupervisor tidak bisa approve HIGH risk KYC → 403', async () => {
@@ -942,7 +943,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.message).toContain('Lead Compliance');
     });
 
-    it('E-11: ComplianceLead bisa approve HIGH risk KYC → 200 APPROVED', async () => {
+    it('E-11: ComplianceLead bisa return HIGH risk KYC untuk revisi → 200 REVISION_REQUIRED', async () => {
       const appId = await createSubmittedIndividual(11);
       await pgPool.query(
         `INSERT INTO application_risk(application_id, risk_score, risk_level, factors)
@@ -950,13 +951,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
          ON CONFLICT (application_id) DO UPDATE SET risk_level='HIGH'`,
         [Number(appId)],
       );
-      // HIGH risk juga butuh EDD sebelum approve — skip via reject
+      // HIGH risk butuh EDD sebelum approve — return untuk revisi via REJECTED action
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
         .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ decision: 'REJECTED', reason: 'high risk - ditolak oleh lead' })
+        .send({ decision: 'REJECTED', reason: 'high risk - perlu perbaikan dokumen' })
         .expect(200);
-      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.status).toBe('REVISION_REQUIRED');
+      expect(res.body.revision_reason).toBe('high risk - perlu perbaikan dokumen');
     });
 
     it('E-12: Director bisa approve KYC (full access via guard bypass) → 200', async () => {
@@ -1001,6 +1003,246 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'APPROVED', reason: 'lengkap' })
         .expect(200);
       expect(res.body.status).toBe('APPROVED');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // E-REV. REVISION_REQUIRED — FrontDesk edit & resubmit flow
+  // ══════════════════════════════════════════════════════════
+  describe('E-REV. Revision Required flow', () => {
+    // Shared appId untuk seluruh blok revision test
+    let revAppId: string;
+
+    // Helper: buat dan submit individual, kembalikan appId string
+    async function createAndSubmitForRevision(tag: number): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Revision Test ${tag} ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3177${tag}0${SUFFIX}`,
+          address_identity: 'Jl. Revisi No. 1',
+          pob: 'Bandung',
+          dob: '1992-06-15',
+          nationality: 'ID',
+          phone: `0817${tag}${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/rev_sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/rev_ktp.jpg' })
+        .expect(201);
+      await uploadFacePhotoDocs(appId);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      return appId;
+    }
+
+    it('E-REV-01: OperationSupervisor returns LOW/MEDIUM app for revision → 200 REVISION_REQUIRED', async () => {
+      revAppId = await createAndSubmitForRevision(1);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${revAppId}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION', reason: 'Dokumen KTP buram, mohon unggah ulang' })
+        .expect(200);
+
+      expect(res.body.status).toBe('REVISION_REQUIRED');
+      expect(res.body.revision_reason).toBe('Dokumen KTP buram, mohon unggah ulang');
+      expect(res.body.revision_requested_by).toBeTruthy();
+      expect(res.body.revision_requested_at).toBeTruthy();
+    });
+
+    it('E-REV-02: revision_reason wajib diisi → 400 jika kosong', async () => {
+      const appId = await createAndSubmitForRevision(2);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION' }) // tanpa reason
+        .expect(400);
+
+      expect(res.body.message).toContain('Alasan perbaikan wajib diisi');
+    });
+
+    it('E-REV-02b: REJECTED tanpa reason → 400 alasan perbaikan wajib diisi', async () => {
+      const appId = await createAndSubmitForRevision(22);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'REJECTED' }) // tanpa reason
+        .expect(400);
+
+      expect(res.body.message).toContain('Alasan perbaikan wajib diisi');
+    });
+
+    it('E-REV-03: GET /applications/:id menampilkan revision_reason dan revision_requested_at', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${revAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.application.status).toBe('REVISION_REQUIRED');
+      expect(res.body.application.revision_reason).toBe('Dokumen KTP buram, mohon unggah ulang');
+      expect(res.body.application.revision_requested_at).toBeTruthy();
+    });
+
+    it('E-REV-04: GET /applications list returns revision_reason in REVISION_REQUIRED entries', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications?status=REVISION_REQUIRED`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(res.body.total).toBeGreaterThan(0);
+      const entry = res.body.data.find((a: any) => String(a.id) === revAppId);
+      expect(entry).toBeDefined();
+      expect(entry.revision_reason).toBe('Dokumen KTP buram, mohon unggah ulang');
+    });
+
+    it('E-REV-05: FrontDesk dapat edit CDD data di status REVISION_REQUIRED', async () => {
+      // Send a full update DTO so required fields are preserved (updateIndividualCdd does full replace)
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${revAppId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          identity_type: 'KTP',
+          identity_number: `31770${SUFFIX}`,
+          address_identity: 'Jl. Revisi No. 1 Update',
+          pob: 'Bandung',
+          dob: '1992-06-15',
+          nationality: 'ID',
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          company_name: 'PT Revisi',
+        })
+        .expect(200);
+
+      expect(res.body.application.status).toBe('REVISION_REQUIRED');
+    });
+
+    it('E-REV-06: FrontDesk dapat upload dokumen di status REVISION_REQUIRED', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${revAppId}/documents`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ doc_type: 'INDIVIDUAL_KTP_PHOTO', file_uri: 'https://storage.test/rev_ktp_new.jpg' })
+        .expect(201);
+
+      expect(res.body.doc_type).toBe('INDIVIDUAL_KTP_PHOTO');
+    });
+
+    it('E-REV-07: FrontDesk dapat submit ulang dari REVISION_REQUIRED → status SUBMITTED', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${revAppId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      // LOW/MEDIUM risk → SUBMITTED (bukan IN_REVIEW)
+      expect(['SUBMITTED', 'IN_REVIEW']).toContain(res.body.status);
+    });
+
+    it('E-REV-07b: Setelah resubmit dari REVISION_REQUIRED, status tidak lagi REVISION_REQUIRED', async () => {
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${revAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.application.status).not.toBe('REVISION_REQUIRED');
+      // revision_reason tetap terjaga untuk histori
+      expect(detail.body.application.revision_reason).toBe('Dokumen KTP buram, mohon unggah ulang');
+    });
+
+    it('E-REV-08: ComplianceLead returns HIGH risk app for revision → 200 REVISION_REQUIRED', async () => {
+      const appId = await createAndSubmitForRevision(8);
+
+      // Force HIGH risk via DB
+      await pgPool.query(
+        `INSERT INTO application_risk(application_id, risk_score, risk_level, factors)
+         VALUES($1, 100, 'HIGH', '{}'::jsonb)
+         ON CONFLICT (application_id) DO UPDATE SET risk_level='HIGH'`,
+        [Number(appId)],
+      );
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION', reason: 'Data penghasilan tidak konsisten dengan profil risiko' })
+        .expect(200);
+
+      expect(res.body.status).toBe('REVISION_REQUIRED');
+      expect(res.body.revision_reason).toBe('Data penghasilan tidak konsisten dengan profil risiko');
+    });
+
+    it('E-REV-09: FrontDesk tidak bisa approve/return → 403', async () => {
+      const appId = await createAndSubmitForRevision(9);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION', reason: 'test' })
+        .expect(403);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+    });
+
+    it('E-REV-10: OperationSupervisor tidak bisa return HIGH risk app → 403', async () => {
+      const appId = await createAndSubmitForRevision(10);
+
+      await pgPool.query(
+        `INSERT INTO application_risk(application_id, risk_score, risk_level, factors)
+         VALUES($1, 100, 'HIGH', '{}'::jsonb)
+         ON CONFLICT (application_id) DO UPDATE SET risk_level='HIGH'`,
+        [Number(appId)],
+      );
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION', reason: 'coba return HIGH' })
+        .expect(403);
+
+      expect(res.body.message).toContain('Lead Compliance');
+    });
+
+    it('E-REV-11: ComplianceLead tidak bisa return LOW/MEDIUM risk app → 403', async () => {
+      const appId = await createAndSubmitForRevision(11);
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION', reason: 'coba return LOW' })
+        .expect(403);
+
+      expect(res.body.message).toContain('Operation Supervisor');
+    });
+
+    it('E-REV-12: Submit dari status selain DRAFT/REVISION_REQUIRED → 400', async () => {
+      // App yang sudah SUBMITTED tidak bisa di-submit lagi
+      const appId = await createAndSubmitForRevision(12);
+      // appId sudah dalam status SUBMITTED setelah createAndSubmitForRevision
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(400);
+
+      expect(res.body.message).toContain('SUBMITTED');
     });
   });
 
@@ -2321,6 +2563,49 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const bo = detail.body.parties.find((p: any) => p.role === 'BO');
       expect(bo.source_of_funds).toBe('Lainnya');
       expect(bo.source_of_funds_other).toBe('penjualan properti warisan');
+    });
+
+    it('GE-19: Business create business_activity="Layanan Finansial - Payment Gateway / PJP 1-2" → 201', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ business_activity: 'Layanan Finansial - Payment Gateway / PJP 1-2' }))
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${res.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.business.business_activity).toBe('Layanan Finansial - Payment Gateway / PJP 1-2');
+    });
+
+    it('GE-20: Business create business_activity="Lainnya" + business_activity_other → 201, keduanya tersimpan', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({
+          business_activity: 'Lainnya',
+          business_activity_other: 'Ekspedisi barang khusus B3',
+        }))
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${res.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.business.business_activity).toBe('Lainnya');
+      expect(detail.body.business.business_activity_other).toBe('Ekspedisi barang khusus B3');
+    });
+
+    it('GE-21: Business create business_activity="Lainnya" tanpa business_activity_other → 400', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ business_activity: 'Lainnya' }))
+        .expect(400);
+      expect(res.body.message).toContain('Bidang Usaha');
     });
   });
 
@@ -4062,7 +4347,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.message).toContain('EDD');
     });
 
-    it('O-04: REJECT HIGH RISK tanpa EDD → 200 REJECTED (diizinkan)', async () => {
+    it('O-04: REJECT HIGH RISK tanpa EDD → 200 REVISION_REQUIRED (dikembalikan untuk perbaikan)', async () => {
       eddRejectAppId = await createHighRiskIndividual(`31890001${SUFFIX}`, `088801${SUFFIX}`);
 
       await request(app.getHttpServer())
@@ -4073,10 +4358,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddRejectAppId}/decision`)
         .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ decision: 'REJECTED', reason: 'HIGH RISK reject tanpa EDD' })
+        .send({ decision: 'REJECTED', reason: 'HIGH RISK - perlu perbaikan data sebelum EDD' })
         .expect(200);
 
-      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.status).toBe('REVISION_REQUIRED');
+      expect(res.body.revision_reason).toBe('HIGH RISK - perlu perbaikan data sebelum EDD');
     });
 
     it('O-05: GET /applications/:id/edd → 200, edd_required=true, applicant_snapshot terisi', async () => {
@@ -7631,6 +7917,74 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(industryParam.score).toBe(3);
         expect(industryParam.mapped_to).toBe('Aktivitas Keuangan dan Asuransi');
       });
+
+      it('V3-07: GET /references/industry-categories → mengembalikan "Lainnya" sebagai opsi valid', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/references/industry-categories`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        const codes = res.body.data.map((c: any) => c.code);
+        expect(codes).toContain('Lainnya');
+        // code === name per spesifikasi
+        const lainnya = res.body.data.find((c: any) => c.code === 'Lainnya');
+        expect(lainnya.name).toBe('Lainnya');
+      });
+
+      it('V3-08: Individual create industry_category="Periklanan" (dari daftar baru) → 201', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({ industry_category: 'Periklanan', identity_number: `323008${SUFFIX}` }))
+          .expect(201);
+        expect(res.body.status).toBe('DRAFT');
+      });
+
+      it('V3-09: Individual create industry_category="Lainnya" + industry_category_other → 201, keduanya tersimpan', async () => {
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            industry_category: 'Lainnya',
+            industry_category_other: 'Desainer Interior',
+            identity_number: `323009${SUFFIX}`,
+          }))
+          .expect(201);
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${create.body.id}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+        expect(detail.body.person.industry_category).toBe('Lainnya');
+        expect(detail.body.person.industry_category_other).toBe('Desainer Interior');
+      });
+
+      it('V3-10: Individual create industry_category="Lainnya" tanpa other → 400 wajib diisi', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({ industry_category: 'Lainnya', identity_number: `323010${SUFFIX}` }))
+          .expect(400);
+        expect(res.body.message).toContain('Bidang Industri');
+      });
+
+      it('V3-11: RBA untuk industry_category="Lainnya" → Bidang Industri INCOMPLETE (tidak dipaksakan skor)', () => {
+        const { computeRbaV01 } = require('../../src/modules/applications/rba-v01.engine');
+        const result = computeRbaV01({
+          type: 'INDIVIDUAL',
+          occupation: 'Profesional',
+          source_of_funds: 'Gaji',
+          industry_category: 'Lainnya',
+          business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+          province_name: 'DKI Jakarta',
+          distribution_channel: 'Outlet Fisik',
+          name_screening_result: 'CLEAR',
+        });
+        // "Lainnya" bukan nama industri RBA V01 dan bukan keyword — harus INCOMPLETE
+        expect(result.rba_calculation_status).toBe('INCOMPLETE');
+        const unmapped = result.rba_unmapped_parameters ?? [];
+        expect(unmapped.some((u: any) => u.parameter === 'Bidang Industri')).toBe(true);
+      });
     });
   });
 
@@ -7824,15 +8178,16 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.data.some((n: any) => n.code === 'ID')).toBe(true);
     });
 
-    it('W-08: GET /references/industry-categories → 200, semua kategori tersedia', async () => {
+    it('W-08: GET /references/industry-categories → 200, semua kategori tersedia termasuk Lainnya', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/references/industry-categories`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
       expect(Array.isArray(res.body.data)).toBe(true);
-      expect(res.body.data.length).toBeGreaterThanOrEqual(45);
+      expect(res.body.data.length).toBeGreaterThanOrEqual(46);
       expect(res.body.data.some((c: any) => c.code === 'Elektronik')).toBe(true);
+      expect(res.body.data.some((c: any) => c.code === 'Lainnya')).toBe(true);
     });
 
     it('W-09: GET /references/monthly-income-ranges → 200, 6 range tersedia', async () => {

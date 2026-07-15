@@ -910,9 +910,9 @@ export class ApplicationsService {
         "Update CDD hanya berlaku untuk aplikasi Individual",
       );
     }
-    if (app.status !== "DRAFT") {
+    if (!["DRAFT", "REVISION_REQUIRED"].includes(app.status)) {
       throw new BadRequestException(
-        "Data CDD hanya dapat diubah saat status DRAFT",
+        "Data CDD hanya dapat diubah saat status DRAFT atau REVISION_REQUIRED",
       );
     }
 
@@ -2404,6 +2404,18 @@ export class ApplicationsService {
   }
 
   async submit(appId: number, reviewerId: number) {
+    const { rows: statusRows } = await this.pool.query(
+      `SELECT status FROM applications WHERE id=$1`,
+      [appId],
+    );
+    if (!statusRows[0]) throw new NotFoundException("Application not found");
+    const currentStatus = statusRows[0].status;
+    if (!["DRAFT", "REVISION_REQUIRED"].includes(currentStatus)) {
+      throw new BadRequestException(
+        `Tidak dapat submit dari status ${currentStatus}. Hanya bisa dari DRAFT atau REVISION_REQUIRED.`,
+      );
+    }
+
     await this.validateBeforeSubmit(appId);
 
     const res = await this.pool.query(
@@ -2589,6 +2601,9 @@ export class ApplicationsService {
           a.status,
           a.created_at,
           a.updated_at,
+          a.revision_reason,
+          a.revision_requested_by,
+          a.revision_requested_at,
           COALESCE(ar.override_level, ar.risk_level) AS risk_level,
           CASE WHEN a.type = 'INDIVIDUAL' AND p.cif_relationship_type = 'WIC' THEN NULL WHEN a.type = 'INDIVIDUAL' THEN p.cif_no ELSE b.cif_no END AS cif_no,
           CASE WHEN a.type = 'INDIVIDUAL' THEN p.cif_relationship_type ELSE 'OUR_CUSTOMER' END AS cif_relationship_type,
@@ -3034,7 +3049,7 @@ export class ApplicationsService {
 
   async decide(
     appId: number,
-    decision: "APPROVED" | "REJECTED",
+    decision: "APPROVED" | "REJECTED" | "RETURN_FOR_REVISION",
     reason: string | null,
     user: { sub?: number | string; id?: number | string; role: string },
   ) {
@@ -3135,16 +3150,34 @@ export class ApplicationsService {
       if (!riskRows.length) {
         await this.screenAndComputeRisk(appId);
       }
+
+      const res = await this.pool.query(
+        `UPDATE applications
+         SET status='APPROVED', decision_by=$2, decision_reason=$3, decision_at=now(), updated_at=now()
+         WHERE id=$1
+         RETURNING id, status, decision_reason, decision_at`,
+        [appId, reviewerId, reason || null],
+      );
+      return res.rows[0];
+    } else {
+      // REJECTED or RETURN_FOR_REVISION → kembalikan ke Frontline untuk perbaikan data.
+      // Status menjadi REVISION_REQUIRED; alasan perbaikan wajib diisi.
+      if (!reason?.trim()) {
+        throw new BadRequestException("Alasan perbaikan wajib diisi.");
+      }
+
+      const res = await this.pool.query(
+        `UPDATE applications
+         SET status='REVISION_REQUIRED',
+             revision_reason=$2,
+             revision_requested_by=$3,
+             revision_requested_at=now(),
+             updated_at=now()
+         WHERE id=$1
+         RETURNING id, status, revision_reason, revision_requested_by, revision_requested_at`,
+        [appId, reason, reviewerId],
+      );
+      return res.rows[0];
     }
-
-    const res = await this.pool.query(
-      `UPDATE applications
-       SET status=$2, decision_by=$3, decision_reason=$4, decision_at=now(), updated_at=now()
-       WHERE id=$1
-       RETURNING id, status, decision_reason, decision_at`,
-      [appId, decision, reviewerId, reason || null],
-    );
-
-    return res.rows[0];
   }
 }

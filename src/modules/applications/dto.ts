@@ -375,8 +375,8 @@ export class AddDocumentDto {
 }
 
 export class DecisionDto {
-  @IsIn(["APPROVED", "REJECTED"])
-  decision!: "APPROVED" | "REJECTED";
+  @IsIn(["APPROVED", "REJECTED", "RETURN_FOR_REVISION"])
+  decision!: "APPROVED" | "REJECTED" | "RETURN_FOR_REVISION";
 
   @IsOptional()
   @IsString()
@@ -412,6 +412,7 @@ export class ListApplicationsQueryDto {
     "ESCALATED",
     "APPROVED",
     "REJECTED",
+    "REVISION_REQUIRED",
   ])
   status?: string;
 
