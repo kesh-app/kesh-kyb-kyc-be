@@ -1135,6 +1135,23 @@ export class ApplicationsService {
     return this.getDetail(appId);
   }
 
+  // Optional share ownership percentage (Director/Commissioner). Returns null when
+  // not provided; validates 0..100 when provided. Accepts numeric or numeric-string.
+  private normalizeSharePercentage(
+    value: unknown,
+    label: string,
+  ): number | null {
+    if (value === undefined || value === null || value === "") return null;
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n)) {
+      throw new BadRequestException(`${label} harus berupa angka.`);
+    }
+    if (n < 0 || n > 100) {
+      throw new BadRequestException(`${label} harus di antara 0 dan 100.`);
+    }
+    return n;
+  }
+
   async createBusiness(dto: any, userId: number, branchId?: number) {
     // ── B.5 NPWP Badan Usaha: wajib tepat 15 digit angka (digits only) ─────────
     const npwpRaw = typeof dto.npwp === "string" ? dto.npwp.trim() : "";
@@ -1162,6 +1179,17 @@ export class ApplicationsService {
     ) {
       throw new BadRequestException("Nomor Identitas maksimal 16 karakter.");
     }
+
+    // ── Pengurus dan Pemegang Saham — porsi kepemilikan saham (opsional) ───────
+    // Direktur Utama / Komisaris. Bila diisi wajib 0–100 (boleh desimal).
+    const directorShare = this.normalizeSharePercentage(
+      dto.director_share_percentage,
+      "Porsi kepemilikan saham Direktur Utama",
+    );
+    const commissionerShare = this.normalizeSharePercentage(
+      dto.commissioner_share_percentage,
+      "Porsi kepemilikan saham Komisaris",
+    );
 
     // ── B.3 Alamat Kedudukan — validasi & resolusi dropdown provinsi/kota ──────
     const bizRegion = await this.validateAndResolveBusinessRegion(dto);
@@ -1198,9 +1226,10 @@ export class ApplicationsService {
           representative_signature_name, verification_officer, supervisor,
           source_of_funds, business_relationship_purpose, distribution_channel,
           legal_form_other, business_activity_other, source_of_funds_other, business_relationship_purpose_other,
-          business_province_code, business_province_name, business_city_code, business_city_name)
+          business_province_code, business_province_name, business_city_code, business_city_name,
+          director_share_percentage, commissioner_share_percentage)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-          $27,$28,$29,$30,$31,$32,$33,$34)
+          $27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
          RETURNING id`,
         [
           dto.legal_name,
@@ -1237,6 +1266,8 @@ export class ApplicationsService {
           bizRegion.business_province_name,
           bizRegion.business_city_code,
           bizRegion.business_city_name,
+          directorShare,
+          commissionerShare,
         ],
       );
       const businessId = q.rows[0].id;
@@ -1391,6 +1422,7 @@ export class ApplicationsService {
                 business_relationship_purpose, business_relationship_purpose_other,
                 distribution_channel,
                 pic_name, pic_position, pic_identity_number, pic_identity_type,
+                director_share_percentage, commissioner_share_percentage,
                 representative_signature_name, verification_officer, supervisor
          FROM business_entities WHERE id=$1`,
         [app.business_id],
@@ -1400,6 +1432,15 @@ export class ApplicationsService {
         // Alias label form terbaru (tanpa menduplikasi kolom fisik).
         business.business_form = business.legal_form;
         business.business_form_other = business.legal_form_other;
+        // pg mengembalikan NUMERIC sebagai string — kembalikan sebagai number|null.
+        business.director_share_percentage =
+          business.director_share_percentage === null
+            ? null
+            : Number(business.director_share_percentage);
+        business.commissioner_share_percentage =
+          business.commissioner_share_percentage === null
+            ? null
+            : Number(business.commissioner_share_percentage);
         // Ringkasan status watchlist per kategori (opsional; default CLEAR).
         const wl = await this.getBusinessWatchlistStatuses(appId);
         business.company_watchlist_status = wl.company_watchlist_status;
@@ -2808,19 +2849,34 @@ export class ApplicationsService {
     const userId = Number(user.sub ?? (user as any).id);
     const role = user.role;
 
-    // Section-based RBAC: FrontDesk fills I–III, ComplianceLead fills IV–VII.
+    // Section-based RBAC:
+    //   FrontDesk / Frontline  → sections I–IV
+    //     (applicant_snapshot, high_risk_reasons, additional_information, beneficial_owner)
+    //   ComplianceLead         → sections V–VII
+    //     (officer_analysis, compliance_decision, internal_checklist)
+    // director_decision (Director final approval) has been retired — it is neither
+    // editable nor validated; any legacy value is preserved read-only (see below).
     const FULL_ACCESS = ["SystemAdmin", "Director"];
-    const SECTIONS_I_III = ["applicant_snapshot", "high_risk_reasons", "additional_information"];
-    const SECTIONS_IV_VII = ["beneficial_owner", "officer_analysis", "compliance_decision", "director_decision", "internal_checklist"];
+    const SECTIONS_I_IV = [
+      "applicant_snapshot",
+      "high_risk_reasons",
+      "additional_information",
+      "beneficial_owner",
+    ];
+    const SECTIONS_V_VII = [
+      "officer_analysis",
+      "compliance_decision",
+      "internal_checklist",
+    ];
     if (!FULL_ACCESS.includes(role)) {
       const hasKey = (k: string) => Object.prototype.hasOwnProperty.call(body, k);
       if (role === "FrontDesk") {
-        if (SECTIONS_IV_VII.some(hasKey)) {
-          throw new ForbiddenException("Frontline hanya dapat mengisi EDD bagian I sampai III.");
+        if (SECTIONS_V_VII.some(hasKey)) {
+          throw new ForbiddenException("Frontline hanya dapat mengisi EDD bagian I sampai IV.");
         }
       } else if (role === "ComplianceLead") {
-        if (SECTIONS_I_III.some(hasKey)) {
-          throw new ForbiddenException("Lead Compliance hanya dapat mengisi EDD bagian IV sampai VII.");
+        if (SECTIONS_I_IV.some(hasKey)) {
+          throw new ForbiddenException("Lead Compliance hanya dapat mengisi EDD bagian V sampai VII.");
         }
       }
     }
@@ -2858,11 +2914,28 @@ export class ApplicationsService {
       officer_analysis: body.officer_analysis ?? curr?.officer_analysis ?? {},
       compliance_decision:
         body.compliance_decision ?? curr?.compliance_decision ?? {},
-      director_decision:
-        body.director_decision ?? curr?.director_decision ?? {},
+      // director_decision is deprecated: never taken from the request body, only
+      // the legacy stored value is preserved for backward compatibility.
+      director_decision: curr?.director_decision ?? {},
       internal_checklist:
         body.internal_checklist ?? curr?.internal_checklist ?? {},
     };
+
+    // Approval timestamps are backend-generated. When the compliance decision is
+    // being (re)submitted, stamp compliance_decision.date with the server clock and
+    // ignore any client-provided date. Applies whenever this PATCH carries the
+    // compliance_decision section with an actual decision value.
+    if (
+      Object.prototype.hasOwnProperty.call(body, "compliance_decision") &&
+      merged.compliance_decision &&
+      typeof merged.compliance_decision === "object" &&
+      merged.compliance_decision.decision
+    ) {
+      merged.compliance_decision = {
+        ...merged.compliance_decision,
+        date: new Date().toISOString(),
+      };
+    }
 
     // Dropdown companion validation for additional_information
     const addInfoMerged = merged.additional_information ?? {};

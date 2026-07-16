@@ -4675,16 +4675,25 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.high_risk_reasons.customer_characteristics).toContain('HIGH_RISK_OCCUPATION_OR_BUSINESS');
     });
 
-    it('GF-03: FrontDesk PATCH EDD sections IV-VII → 403 "Frontline hanya dapat mengisi EDD bagian I sampai III."', async () => {
+    it('GF-03: FrontDesk PATCH EDD sections V-VII → 403 "Frontline hanya dapat mengisi EDD bagian I sampai IV."', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${gfAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({ officer_analysis: { overall_risk_summary: 'HIGH' } })
         .expect(403);
-      expect(res.body.message).toContain('Frontline hanya dapat mengisi EDD bagian I sampai III');
+      expect(res.body.message).toContain('Frontline hanya dapat mengisi EDD bagian I sampai IV');
     });
 
-    it('GF-04: ComplianceLead PATCH EDD sections IV-VII → 200', async () => {
+    it('GF-03b: FrontDesk PATCH EDD section IV (beneficial_owner) → 200 (Frontline dapat mengisi BO)', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ beneficial_owner: { full_name: 'BO Frontline', ownership_percentage: 55 } })
+        .expect(200);
+      expect(res.body.beneficial_owner.full_name).toBe('BO Frontline');
+    });
+
+    it('GF-04: ComplianceLead PATCH EDD sections V-VII → 200', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${gfAppId}/edd`)
         .set('Authorization', `Bearer ${complianceToken}`)
@@ -4693,13 +4702,22 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.officer_analysis.overall_risk_summary).toBe('HIGH');
     });
 
-    it('GF-05: ComplianceLead PATCH EDD sections I-III → 403 "Lead Compliance hanya dapat mengisi EDD bagian IV sampai VII."', async () => {
+    it('GF-05: ComplianceLead PATCH EDD sections I-III → 403 "Lead Compliance hanya dapat mengisi EDD bagian V sampai VII."', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${gfAppId}/edd`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({ high_risk_reasons: { customer_characteristics: ['HACK'] } })
         .expect(403);
-      expect(res.body.message).toContain('Lead Compliance hanya dapat mengisi EDD bagian IV sampai VII');
+      expect(res.body.message).toContain('Lead Compliance hanya dapat mengisi EDD bagian V sampai VII');
+    });
+
+    it('GF-05b: ComplianceLead PATCH EDD section IV (beneficial_owner) → 403 (BO milik Frontline)', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${gfAppId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ beneficial_owner: { full_name: 'Should be blocked' } })
+        .expect(403);
+      expect(res.body.message).toContain('Lead Compliance hanya dapat mengisi EDD bagian V sampai VII');
     });
 
     it('GF-06: Auditor PATCH EDD → 403 (read-only)', async () => {
@@ -4931,6 +4949,392 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'APPROVE' })
         .expect(400);
       expect(res.body.message).toContain('OperationSupervisor');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // GG. Latest changes — KYB share portion, EDD role ownership/director removal,
+  //     EDD additional documents, and backend-generated approval timestamps.
+  // ══════════════════════════════════════════════════════════
+  describe('GG. KYB share portion + EDD docs + backend timestamps', () => {
+    let eddDocsAppId: string;
+    const eddDocIds: string[] = [];
+    const JPEG_1PX = Buffer.from(
+      'ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b08000100010101110000ffc4001f0000010501010101010100000000000000000102030405060708090a0bffda00080101000000010aff00ffd9',
+      'hex',
+    );
+
+    function baseBizBodyGG(tag: string) {
+      return {
+        legal_name: `PT GG ${tag} ${SUFFIX}`,
+        legal_form: 'PT',
+        incorporation_place: 'Jakarta',
+        incorporation_date: '2018-03-01',
+        deed_number: `AKTA-GG-${tag}-${SUFFIX}`,
+        business_license_number: `IZNGG${tag}${SUFFIX}`,
+        nib: `NIBGG${tag}${SUFFIX}`,
+        npwp: npwp15(`GG${tag}`),
+        address_line: 'Jl. GG No. 1',
+        city: 'Jakarta',
+        province: 'DKI Jakarta',
+        postal_code: '10110',
+        business_activity: 'Perdagangan Umum',
+        phone: `021GG${tag}${SUFFIX}`,
+      };
+    }
+
+    // ── 1. KYB share portion for Director & Commissioner ────────────────────
+    it('GG-01: KYB create with director/commissioner share percentage → 201 + detail returns them', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          ...baseBizBodyGG('A'),
+          director_share_percentage: 60,
+          commissioner_share_percentage: 40,
+        })
+        .expect(201);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${create.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.business.director_share_percentage).toBe(60);
+      expect(detail.body.business.commissioner_share_percentage).toBe(40);
+    });
+
+    it('GG-02: KYB decimal share percentage supported → 201 + returned as number', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          ...baseBizBodyGG('B'),
+          director_share_percentage: 33.33,
+          commissioner_share_percentage: 0,
+        })
+        .expect(201);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${create.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.business.director_share_percentage).toBeCloseTo(33.33, 2);
+      expect(detail.body.business.commissioner_share_percentage).toBe(0);
+    });
+
+    it('GG-03: KYB share percentage omitted → 201 + fields null (optional)', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ ...baseBizBodyGG('C') })
+        .expect(201);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${create.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      expect(detail.body.business.director_share_percentage).toBeNull();
+      expect(detail.body.business.commissioner_share_percentage).toBeNull();
+    });
+
+    it('GG-04: KYB director share > 100 → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ ...baseBizBodyGG('D'), director_share_percentage: 150 })
+        .expect(400);
+    });
+
+    it('GG-05: KYB commissioner share < 0 → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ ...baseBizBodyGG('E'), commissioner_share_percentage: -5 })
+        .expect(400);
+    });
+
+    // ── 4. EDD additional documents (Frontline) — multiple rows same doc_type ─
+    it('GG-06: EDD additional documents — upload two EDD_ADDITIONAL_DOCUMENT files', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GG EDD Docs ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `31896100${SUFFIX}`,
+          address_identity: 'Jl. GG EDD No. 1',
+          pob: 'Jakarta',
+          dob: '1988-01-01',
+          nationality: 'ID',
+          phone: `086100${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'M',
+          signature_uri: 'https://storage.test/gg_edd_sig.png',
+        })
+        .expect(201);
+      eddDocsAppId = String(create.body.id);
+
+      for (let i = 1; i <= 2; i++) {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/${eddDocsAppId}/documents/upload`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .field('doc_type', 'EDD_ADDITIONAL_DOCUMENT')
+          .attach('file', JPEG_1PX, { filename: `edd_extra_${i}.jpg`, contentType: 'image/jpeg' })
+          .expect(201);
+        expect(res.body.doc_type).toBe('EDD_ADDITIONAL_DOCUMENT');
+        eddDocIds.push(String(res.body.id));
+      }
+
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddDocsAppId}/documents`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      const eddDocs = list.body.filter((d: any) => d.doc_type === 'EDD_ADDITIONAL_DOCUMENT');
+      expect(eddDocs.length).toBe(2);
+    });
+
+    it('GG-07: EDD additional documents — add a 3rd (more than two) + visible in detail', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${eddDocsAppId}/documents/upload`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .field('doc_type', 'EDD_ADDITIONAL_DOCUMENT')
+        .attach('file', JPEG_1PX, { filename: 'edd_extra_3.jpg', contentType: 'image/jpeg' })
+        .expect(201);
+      eddDocIds.push(String(res.body.id));
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddDocsAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const eddDocs = detail.body.documents.filter(
+        (d: any) => d.doc_type === 'EDD_ADDITIONAL_DOCUMENT',
+      );
+      expect(eddDocs.length).toBe(3);
+    });
+
+    it('GG-08: EDD additional document — view (signed url) then delete works', async () => {
+      const docId = eddDocIds[0];
+      const urlRes = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddDocsAppId}/documents/${docId}/url`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(typeof urlRes.body.signed_url).toBe('string');
+
+      await request(app.getHttpServer())
+        .delete(`${BASE}/applications/${eddDocsAppId}/documents/${docId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${eddDocsAppId}/documents`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      const eddDocs = list.body.filter((d: any) => d.doc_type === 'EDD_ADDITIONAL_DOCUMENT');
+      expect(eddDocs.length).toBe(2);
+    });
+
+    // ── EDD HIGH RISK helper for timestamp / director-removal tests ──────────
+    async function createHighRiskForGG(identNum: string, phone: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GG EDD Risk ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: identNum,
+          address_identity: 'Jl. GG Risk No. 1',
+          pob: 'Jakarta',
+          dob: '1972-01-01',
+          nationality: 'ID',
+          phone,
+          occupation: 'casino dealer',
+          gender: 'M',
+          signature_uri: 'https://storage.test/gg_risk_sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      const { rows } = await pgPool.query('SELECT person_id FROM applications WHERE id=$1', [appId]);
+      await pgPool.query('UPDATE persons SET pep_self_declared=true WHERE id=$1', [rows[0].person_id]);
+      const docRes = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/gg_risk_ktp.jpg' })
+        .expect(201);
+      await pgPool.query('UPDATE documents SET status=$1 WHERE id=$2', ['REJECTED', docRes.body.id]);
+      await uploadFacePhotoDocs(appId);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      return appId;
+    }
+
+    // ── 3 + 6. EDD completes without director_decision; compliance date is
+    //          backend-generated & any client-provided date is ignored. ───────
+    it('GG-09: EDD completes without director_decision + compliance date backend-generated (client date ignored)', async () => {
+      const appId = await createHighRiskForGG(`31896200${SUFFIX}`, `086200${SUFFIX}`);
+
+      // FrontDesk fills I–IV
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/edd`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          applicant_snapshot: { full_name: `GG EDD Risk ${SUFFIX}`, customer_category: 'INDIVIDUAL' },
+          high_risk_reasons: { customer_characteristics: ['HIGH_RISK_OCCUPATION_OR_BUSINESS'] },
+          additional_information: {
+            source_of_funds: 'Gaji',
+            business_relationship_purpose: 'Kegiatan usaha atau transaksi bisnis',
+          },
+          beneficial_owner: { full_name: 'BO GG', ownership_percentage: 30 },
+        })
+        .expect(200);
+
+      // ComplianceLead fills V–VII, sends a bogus client date + a director_decision
+      // (both must be ignored). No director approval required for completion.
+      const clientDate = '1999-01-01T00:00:00.000Z';
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/edd`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          complete: true,
+          officer_analysis: {
+            overall_risk_summary: 'HIGH',
+            follow_up_recommendations: ['REQUEST_ADDITIONAL_DOCUMENTS'],
+            cdd_edd_consistency: 'CONSISTENT',
+          },
+          compliance_decision: { decision: 'APPROVED', date: clientDate, officer_name: 'Lead' },
+          director_decision: { decision: 'APPROVED', director_name: 'Should be ignored' },
+          internal_checklist: { edd_form_completed: true },
+        })
+        .expect(200);
+
+      // EDD completed relying on compliance decision only (no director approval).
+      expect(res.body.edd_completed).toBe(true);
+      // compliance_decision.date is backend-generated and NOT the client value.
+      expect(res.body.compliance_decision.date).toBeDefined();
+      expect(res.body.compliance_decision.date).not.toBe(clientDate);
+      const stamped = new Date(res.body.compliance_decision.date).getTime();
+      expect(Date.now() - stamped).toBeLessThan(60_000);
+      // director_decision from the request body must be ignored (deprecated).
+      expect(res.body.director_decision?.director_name).toBeUndefined();
+    });
+
+    // ── 6. KYC/KYB decision timestamp is backend-generated ──────────────────
+    it('GG-10: KYC/KYB approval decision_at is backend-generated', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GG Approve TS ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `31896300${SUFFIX}`,
+          address_identity: 'Jl. GG Approve No. 1',
+          pob: 'Bandung',
+          dob: '1991-01-01',
+          nationality: 'ID',
+          phone: `086300${SUFFIX}`,
+          occupation: 'Karyawan',
+          gender: 'M',
+          signature_uri: 'https://storage.test/gg_appr_sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/documents`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ doc_type: 'KTP', file_uri: 'https://storage.test/gg_appr_ktp.jpg' })
+        .expect(201);
+      await uploadFacePhotoDocs(appId);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      // Send a bogus decision_at in the body — it must be ignored (whitelist + now()).
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'APPROVED', decision_at: '1990-01-01T00:00:00.000Z' })
+        .expect(200);
+
+      expect(res.body.status).toBe('APPROVED');
+      expect(res.body.decision_at).toBeDefined();
+      const stamped = new Date(res.body.decision_at).getTime();
+      expect(Date.now() - stamped).toBeLessThan(60_000);
+    });
+
+    // ── 6. Transfer supervisor/finance/final timestamps are backend-generated ─
+    it('GG-11: Transfer supervisor & finance review timestamps are backend-generated', async () => {
+      const senderApp = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `GG Transfer TS ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `31896400${SUFFIX}`,
+          address_identity: 'Jl. GG Transfer No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `086400${SUFFIX}`,
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/gg_trx_sig.png',
+        })
+        .expect(201);
+      const senderAppId = String(senderApp.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [senderAppId]);
+
+      const createRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 75_000,
+          sender_application_id: Number(senderAppId),
+          beneficiaryBankName: 'Bank GG',
+          beneficiaryAccountNumber: '5556667778',
+          beneficiaryAccountName: 'Penerima GG',
+        })
+        .expect(201);
+      const txId = String(createRes.body.id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+
+      // Supervisor review — send a bogus timestamp; server must ignore it.
+      const supRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok', supervisor_reviewed_at: '1990-01-01T00:00:00.000Z' })
+        .expect(201);
+      expect(supRes.body.supervisor_reviewed_at).not.toBeNull();
+      expect(Date.now() - new Date(supRes.body.supervisor_reviewed_at).getTime()).toBeLessThan(60_000);
+
+      const staffRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+      expect(staffRes.body.finance_reviewed_at).not.toBeNull();
+      expect(Date.now() - new Date(staffRes.body.finance_reviewed_at).getTime()).toBeLessThan(60_000);
+
+      const finalRes = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(201);
+      expect(finalRes.body.approved_at).not.toBeNull();
+      expect(Date.now() - new Date(finalRes.body.approved_at).getTime()).toBeLessThan(60_000);
     });
   });
 
@@ -7912,7 +8316,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           name_screening_result: 'CLEAR',
         });
         expect(result.rba_calculation_status).toBe('COMPLETE');
-        const industryParam = result.rba_components.customer.parameters.find((p: any) => p.name === 'Bidang Industri');
+        const industryParam = result.rba_components.components.industry;
         expect(industryParam).toBeDefined();
         expect(industryParam.score).toBe(3);
         expect(industryParam.mapped_to).toBe('Aktivitas Keuangan dan Asuransi');
@@ -8718,7 +9122,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(codes).toContain('Agen Pihak Ketiga');
       expect(codes).toContain('Outlet Fisik');
       expect(res.body.data.find((d: any) => d.code === 'Aplikasi Digital').score).toBe(3);
-      expect(res.body.data.find((d: any) => d.code === 'Outlet Fisik').score).toBe(2);
+      // Workbook V01: Outlet Fisik downgraded 2 → 1
+      expect(res.body.data.find((d: any) => d.code === 'Outlet Fisik').score).toBe(1);
     });
 
     it('R-01c: GET /references/rba/products → only Produk Remitansi = 3', async () => {
@@ -8744,14 +9149,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.data.find((d: any) => d.name === 'Pertanian, Kehutanan, dan Perikanan')?.score).toBe(1);
     });
 
-    it('R-01e: GET /references/rba/geographies → 34 provinces, DKI Jakarta = 3', async () => {
+    it('R-01e: GET /references/rba/geographies → 32 workbook provinces, DKI Jakarta = 3', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/references/rba/geographies`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
-      expect(res.body.data.length).toBe(34);
+      // Workbook sheet 3 lists exactly 32 unique provinces (Sumatera Selatan &
+      // Sulawesi Tenggara are not in the workbook → not mappable).
+      expect(res.body.data.length).toBe(32);
       expect(res.body.data.find((d: any) => d.name === 'DKI Jakarta')?.score).toBe(3);
-      expect(res.body.data.find((d: any) => d.name === 'Aceh')?.score).toBe(1);
+      expect(res.body.data.find((d: any) => d.name === 'Papua Barat')?.score).toBe(3);
+      expect(res.body.data.find((d: any) => d.name === 'Aceh')?.score).toBe(2);
+      expect(res.body.data.find((d: any) => d.name === 'Bengkulu')?.score).toBe(1);
+      expect(res.body.data.find((d: any) => d.name === 'Sumatera Selatan')).toBeUndefined();
     });
 
     it('R-01f: GET /references/rba/source-of-funds → Gaji = 1, Investasi = 3', async () => {
@@ -8789,10 +9199,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(risk.rba_score_v01).toBeLessThanOrEqual(3);
       // risk_level must match threshold
       expect(['LOW', 'MEDIUM', 'HIGH']).toContain(risk.risk_level);
-      // Name Screening / Watchlist is mapped (CLEAR → score 1), appears in customer.parameters
-      const nsParam = (risk.rba_components?.customer?.parameters ?? []).find((p: any) => p.name === 'Name Screening / Watchlist');
+      // Name Screening is mapped (CLEAR → score 0 in workbook V01)
+      const nsParam = risk.rba_components?.components?.name_screening;
       expect(nsParam).toBeDefined();
-      expect(nsParam.score).toBe(1);
+      expect(nsParam.score).toBe(0);
       expect(nsParam.weight).toBe(0.01);
       // Name Screening is NOT in unmapped_parameters when mapped
       const nsUnmapped = (risk.rba_unmapped_parameters ?? []).find((p: any) => p.parameter === 'Name Screening / Watchlist');
@@ -8916,11 +9326,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(dist).toBeDefined();
     });
 
-    // ── R-07: Name Screening / Watchlist scoring behavior ────────────────────
-    it('R-07: Name Screening uses weight 0.01; CLEAR=1, NO_MATCH=1, NEAR_MATCH=2, MATCH=3, null→INCOMPLETE', () => {
-      const { computeRbaV01, CUSTOMER_WEIGHTS_INDIVIDUAL } = require('../../src/modules/applications/rba-v01.engine');
+    // ── R-07: Name Screening / Watchlist scoring behavior (workbook V01) ──────
+    it('R-07: Name Screening weight 0.01; CLEAR/NO_MATCH=0, PEP/DTTOT/DPPSPM/PPPSPM/MATCH=3, NEAR_MATCH→INCOMPLETE', () => {
+      const { computeRbaV01, PARAMETER_WEIGHTS } = require('../../src/modules/applications/rba-v01.engine');
 
-      expect(CUSTOMER_WEIGHTS_INDIVIDUAL.name_screening).toBe(0.01);
+      expect(PARAMETER_WEIGHTS.name_screening).toBe(0.01);
 
       const base = {
         type: 'INDIVIDUAL',
@@ -8931,35 +9341,39 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         province_name: 'DKI Jakarta',
         distribution_channel: 'Outlet Fisik',
       };
+      const nsOf = (r: any) => r.rba_components.components.name_screening;
 
-      // CLEAR → score 1, COMPLETE, appears in customer.parameters
-      const clear = computeRbaV01({ ...base, name_screening_result: 'CLEAR' });
-      expect(clear.rba_calculation_status).toBe('COMPLETE');
-      const clearNS = clear.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist');
-      expect(clearNS?.score).toBe(1);
-      expect(clearNS?.weight).toBe(0.01);
+      // No-match/clear/false-positive/dismissed → score 0, COMPLETE
+      for (const v of ['CLEAR', 'NO_MATCH', 'FALSE_POSITIVE', 'DISMISSED']) {
+        const r = computeRbaV01({ ...base, name_screening_result: v });
+        expect(r.rba_calculation_status).toBe('COMPLETE');
+        expect(nsOf(r).score).toBe(0);
+        expect(nsOf(r).weight).toBe(0.01);
+      }
 
-      // NO_MATCH → score 1
-      const noMatch = computeRbaV01({ ...base, name_screening_result: 'NO_MATCH' });
-      expect(noMatch.rba_calculation_status).toBe('COMPLETE');
-      expect(noMatch.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(1);
+      // Confirmed hits → score 3, COMPLETE
+      for (const v of ['PEP', 'DTTOT', 'DPPSPM', 'PPPSPM', 'MATCH', 'CONFIRMED_MATCH']) {
+        const r = computeRbaV01({ ...base, name_screening_result: v });
+        expect(r.rba_calculation_status).toBe('COMPLETE');
+        expect(nsOf(r).score).toBe(3);
+      }
 
-      // NEAR_MATCH → score 2
+      // NEAR_MATCH → INCOMPLETE (no score 2 in workbook), unmapped w/ review reason
       const near = computeRbaV01({ ...base, name_screening_result: 'NEAR_MATCH' });
-      expect(near.rba_calculation_status).toBe('COMPLETE');
-      expect(near.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(2);
+      expect(near.rba_calculation_status).toBe('INCOMPLETE');
+      expect(near.rba_score_v01).toBeNull();
+      expect(nsOf(near).score).toBeNull();
+      const nearUnmapped = near.rba_unmapped_parameters.find((p: any) => p.parameter === 'Name Screening / Watchlist');
+      expect(nearUnmapped).toBeDefined();
+      expect(nearUnmapped.value).toBe('NEAR_MATCH');
+      expect(nearUnmapped.reason).toContain('Near match requires review');
 
-      // MATCH → score 3
-      const match = computeRbaV01({ ...base, name_screening_result: 'MATCH' });
-      expect(match.rba_calculation_status).toBe('COMPLETE');
-      expect(match.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(3);
+      // UNREVIEWED → INCOMPLETE (same near-match reason)
+      const unreviewed = computeRbaV01({ ...base, name_screening_result: 'UNREVIEWED' });
+      expect(unreviewed.rba_calculation_status).toBe('INCOMPLETE');
+      expect(unreviewed.rba_unmapped_parameters.find((p: any) => p.parameter === 'Name Screening / Watchlist')?.value).toBe('NEAR_MATCH');
 
-      // CONFIRMED_MATCH → score 3
-      const confirmed = computeRbaV01({ ...base, name_screening_result: 'CONFIRMED_MATCH' });
-      expect(confirmed.rba_calculation_status).toBe('COMPLETE');
-      expect(confirmed.rba_components.customer.parameters.find((p: any) => p.name === 'Name Screening / Watchlist')?.score).toBe(3);
-
-      // null → INCOMPLETE, in unmapped_parameters
+      // null → INCOMPLETE, "not provided"
       const noResult = computeRbaV01({ ...base, name_screening_result: null });
       expect(noResult.rba_calculation_status).toBe('INCOMPLETE');
       expect(noResult.rba_score_v01).toBeNull();
@@ -8967,7 +9381,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(nsUnmapped).toBeDefined();
       expect(nsUnmapped.reason).toContain('not provided');
 
-      // unknown value → INCOMPLETE, in unmapped_parameters with actual value
+      // unknown value → INCOMPLETE, "not mapped", carries actual value
       const unknown = computeRbaV01({ ...base, name_screening_result: 'UNKNOWN_STATUS' });
       expect(unknown.rba_calculation_status).toBe('INCOMPLETE');
       const nsUnknown = unknown.rba_unmapped_parameters.find((p: any) => p.parameter === 'Name Screening / Watchlist');
@@ -9005,8 +9419,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(detail.body.risk.rba_score_v01).toBeNull();
     });
 
-    // ── R-10: rba_components has all 4 sub-components, product always remittance
-    it('R-10: rba_components always has customer/product/geography/distribution; product = Produk Remitansi (3)', async () => {
+    // ── R-10: rba_components is DIRECT_WEIGHTED_SUM with all 8 parameters ──────
+    it('R-10: rba_components uses DIRECT_WEIGHTED_SUM; product = Produk Remitansi (3, weight 0.10)', async () => {
       const appId = await createRbaIndividual(`R10${SUFFIX}`, {
         occupation: 'Karyawan Swasta',
         source_of_funds: 'Gaji',
@@ -9021,14 +9435,126 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
-      const comp = detail.body.risk?.rba_components ?? {};
-      expect(comp).toHaveProperty('customer');
-      expect(comp).toHaveProperty('product');
-      expect(comp).toHaveProperty('geography');
-      expect(comp).toHaveProperty('distribution');
+      const rba = detail.body.risk?.rba_components ?? {};
+      expect(rba.calculation_model).toBe('DIRECT_WEIGHTED_SUM');
+      const comp = rba.components ?? {};
+      // No customer wrapper anymore — flat, direct-weighted parameters
+      expect(comp).not.toHaveProperty('customer');
+      for (const key of [
+        'occupation_or_business_form', 'source_of_funds', 'industry',
+        'business_relationship_purpose', 'name_screening', 'product',
+        'geography', 'distribution',
+      ]) {
+        expect(comp).toHaveProperty(key);
+      }
       expect(comp.product?.value).toBe('Produk Remitansi');
       expect(comp.product?.score).toBe(3);
-      expect(comp.product?.weight).toBe(0.20);
+      expect(comp.product?.weight).toBe(0.10);
+      expect(comp.distribution?.weight).toBe(0.20);
+      expect(comp.occupation_or_business_form?.weight).toBe(0.30);
+    });
+
+    // ── R-11: Direct weighted sum matches workbook "Sampling" sheet exactly ────
+    it('R-11: DIRECT_WEIGHTED_SUM reproduces workbook Sampling rows (2.09 & 2.42), not customer×0.55', () => {
+      const { computeRbaV01, PARAMETER_WEIGHTS } = require('../../src/modules/applications/rba-v01.engine');
+
+      // Weights are the direct per-parameter weights (Σ = 1.00), no 0.55 wrapper
+      expect(PARAMETER_WEIGHTS.occupation_or_business_form).toBe(0.30);
+      expect(PARAMETER_WEIGHTS.source_of_funds).toBe(0.08);
+      expect(PARAMETER_WEIGHTS.industry).toBe(0.15);
+      expect(PARAMETER_WEIGHTS.business_relationship_purpose).toBe(0.01);
+      expect(PARAMETER_WEIGHTS.name_screening).toBe(0.01);
+      expect(PARAMETER_WEIGHTS.product).toBe(0.10);
+      expect(PARAMETER_WEIGHTS.geography).toBe(0.15);
+      expect(PARAMETER_WEIGHTS.distribution).toBe(0.20);
+      const sum = (Object.values(PARAMETER_WEIGHTS) as number[]).reduce((a, b) => a + b, 0);
+      expect(Number(sum.toFixed(2))).toBe(1.00);
+
+      // Sampling row 1: Karyawan Swasta / Gaji / Konsultan / TF Keluarga / clear /
+      //                 Remitansi / Jakarta / Outlet Fisik = 2.09 (Medium)
+      const s1 = computeRbaV01({
+        type: 'INDIVIDUAL',
+        occupation: 'Karyawan Swasta',
+        source_of_funds: 'Gaji',
+        industry_category: 'Konsultan',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_name: 'DKI Jakarta',
+        distribution_channel: 'Outlet Fisik',
+        name_screening_result: 'CLEAR',
+      });
+      expect(s1.rba_calculation_status).toBe('COMPLETE');
+      expect(s1.rba_score_v01).toBe(2.09);
+      expect(s1.risk_level).toBe('MEDIUM');
+      expect(s1.rba_components.total_score).toBe(2.09);
+      // Outlet Fisik contributes 1 × 0.20 = 0.20 (score 1, not 2)
+      expect(s1.rba_components.components.distribution.score).toBe(1);
+      expect(s1.rba_components.components.distribution.contribution).toBe(0.20);
+
+      // Sampling row 3: PNS / Gaji / Pemerintah / TF Keluarga / PEP /
+      //                 Remitansi / Jakarta / Outlet Fisik = 2.42 (Medium)
+      const s3 = computeRbaV01({
+        type: 'INDIVIDUAL',
+        occupation: 'Pegawai Negeri Sipil (PNS)',
+        source_of_funds: 'Gaji',
+        industry_category: 'Pemerintah',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_name: 'DKI Jakarta',
+        distribution_channel: 'Outlet Fisik',
+        name_screening_result: 'PEP',
+      });
+      expect(s3.rba_calculation_status).toBe('COMPLETE');
+      expect(s3.rba_score_v01).toBe(2.42);
+      expect(s3.risk_level).toBe('MEDIUM');
+      expect(s3.rba_components.components.name_screening.score).toBe(3);
+      expect(s3.rba_components.components.name_screening.contribution).toBe(0.03);
+    });
+
+    // ── R-12: COMPLETE derives risk_score; INCOMPLETE never forces score/level ─
+    it('R-12: COMPLETE → risk_score = round(score/3*100); INCOMPLETE → rba null, no forced RBA level', async () => {
+      const { computeRbaV01 } = require('../../src/modules/applications/rba-v01.engine');
+
+      // COMPLETE end-to-end: risk_score is derived from rba_score_v01
+      const appId = await createRbaIndividual(`R12${SUFFIX}`, {
+        occupation: 'Karyawan Swasta',
+        source_of_funds: 'Gaji',
+        industry_category: 'Konsultan',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_code: '31',
+        distribution_channel: 'Outlet Fisik',
+      });
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const risk = detail.body.risk;
+      expect(risk.rba_calculation_status).toBe('COMPLETE');
+      expect(risk.rba_score_v01).not.toBeNull();
+      expect(risk.risk_score).toBe(Math.round((risk.rba_score_v01 / 3) * 100));
+
+      // INCOMPLETE (engine): rba_score_v01 stays null, risk_level null
+      const incomplete = computeRbaV01({
+        type: 'INDIVIDUAL',
+        occupation: 'Karyawan Swasta',
+        source_of_funds: 'Gaji',
+        industry_category: 'Konsultan',
+        business_relationship_purpose: 'Kebutuhan pribadi, pembayaran rutin, atau transfer keluarga',
+        province_name: 'Provinsi Tidak Ada Di Workbook',
+        distribution_channel: 'Outlet Fisik',
+        name_screening_result: 'CLEAR',
+      });
+      expect(incomplete.rba_calculation_status).toBe('INCOMPLETE');
+      expect(incomplete.rba_score_v01).toBeNull();
+      expect(incomplete.risk_level).toBeNull();
+      expect(incomplete.rba_components.total_score).toBeNull();
+    });
+
+    // ── R-13: Threshold boundaries via full computation ──────────────────────
+    it('R-13: thresholds <=1.50 LOW, >1.50-2.50 MEDIUM, >2.50 HIGH', () => {
+      const { getRbaLevel } = require('../../src/modules/applications/rba-v01.engine');
+      expect(getRbaLevel(1.50)).toBe('LOW');
+      expect(getRbaLevel(1.51)).toBe('MEDIUM');
+      expect(getRbaLevel(2.50)).toBe('MEDIUM');
+      expect(getRbaLevel(2.51)).toBe('HIGH');
     });
   });
 });

@@ -291,6 +291,7 @@ function mimeToExt(mime: string) {
 }
 function inferDocType(name?: string) {
   const n = (name || "").toUpperCase();
+  if (n.includes("EDD")) return "EDD_ADDITIONAL_DOCUMENT";
   if (n.includes("FACE_WITH_KTP") || n.includes("WAJAH_KTP")) return "INDIVIDUAL_FACE_WITH_KTP_PHOTO";
   if (n.includes("INDIVIDUAL_KTP") || n.includes("KTP_PHOTO")) return "INDIVIDUAL_KTP_PHOTO";
   if (n.includes("FACE_PHOTO") || n.includes("FACE") || n.includes("WAJAH")) return "INDIVIDUAL_FACE_PHOTO";

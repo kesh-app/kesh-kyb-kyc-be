@@ -324,6 +324,20 @@ export class CreateBusinessDto {
   @IsIn(["KTP", "PASPOR"])
   pic_identity_type?: "KTP" | "PASPOR";
 
+  // ── Pengurus dan Pemegang Saham — porsi kepemilikan saham (opsional) ─
+  // Persentase kepemilikan saham Direktur Utama / Komisaris. 0–100, boleh desimal.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  director_share_percentage?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  commissioner_share_percentage?: number;
+
   // ── Signature / verification (opsional) ─────────────────────────────
   @IsOptional()
   @IsString()
