@@ -1,7 +1,10 @@
 import { Transform } from 'class-transformer';
 import {
+  ArrayNotEmpty,
+  IsArray,
   IsDateString,
   IsEmail,
+  IsIn,
   IsInt,
   IsObject,
   IsOptional,
@@ -128,6 +131,53 @@ export class ReviewTransferDto {
 
   @IsOptional() @IsString()
   reject_reason?: string;
+}
+
+// ── Compliance Review (flagged transfer) ─────────────────────────────
+// Kode red flag internal — TIDAK boleh terekspos ke field customer-facing.
+export const TRANSFER_RED_FLAG_CODES = [
+  'AMOUNT_NOT_MATCH_PROFILE',
+  'PURPOSE_NOT_MATCH_PROFILE',
+  'UNUSUAL_FREQUENCY',
+  'UNUSUAL_VOLUME',
+  'NEW_BENEFICIARY_HIGH_AMOUNT',
+  'STRUCTURING_PATTERN',
+  'RBA_HIGH',
+  'RBA_INCOMPLETE',
+  'WATCHLIST_NEAR_MATCH',
+  'DOCUMENT_OR_INFORMATION_UNUSUAL',
+  'OTHER',
+] as const;
+
+export const COMPLIANCE_REVIEW_ACTIONS = [
+  'APPROVE_TO_CONTINUE',
+  'REJECT',
+  'REQUEST_ADDITIONAL_INFO',
+  'REQUEST_EDD',
+  'MARK_LTKM_CANDIDATE',
+] as const;
+
+export class SubmitComplianceReviewDto {
+  @IsArray()
+  @ArrayNotEmpty({ message: 'red_flags wajib diisi dan tidak boleh kosong' })
+  @IsIn(TRANSFER_RED_FLAG_CODES as unknown as string[], {
+    each: true,
+    message: 'red_flags mengandung kode yang tidak valid',
+  })
+  red_flags!: string[];
+
+  @IsOptional() @IsString() @MaxLength(1000)
+  report_notes?: string;
+}
+
+export class ComplianceReviewDecisionDto {
+  @IsIn(COMPLIANCE_REVIEW_ACTIONS as unknown as string[], {
+    message: 'action tidak valid',
+  })
+  action!: (typeof COMPLIANCE_REVIEW_ACTIONS)[number];
+
+  @IsOptional() @IsString() @MaxLength(1000)
+  decision_notes?: string;
 }
 
 export class SetTransferResultDto {

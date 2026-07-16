@@ -15,10 +15,12 @@ import { RolesGuard } from "../auth/roles.guard";
 import { Roles } from "../auth/roles.decorator";
 import { TransfersService } from "./transfers.service";
 import {
+  ComplianceReviewDecisionDto,
   CreateTransferDto,
   DecideTransferDto,
   ReviewTransferDto,
   SetTransferResultDto,
+  SubmitComplianceReviewDto,
   UpdateTransferDto,
 } from "./dto";
 
@@ -50,6 +52,29 @@ export class TransfersController {
   @Roles("FinanceStaff", "FrontDesk")
   async submit(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.submit(id, req.user, req.ip);
+  }
+
+  // SUBMIT FOR COMPLIANCE REVIEW (flagged transfer) — Admin/Frontline
+  // FrontDesk (+ SystemAdmin/Director via RolesGuard full access)
+  @Post(":id/submit-compliance-review")
+  @Roles("FrontDesk", "SystemAdmin", "Director")
+  async submitComplianceReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: SubmitComplianceReviewDto
+  ) {
+    return this.svc.submitComplianceReview(id, req.user, dto, req.ip);
+  }
+
+  // COMPLIANCE REVIEW DECISION — ComplianceLead
+  @Post(":id/compliance-review")
+  @Roles("ComplianceLead", "SystemAdmin", "Director")
+  async complianceReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: ComplianceReviewDecisionDto
+  ) {
+    return this.svc.complianceReview(id, req.user, dto, req.ip);
   }
 
   // SUPERVISOR REVIEW (layer 1) — OperationSupervisor
@@ -98,7 +123,7 @@ export class TransfersController {
 
   // LIST TRANSFERS
   @Get()
-  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "Auditor", "FrontDesk")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "ComplianceLead", "Auditor", "FrontDesk")
   async list(@Req() req: any, @Query("status") status?: string) {
     return this.svc.list(req.user, status);
   }
@@ -130,7 +155,7 @@ export class TransfersController {
 
   // GET TRANSFER DETAIL
   @Get(":id")
-  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "Auditor", "FrontDesk")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "ComplianceLead", "Auditor", "FrontDesk")
   async getById(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getById(id, req.user);
   }

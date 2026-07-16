@@ -1601,6 +1601,299 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   });
 
   // ══════════════════════════════════════════════════════════
+  // FC. TRANSFER — Compliance Review flow (flagged transfer)
+  // ══════════════════════════════════════════════════════════
+  describe('FC. Transfer Compliance Review flow', () => {
+    async function createApprovedSender(tag: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `TRF Compliance ${tag}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3199${tag}`,
+          address_identity: 'Jl. Compliance No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0899${tag}`,
+          occupation: 'Wiraswasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [appId]);
+      return appId;
+    }
+
+    // DRAFT transfer (dibuat FrontDesk, belum di-submit)
+    async function createDraftTransfer(senderAppId: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 250_000,
+          sender_application_id: Number(senderAppId),
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '1122334455',
+          beneficiaryAccountName: 'Penerima FC',
+        })
+        .expect(201);
+      return String(create.body.id);
+    }
+
+    function submitForComplianceReview(txId: string, body: any) {
+      return request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit-compliance-review`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(body);
+    }
+
+    // ── FC-01: FrontDesk submit DRAFT → compliance review, status + row OPEN ──
+    it('FC-01: FrontDesk submit DRAFT ke compliance review → PENDING_COMPLIANCE_REVIEW + review OPEN', async () => {
+      const senderAppId = await createApprovedSender(`FC01${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+
+      const res = await submitForComplianceReview(txId, {
+        red_flags: ['AMOUNT_NOT_MATCH_PROFILE', 'UNUSUAL_VOLUME'],
+        report_notes: 'Nominal dan volume perlu direview compliance.',
+      }).expect(201);
+
+      // J2: status baru
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+      // J3: review row OPEN + reported_by + reported_at (backend timestamp)
+      expect(res.body.compliance_review_status).toBe('OPEN');
+      const review = res.body.latest_compliance_review;
+      expect(review).toBeTruthy();
+      expect(review.status).toBe('OPEN');
+      expect(review.red_flags).toEqual(['AMOUNT_NOT_MATCH_PROFILE', 'UNUSUAL_VOLUME']);
+      expect(review.reported_by).toBeTruthy();
+      expect(review.reported_at).toBeTruthy();
+      expect(review.reviewed_by).toBeNull();
+      expect(review.reviewed_at).toBeNull();
+    });
+
+    // ── FC-02: red_flags kosong → 400 ──
+    it('FC-02: red_flags kosong → 400', async () => {
+      const senderAppId = await createApprovedSender(`FC02${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: [] }).expect(400);
+    });
+
+    // ── FC-03: red_flags berisi OTHER tanpa report_notes → 400 ──
+    it('FC-03: red_flags mengandung OTHER tanpa report_notes → 400', async () => {
+      const senderAppId = await createApprovedSender(`FC03${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['OTHER'] }).expect(400);
+    });
+
+    // ── FC-04: OperationSupervisor tidak bisa review saat PENDING_COMPLIANCE_REVIEW ──
+    it('FC-04: OperationSupervisor tidak bisa supervisor-review transfer PENDING_COMPLIANCE_REVIEW → 400', async () => {
+      const senderAppId = await createApprovedSender(`FC04${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, {
+        red_flags: ['RBA_HIGH'],
+      }).expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'coba approve' })
+        .expect(400);
+    });
+
+    // ── FC-05 & FC-06: ComplianceLead APPROVE_TO_CONTINUE → SUBMITTED ──
+    it('FC-05/06: ComplianceLead APPROVE_TO_CONTINUE → transfer SUBMITTED + review APPROVED_TO_CONTINUE', async () => {
+      const senderAppId = await createApprovedSender(`FC05${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['RBA_INCOMPLETE'] }).expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'APPROVE_TO_CONTINUE', decision_notes: 'Boleh dilanjutkan.' })
+        .expect(201);
+
+      expect(res.body.status).toBe('SUBMITTED');
+      expect(res.body.compliance_review_status).toBe('APPROVED_TO_CONTINUE');
+      expect(res.body.latest_compliance_review.reviewed_by).toBeTruthy();
+      expect(res.body.latest_compliance_review.reviewed_at).toBeTruthy();
+    });
+
+    // ── FC-07: OperationSupervisor bisa review setelah compliance approve ──
+    it('FC-07: OperationSupervisor bisa review setelah APPROVE_TO_CONTINUE (endpoint existing)', async () => {
+      const senderAppId = await createApprovedSender(`FC07${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['UNUSUAL_FREQUENCY'] }).expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'APPROVE_TO_CONTINUE', decision_notes: 'ok lanjut' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'dokumen lengkap' })
+        .expect(201);
+      expect(res.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+    });
+
+    // ── FC-08 & FC-09: ComplianceLead REJECT → REJECTED, notes wajib ──
+    it('FC-08: ComplianceLead REJECT → transfer REJECTED + review REJECTED', async () => {
+      const senderAppId = await createApprovedSender(`FC08${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['STRUCTURING_PATTERN'] }).expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'REJECT', decision_notes: 'Terindikasi pola tidak wajar.' })
+        .expect(201);
+      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.compliance_review_status).toBe('REJECTED');
+    });
+
+    it('FC-09: REJECT tanpa decision_notes → 400', async () => {
+      const senderAppId = await createApprovedSender(`FC09${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['OTHER'], report_notes: 'perlu cek' }).expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'REJECT' })
+        .expect(400);
+    });
+
+    // ── FC-10: REQUEST_ADDITIONAL_INFO → tetap PENDING_COMPLIANCE_REVIEW ──
+    it('FC-10: REQUEST_ADDITIONAL_INFO tetap PENDING_COMPLIANCE_REVIEW & masih bisa APPROVE lanjut', async () => {
+      const senderAppId = await createApprovedSender(`FC10${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['DOCUMENT_OR_INFORMATION_UNUSUAL'] }).expect(201);
+
+      const info = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'REQUEST_ADDITIONAL_INFO', decision_notes: 'Mohon lengkapi dokumen sumber dana.' })
+        .expect(201);
+      expect(info.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+      expect(info.body.compliance_review_status).toBe('REQUEST_ADDITIONAL_INFO');
+
+      // OperationSupervisor tetap tidak bisa review
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE' })
+        .expect(400);
+
+      // Compliance masih bisa APPROVE_TO_CONTINUE setelahnya
+      const cont = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'APPROVE_TO_CONTINUE', decision_notes: 'Dokumen sudah lengkap.' })
+        .expect(201);
+      expect(cont.body.status).toBe('SUBMITTED');
+    });
+
+    // ── FC-11: REQUEST_EDD → tetap PENDING_COMPLIANCE_REVIEW ──
+    it('FC-11: REQUEST_EDD tetap PENDING_COMPLIANCE_REVIEW', async () => {
+      const senderAppId = await createApprovedSender(`FC11${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['RBA_HIGH'] }).expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'REQUEST_EDD', decision_notes: 'Perlu EDD sebelum lanjut.' })
+        .expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+      expect(res.body.compliance_review_status).toBe('REQUEST_EDD');
+    });
+
+    // ── FC-12: MARK_LTKM_CANDIDATE → internal, tetap blocked ──
+    it('FC-12: MARK_LTKM_CANDIDATE internal & transfer tetap blocked', async () => {
+      const senderAppId = await createApprovedSender(`FC12${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['WATCHLIST_NEAR_MATCH'] }).expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'MARK_LTKM_CANDIDATE', decision_notes: 'Kandidat LTKM internal.' })
+        .expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+      expect(res.body.compliance_review_status).toBe('LTKM_CANDIDATE');
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE' })
+        .expect(400);
+    });
+
+    // ── FC-13: Normal submit DRAFT → SUBMITTED tetap jalan (tidak berubah) ──
+    it('FC-13: Normal submit DRAFT → SUBMITTED tidak berubah', async () => {
+      const senderAppId = await createApprovedSender(`FC13${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+      expect(res.body.status).toBe('SUBMITTED');
+    });
+
+    // ── FC-14: FinanceStaff/Manager tidak bisa bertindak sebelum Ops review ──
+    it('FC-14: FinanceStaff/FinanceManager tidak bisa act sebelum OperationSupervisor', async () => {
+      const senderAppId = await createApprovedSender(`FC14${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await submitForComplianceReview(txId, { red_flags: ['PURPOSE_NOT_MATCH_PROFILE'] }).expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'APPROVE_TO_CONTINUE', decision_notes: 'lanjut' })
+        .expect(201);
+      // status = SUBMITTED, belum lewat Ops review
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(400);
+    });
+
+    // ── FC-15: Timestamp backend-generated, client-provided diabaikan ──
+    it('FC-15: reported_at backend-generated & client-provided timestamp diabaikan', async () => {
+      const senderAppId = await createApprovedSender(`FC15${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      const bogus = '1999-01-01T00:00:00.000Z';
+      const res = await submitForComplianceReview(txId, {
+        red_flags: ['UNUSUAL_VOLUME'],
+        reported_at: bogus,     // whitelist strips unknown field
+        reviewed_at: bogus,
+      }).expect(201);
+      const reportedAt = new Date(res.body.latest_compliance_review.reported_at).getTime();
+      expect(reportedAt).toBeGreaterThan(new Date('2020-01-01').getTime());
+    });
+
+    // ── FC-16: ComplianceLead tidak bisa decide transfer non-PENDING_COMPLIANCE_REVIEW ──
+    it('FC-16: compliance-review pada transfer DRAFT (belum diajukan) → 400', async () => {
+      const senderAppId = await createApprovedSender(`FC16${SUFFIX}`);
+      const txId = await createDraftTransfer(senderAppId);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'APPROVE_TO_CONTINUE', decision_notes: 'x' })
+        .expect(400);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
   // G. KYB BUSINESS FLOW
   // ══════════════════════════════════════════════════════════
   describe('G. KYB Business flow', () => {

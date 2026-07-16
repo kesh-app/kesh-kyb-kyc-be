@@ -7,9 +7,11 @@ import {
 } from "@nestjs/common";
 import { Pool } from "pg";
 import {
+  ComplianceReviewDecisionDto,
   CreateTransferDto,
   DecideTransferDto,
   SetTransferResultDto,
+  SubmitComplianceReviewDto,
   UpdateTransferDto,
 } from "./dto";
 import { resolveUserId } from "../../common/auth.util";
@@ -416,6 +418,209 @@ export class TransfersService {
   }
 
   // ---------------------------------------------------------------------------
+  // COMPLIANCE REVIEW — helpers
+  // ---------------------------------------------------------------------------
+  /**
+   * Ambil review compliance terbaru (by id desc) untuk sebuah transfer, sudah
+   * dalam bentuk siap dikirim ke response. Mengembalikan null bila belum ada.
+   */
+  private async fetchLatestComplianceReview(transferId: number | string) {
+    const { rows } = await this.pool.query(
+      `SELECT id, transfer_id, status, red_flags, report_notes,
+              reported_by, reported_at, reviewed_by, reviewed_at,
+              decision_notes, created_at, updated_at
+         FROM transfer_compliance_reviews
+        WHERE transfer_id = $1
+        ORDER BY id DESC
+        LIMIT 1`,
+      [transferId],
+    );
+    return rows[0] ?? null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SUBMIT FOR COMPLIANCE REVIEW (Admin/Frontline) — DRAFT → PENDING_COMPLIANCE_REVIEW
+  // ---------------------------------------------------------------------------
+  async submitComplianceReview(
+    id: number,
+    user: AuthedUser,
+    dto: SubmitComplianceReviewDto,
+    ip?: string,
+  ) {
+    const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [id]);
+    if ((prev.rowCount ?? 0) === 0) throw new NotFoundException("Transfer not found");
+    const row = prev.rows[0];
+
+    if (
+      user.role !== "FrontDesk" &&
+      !FULL_ACCESS_ROLES.includes(user.role)
+    ) {
+      throw new ForbiddenException(
+        "Only FrontDesk can submit a transfer for compliance review",
+      );
+    }
+
+    if (row.status !== "DRAFT") {
+      throw new BadRequestException(
+        "Hanya transfer berstatus DRAFT yang dapat diajukan untuk review compliance.",
+      );
+    }
+
+    const redFlags = dto.red_flags ?? [];
+    if (redFlags.length === 0) {
+      throw new BadRequestException("red_flags wajib diisi dan tidak boleh kosong");
+    }
+    if (redFlags.includes("OTHER") && !dto.report_notes?.trim()) {
+      throw new BadRequestException(
+        "report_notes wajib diisi bila red_flags mengandung OTHER.",
+      );
+    }
+
+    // Guard sender tetap APPROVED — konsisten dengan submit normal.
+    await this.assertSenderApproved(row.sender_application_id);
+    await this.assertWicTransferLimit(row.sender_application_id, row.amount);
+
+    const actorId = resolveUserId(user);
+
+    const next = await this.pool.query(
+      `UPDATE transfers SET
+         status='PENDING_COMPLIANCE_REVIEW',
+         updated_at=now()
+       WHERE id=$1
+       RETURNING *`,
+      [id],
+    );
+
+    await this.pool.query(
+      `INSERT INTO transfer_compliance_reviews
+         (transfer_id, status, red_flags, report_notes, reported_by, reported_at)
+       VALUES ($1, 'OPEN', $2::jsonb, $3, $4, now())`,
+      [id, JSON.stringify(redFlags), dto.report_notes ?? null, actorId],
+    );
+
+    await this.audit(
+      actorId,
+      "TRANSFER_SUBMIT_COMPLIANCE_REVIEW",
+      String(id),
+      row,
+      next.rows[0],
+      ip,
+    );
+
+    return this.getById(id, user);
+  }
+
+  // ---------------------------------------------------------------------------
+  // COMPLIANCE REVIEW DECISION — ComplianceLead
+  // ---------------------------------------------------------------------------
+  async complianceReview(
+    id: number,
+    user: AuthedUser,
+    dto: ComplianceReviewDecisionDto,
+    ip?: string,
+  ) {
+    const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [id]);
+    if ((prev.rowCount ?? 0) === 0) throw new NotFoundException("Transfer not found");
+    const row = prev.rows[0];
+
+    if (
+      user.role !== "ComplianceLead" &&
+      !FULL_ACCESS_ROLES.includes(user.role)
+    ) {
+      throw new ForbiddenException("Only ComplianceLead can decide compliance review");
+    }
+
+    if (row.status !== "PENDING_COMPLIANCE_REVIEW") {
+      throw new BadRequestException(
+        "Hanya transfer berstatus PENDING_COMPLIANCE_REVIEW yang dapat direview oleh Compliance.",
+      );
+    }
+
+    const review = await this.fetchLatestComplianceReview(id);
+    if (!review) {
+      throw new BadRequestException(
+        "Tidak ada review compliance aktif untuk transfer ini.",
+      );
+    }
+
+    const actorId = resolveUserId(user);
+    const notes = dto.decision_notes?.trim() || null;
+
+    // decision_notes wajib untuk semua aksi kecuali APPROVE_TO_CONTINUE.
+    if (dto.action !== "APPROVE_TO_CONTINUE" && !notes) {
+      throw new BadRequestException("decision_notes wajib diisi untuk aksi ini.");
+    }
+
+    // Map aksi → status baris review + status transfer berikutnya.
+    const REVIEW_STATUS: Record<string, string> = {
+      APPROVE_TO_CONTINUE: "APPROVED_TO_CONTINUE",
+      REJECT: "REJECTED",
+      REQUEST_ADDITIONAL_INFO: "REQUEST_ADDITIONAL_INFO",
+      REQUEST_EDD: "REQUEST_EDD",
+      MARK_LTKM_CANDIDATE: "LTKM_CANDIDATE",
+    };
+    const reviewStatus = REVIEW_STATUS[dto.action];
+
+    // Update baris review (in place) dengan keputusan + timestamp backend.
+    await this.pool.query(
+      `UPDATE transfer_compliance_reviews SET
+         status=$2,
+         reviewed_by=$3,
+         reviewed_at=now(),
+         decision_notes=$4,
+         updated_at=now()
+       WHERE id=$1`,
+      [review.id, reviewStatus, actorId, notes],
+    );
+
+    let next;
+    if (dto.action === "APPROVE_TO_CONTINUE") {
+      // Lanjut ke alur normal — transfer boleh direview Operation Supervisor.
+      next = await this.pool.query(
+        `UPDATE transfers SET
+           status='SUBMITTED',
+           submitted_by=$2,
+           submitted_at=now(),
+           updated_at=now()
+         WHERE id=$1
+         RETURNING *`,
+        [id, actorId],
+      );
+    } else if (dto.action === "REJECT") {
+      next = await this.pool.query(
+        `UPDATE transfers SET
+           status='REJECTED',
+           rejected_by=$2,
+           rejected_at=now(),
+           reject_reason=$3,
+           updated_at=now()
+         WHERE id=$1
+         RETURNING *`,
+        [id, actorId, notes],
+      );
+    } else {
+      // REQUEST_ADDITIONAL_INFO / REQUEST_EDD / MARK_LTKM_CANDIDATE:
+      // transfer tetap PENDING_COMPLIANCE_REVIEW (blocked dari Operation Supervisor)
+      // sampai ComplianceLead melakukan APPROVE_TO_CONTINUE atau REJECT.
+      next = await this.pool.query(
+        `UPDATE transfers SET updated_at=now() WHERE id=$1 RETURNING *`,
+        [id],
+      );
+    }
+
+    await this.audit(
+      actorId,
+      `TRANSFER_COMPLIANCE_${reviewStatus}`,
+      String(id),
+      row,
+      next.rows[0],
+      ip,
+    );
+
+    return this.getById(id, user);
+  }
+
+  // ---------------------------------------------------------------------------
   // SUPERVISOR REVIEW (layer 1) — OperationSupervisor
   // ---------------------------------------------------------------------------
   async supervisorReview(
@@ -735,11 +940,16 @@ export class TransfersService {
          COALESCE(p.full_name, b.legal_name) AS sender_name,
          CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS sender_cif_no,
          p.cif_relationship_type AS sender_cif_relationship_type,
-         a.type                              AS sender_type
+         a.type                              AS sender_type,
+         cr.status                           AS compliance_review_status
        FROM transfers t
        LEFT JOIN applications a ON a.id = t.sender_application_id
        LEFT JOIN persons p ON p.id = a.person_id
        LEFT JOIN business_entities b ON b.id = a.business_id
+       LEFT JOIN LATERAL (
+         SELECT status FROM transfer_compliance_reviews
+          WHERE transfer_id = t.id ORDER BY id DESC LIMIT 1
+       ) cr ON true
        ${where}
        ORDER BY t.id DESC
        LIMIT 200`,
@@ -757,6 +967,7 @@ export class TransfersService {
       user.role === "FinanceManager" ||
       user.role === "FinanceStaff" ||
       user.role === "OperationSupervisor" ||
+      user.role === "ComplianceLead" ||
       user.role === "Auditor" ||
       FULL_ACCESS_ROLES.includes(user.role);
 
@@ -793,6 +1004,23 @@ export class TransfersService {
         throw new ForbiddenException("Not allowed");
       }
     }
+
+    // Sertakan review compliance terbaru (flagged transfer) bila ada.
+    const latestReview = await this.fetchLatestComplianceReview(id);
+    row.latest_compliance_review = latestReview
+      ? {
+          id: latestReview.id,
+          status: latestReview.status,
+          red_flags: latestReview.red_flags,
+          report_notes: latestReview.report_notes,
+          reported_by: latestReview.reported_by,
+          reported_at: latestReview.reported_at,
+          reviewed_by: latestReview.reviewed_by,
+          reviewed_at: latestReview.reviewed_at,
+          decision_notes: latestReview.decision_notes,
+        }
+      : null;
+    row.compliance_review_status = latestReview ? latestReview.status : null;
 
     return row;
   }
