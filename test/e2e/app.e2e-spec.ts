@@ -9850,4 +9850,226 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(getRbaLevel(2.51)).toBe('HIGH');
     });
   });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // REPORT CENTER — async report generation + OBS/local storage + download
+  // ────────────────────────────────────────────────────────────────────────
+  describe('Report Center', () => {
+    const server = () => app.getHttpServer();
+    const nowIso = () => new Date().toISOString();
+    const daysAgoIso = (d: number) =>
+      new Date(Date.now() - d * 86_400_000).toISOString();
+
+    async function pollDone(id: string, token: string, tries = 50) {
+      for (let i = 0; i < tries; i++) {
+        const r = await request(server())
+          .get(`${BASE}/reports/${id}/status`)
+          .set('Authorization', `Bearer ${token}`);
+        if (['COMPLETED', 'FAILED'].includes(r.body.status)) return r.body;
+        await new Promise((res) => setTimeout(res, 100));
+      }
+      return null;
+    }
+
+    it('L-01/02: ComplianceLead creates ON_DEMAND XLSX report → PENDING/PROCESSING', async () => {
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          report_type: 'ALL',
+          format: 'XLSX',
+          period_start: daysAgoIso(7),
+          period_end: nowIso(),
+          filters: {},
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.id).toBeDefined();
+      expect(res.body.report_no).toMatch(/^RPT-\d{8}-/);
+      expect(['PENDING', 'PROCESSING']).toContain(res.body.status);
+
+      // L-03: row exists in DB
+      const db = await pgPool.query(
+        `SELECT id, status FROM generated_reports WHERE id = $1`,
+        [res.body.id],
+      );
+      expect(db.rowCount).toBe(1);
+
+      // L-04/05: completes and metadata is filled; download signs a URL
+      const done = await pollDone(res.body.id, complianceToken);
+      expect(done).not.toBeNull();
+      expect(done.status).toBe('COMPLETED');
+
+      const row = (
+        await pgPool.query(
+          `SELECT object_key, file_name, checksum_sha256, file_size, row_counts
+           FROM generated_reports WHERE id = $1`,
+          [res.body.id],
+        )
+      ).rows[0];
+      expect(row.object_key).toBeTruthy();
+      expect(row.file_name).toMatch(/\.xlsx$/);
+      expect(row.checksum_sha256).toHaveLength(64);
+      expect(Number(row.file_size)).toBeGreaterThan(0);
+      expect(row.row_counts).toHaveProperty('KYC');
+      expect(row.row_counts).toHaveProperty('Complaints');
+
+      const dl = await request(server())
+        .get(`${BASE}/reports/${res.body.id}/download`)
+        .set('Authorization', `Bearer ${complianceToken}`);
+      expect(dl.status).toBe(200);
+      expect(dl.body.download_url).toBeTruthy();
+      expect(dl.body.expires_in).toBe(300);
+    });
+
+    it('L-06: CSV with report_type ALL is rejected (400)', async () => {
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          report_type: 'ALL',
+          format: 'CSV',
+          period_start: daysAgoIso(7),
+          period_end: nowIso(),
+        });
+      expect(res.status).toBe(400);
+    });
+
+    it('L-07: CSV with single report type (COMPLAINTS) works', async () => {
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          report_type: 'COMPLAINTS',
+          format: 'CSV',
+          period_start: daysAgoIso(7),
+          period_end: nowIso(),
+        });
+      expect(res.status).toBe(201);
+      const done = await pollDone(res.body.id, complianceToken);
+      expect(done.status).toBe('COMPLETED');
+      const row = (
+        await pgPool.query(
+          `SELECT file_name FROM generated_reports WHERE id = $1`,
+          [res.body.id],
+        )
+      ).rows[0];
+      expect(row.file_name).toMatch(/\.csv$/);
+    });
+
+    it('L-08: period range > 31 days returns 400', async () => {
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          report_type: 'TRANSFERS',
+          format: 'XLSX',
+          period_start: daysAgoIso(40),
+          period_end: nowIso(),
+        });
+      expect(res.status).toBe(400);
+    });
+
+    it('L-09: unauthorized role (FrontDesk) cannot generate', async () => {
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          report_type: 'TRANSFERS',
+          format: 'XLSX',
+          period_start: daysAgoIso(7),
+          period_end: nowIso(),
+        });
+      expect(res.status).toBe(403);
+    });
+
+    it('L-10: Auditor can list but cannot generate', async () => {
+      const listRes = await request(server())
+        .get(`${BASE}/reports`)
+        .set('Authorization', `Bearer ${auditorToken}`);
+      expect(listRes.status).toBe(200);
+      expect(Array.isArray(listRes.body.data)).toBe(true);
+
+      const genRes = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({
+          report_type: 'TRANSFERS',
+          format: 'XLSX',
+          period_start: daysAgoIso(7),
+          period_end: nowIso(),
+        });
+      expect(genRes.status).toBe(403);
+    });
+
+    // Isolated per-run window (~year 2000 + SUFFIX seconds) so inserted
+    // monitoring cases don't collide with seed data or across runs.
+    const winBase = new Date(Date.parse('2000-01-01T00:00:00Z') + Number(SUFFIX) * 1000);
+    const winIso = winBase.toISOString();
+    const winStart = new Date(winBase.getTime() - 60_000).toISOString();
+    const winEnd = new Date(winBase.getTime() + 60_000).toISOString();
+
+    it('L-11: LTKT report sources monitoring_cases (type LTKT), not transfer amount', async () => {
+      // One monitoring LTKT case in the isolated window …
+      await pgPool.query(
+        `INSERT INTO monitoring_cases
+           (case_no, case_type, source_type, status, cif_no, customer_name,
+            trigger_summary, compliance_notes, detected_at, created_at)
+         VALUES ($1,'LTKT','TRANSFER','READY_TO_REPORT',$2,$3,'threshold exceeded','reviewed',$4,$4)`,
+        [`MC-${SUFFIX}-LTKT`, `CIF${SUFFIX}`, `Cust ${SUFFIX}`, winIso],
+      );
+      // … plus a large transfer with NO monitoring case — must be excluded.
+      await pgPool.query(
+        `INSERT INTO transfers
+           (amount, beneficiary_bank_name, beneficiary_account_number, beneficiary_account_name, created_at)
+         VALUES (999999999, 'BANK', '000', 'Bene', $1)`,
+        [winIso],
+      );
+
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ report_type: 'LTKT', format: 'XLSX', period_start: winStart, period_end: winEnd });
+      expect(res.status).toBe(201);
+      const done = await pollDone(res.body.id, complianceToken);
+      expect(done.status).toBe('COMPLETED');
+      // Exactly the monitoring LTKT case; the large transfer is not in monitoring,
+      // and no REPORT_LTKT_MIN_AMOUNT is consulted — so the count is 1, not 0/2.
+      expect(done.row_counts.LTKT).toBe(1);
+    });
+
+    it('L-12: LTKM report sources monitoring_cases (type LTKM)', async () => {
+      await pgPool.query(
+        `INSERT INTO monitoring_cases
+           (case_no, case_type, source_type, status, cif_no, customer_name,
+            trigger_summary, manager_notes, compliance_notes, detected_at, created_at)
+         VALUES ($1,'LTKM','TRANSFER','READY_TO_REPORT',$2,$3,'suspicious pattern','report ok','reviewed',$4,$4)`,
+        [`MC-${SUFFIX}-LTKM`, `CIF${SUFFIX}`, `Cust ${SUFFIX}`, winIso],
+      );
+
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ report_type: 'LTKM', format: 'XLSX', period_start: winStart, period_end: winEnd });
+      expect(res.status).toBe(201);
+      const done = await pollDone(res.body.id, complianceToken);
+      expect(done.status).toBe('COMPLETED');
+      expect(done.row_counts.LTKM).toBe(1);
+    });
+
+    it('L-13: empty monitoring period → headers-only sheet, still COMPLETED', async () => {
+      const res = await request(server())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          report_type: 'LTKT',
+          format: 'XLSX',
+          period_start: '1990-01-01T00:00:00.000Z',
+          period_end: '1990-01-02T00:00:00.000Z',
+        });
+      expect(res.status).toBe(201);
+      const done = await pollDone(res.body.id, complianceToken);
+      expect(done.status).toBe('COMPLETED');
+      expect(done.row_counts.LTKT).toBe(0);
+    });
+  });
 });
