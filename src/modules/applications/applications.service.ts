@@ -2646,6 +2646,8 @@ export class ApplicationsService {
           a.revision_requested_by,
           a.revision_requested_at,
           COALESCE(ar.override_level, ar.risk_level) AS risk_level,
+          ar.risk_score::float AS risk_score,
+          ar.rba_score_v01::float AS rba_score_v01,
           CASE WHEN a.type = 'INDIVIDUAL' AND p.cif_relationship_type = 'WIC' THEN NULL WHEN a.type = 'INDIVIDUAL' THEN p.cif_no ELSE b.cif_no END AS cif_no,
           CASE WHEN a.type = 'INDIVIDUAL' THEN p.cif_relationship_type ELSE 'OUR_CUSTOMER' END AS cif_relationship_type,
           CASE WHEN a.type = 'INDIVIDUAL' THEN p.full_name ELSE b.legal_name END AS display_name,

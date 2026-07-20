@@ -507,6 +507,10 @@ export class TransfersService {
       ip,
     );
 
+    // Auto monitoring evaluation di submit-time — LTKT ≥ 500M harus terdeteksi
+    // walau transfer masuk jalur PENDING_COMPLIANCE_REVIEW. Tidak boleh gagal.
+    await this.monitoring.safeEvaluateTransfer(id, user);
+
     return this.getById(id, user);
   }
 
@@ -605,6 +609,16 @@ export class TransfersService {
       next = await this.pool.query(
         `UPDATE transfers SET updated_at=now() WHERE id=$1 RETURNING *`,
         [id],
+      );
+    }
+
+    // MARK_LTKM_CANDIDATE → buat/append monitoring case LTKM (BOTH bila sudah
+    // ada LTKT). Hanya untuk aksi eksplisit ini, bukan setiap REJECT.
+    if (dto.action === "MARK_LTKM_CANDIDATE") {
+      await this.monitoring.safeMarkLtkmCandidate(
+        id,
+        { redFlags: review.red_flags ?? [], notes },
+        user,
       );
     }
 

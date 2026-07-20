@@ -6901,7 +6901,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
     async function createTransfer(
       senderAppId: string,
-      opts: { amount: number; benef?: string; transfer_method?: string; additional_info?: any },
+      opts: { amount: number; benef?: string; transfer_method?: string; additional_info?: any; token?: string },
     ): Promise<string> {
       const body: any = {
         amount: opts.amount,
@@ -6916,7 +6916,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${opts.token ?? financeStaffToken}`)
         .send(body)
         .expect(201);
       return String(res.body.id);
@@ -7673,6 +7673,160 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
       // READY_TO_REPORT hanya tercapai setelah manager approve
       expect(res.body.status).not.toBe('READY_TO_REPORT');
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // T-LTKT: deteksi LTKT berbasis nominal ≥ Rp500.000.000 (bukan hanya tunai)
+    // ─────────────────────────────────────────────────────────────────────
+    const ltktCasesOf = async (transferId: string) => {
+      const { rows } = await pgPool.query(
+        `SELECT id, case_type FROM monitoring_cases WHERE transfer_id=$1`,
+        [transferId],
+      );
+      return rows;
+    };
+    const hasLtkt = (rows: any[]) =>
+      rows.some((r) => r.case_type === 'LTKT' || r.case_type === 'BOTH');
+    const submitTransfer = (transferId: string) =>
+      request(app.getHttpServer())
+        .post(`${BASE}/transfers/${transferId}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`);
+
+    // ── T-L1: submit 499.999.999 → tidak ada LTKT ──
+    it('T-L1: submit transfer 499.999.999 (non-tunai) → tidak membuat LTKT case', async () => {
+      const appId = await createApprovedIndividual(`75001${SUFFIX}`, `07501${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 499_999_999, benef: `7501${SUFFIX}` });
+      await submitTransfer(trId).expect(201);
+      expect(hasLtkt(await ltktCasesOf(trId))).toBe(false);
+    });
+
+    // ── T-L2: submit 500.000.000 → LTKT ──
+    it('T-L2: submit transfer 500.000.000 (non-tunai) → membuat LTKT case', async () => {
+      const appId = await createApprovedIndividual(`75002${SUFFIX}`, `07502${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 500_000_000, benef: `7502${SUFFIX}` });
+      await submitTransfer(trId).expect(201);
+      expect(hasLtkt(await ltktCasesOf(trId))).toBe(true);
+      const { rows } = await pgPool.query(
+        `SELECT trg.rule_code FROM monitoring_case_triggers trg
+           JOIN monitoring_cases mc ON mc.id = trg.case_id
+          WHERE mc.transfer_id=$1`,
+        [trId],
+      );
+      expect(rows.map((r: any) => r.rule_code)).toContain('LTKT_AMOUNT_500M');
+    });
+
+    // ── T-L3: 500.000.001 → LTKT (uji batas >=, bypass cap DTO via update nominal) ──
+    it('T-L3: transfer 500.000.001 → membuat LTKT case (>= 500 juta)', async () => {
+      const appId = await createApprovedIndividual(`75003${SUFFIX}`, `07503${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 500_000_000, benef: `7503${SUFFIX}` });
+      await pgPool.query(`UPDATE transfers SET amount=500000001 WHERE id=$1`, [trId]);
+      await evaluate(trId);
+      expect(hasLtkt(await ltktCasesOf(trId))).toBe(true);
+    });
+
+    // ── T-L4: submit-compliance-review 500jt → LTKT walau status PENDING_COMPLIANCE_REVIEW ──
+    it('T-L4: submit-compliance-review 500jt → LTKT terdeteksi & status PENDING_COMPLIANCE_REVIEW', async () => {
+      const appId = await createApprovedIndividual(`75004${SUFFIX}`, `07504${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 500_000_000, benef: `7504${SUFFIX}`, token: frontDeskToken });
+      // Hapus case auto (create-time) agar terbukti submit-compliance-review yang mendeteksi.
+      await pgPool.query(
+        `DELETE FROM monitoring_case_triggers WHERE case_id IN (SELECT id FROM monitoring_cases WHERE transfer_id=$1)`,
+        [trId],
+      );
+      await pgPool.query(`DELETE FROM monitoring_cases WHERE transfer_id=$1`, [trId]);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${trId}/submit-compliance-review`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ red_flags: ['AMOUNT_NOT_MATCH_PROFILE'] })
+        .expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+      expect(hasLtkt(await ltktCasesOf(trId))).toBe(true);
+    });
+
+    // ── T-L5: idempoten — evaluate ganda tidak menduplikasi LTKT case/trigger ──
+    it('T-L5: evaluate LTKT dua kali → tidak ada duplikat case/trigger', async () => {
+      const appId = await createApprovedIndividual(`75005${SUFFIX}`, `07505${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 500_000_000, benef: `7505${SUFFIX}` });
+      await evaluate(trId);
+      await evaluate(trId);
+      const cases = await ltktCasesOf(trId);
+      expect(cases.length).toBe(1);
+      const { rows } = await pgPool.query(
+        `SELECT COUNT(*)::int AS c FROM monitoring_case_triggers trg
+           JOIN monitoring_cases mc ON mc.id = trg.case_id
+          WHERE mc.transfer_id=$1 AND trg.rule_code='LTKT_AMOUNT_500M'`,
+        [trId],
+      );
+      expect(rows[0].c).toBe(1);
+    });
+
+    // ── T-L6: LTKM case dulu, lalu LTKT trigger → case_type BOTH ──
+    it('T-L6: LTKM existing + LTKT trigger pada transfer sama → BOTH', async () => {
+      const appId = await createApprovedIndividual(`75006${SUFFIX}`, `07506${SUFFIX}`);
+      await pgPool.query(`UPDATE application_risk SET risk_level='HIGH' WHERE application_id=$1`, [appId]);
+      const trId = await createTransfer(appId, { amount: 50_000_000, benef: `7506${SUFFIX}` });
+      const ev1 = await evaluate(trId);
+      expect(ev1.body.case_type).toBe('LTKM');
+      await pgPool.query(`UPDATE transfers SET amount=500000000 WHERE id=$1`, [trId]);
+      const ev2 = await evaluate(trId);
+      expect(ev2.body.case_type).toBe('BOTH');
+    });
+
+    // ── T-L7: MARK_LTKM_CANDIDATE → membuat LTKM monitoring case ──
+    it('T-L7: MARK_LTKM_CANDIDATE membuat LTKM monitoring case', async () => {
+      const appId = await createApprovedIndividual(`75007${SUFFIX}`, `07507${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 250_000, benef: `7507${SUFFIX}`, token: frontDeskToken });
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${trId}/submit-compliance-review`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ red_flags: ['WATCHLIST_NEAR_MATCH'] })
+        .expect(201);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${trId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'MARK_LTKM_CANDIDATE', decision_notes: 'Kandidat LTKM internal.' })
+        .expect(201);
+      expect(res.body.compliance_review_status).toBe('LTKM_CANDIDATE');
+      const cases = await ltktCasesOf(trId);
+      expect(cases.some((r: any) => r.case_type === 'LTKM' || r.case_type === 'BOTH')).toBe(true);
+    });
+
+    // ── T-L8: LTKT existing + MARK_LTKM_CANDIDATE → BOTH ──
+    it('T-L8: LTKT existing lalu MARK_LTKM_CANDIDATE → BOTH', async () => {
+      const appId = await createApprovedIndividual(`75008${SUFFIX}`, `07508${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 500_000_000, benef: `7508${SUFFIX}`, token: frontDeskToken });
+      expect(hasLtkt(await ltktCasesOf(trId))).toBe(true); // LTKT dari create-time eval
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${trId}/submit-compliance-review`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ red_flags: ['AMOUNT_NOT_MATCH_PROFILE'] })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${trId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'MARK_LTKM_CANDIDATE', decision_notes: 'Kandidat LTKM internal.' })
+        .expect(201);
+      const cases = await ltktCasesOf(trId);
+      expect(cases.some((r: any) => r.case_type === 'BOTH')).toBe(true);
+    });
+
+    // ── T-L9: monitoring list mengembalikan LTKT case yang dibuat ──
+    it('T-L9: GET /monitoring/cases memuat LTKT case yang baru dibuat', async () => {
+      const appId = await createApprovedIndividual(`75009${SUFFIX}`, `07509${SUFFIX}`);
+      const trId = await createTransfer(appId, { amount: 500_000_000, benef: `7509${SUFFIX}` });
+      await evaluate(trId);
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases?limit=100`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(
+        res.body.data.some(
+          (c: any) =>
+            String(c.transfer_id) === String(trId) &&
+            (c.case_type === 'LTKT' || c.case_type === 'BOTH'),
+        ),
+      ).toBe(true);
     });
   });
 

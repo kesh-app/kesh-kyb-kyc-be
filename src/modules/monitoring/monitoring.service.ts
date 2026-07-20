@@ -220,6 +220,36 @@ const MONITORING_ALERT_TEMPLATES: Record<string, AlertTemplate> = {
     source: "internal_aml_alert_matrix",
   },
 
+  // ── LTKT amount-threshold alert (non-cash, wajib lapor by nominal) ──
+  LTKT_AMOUNT_500M: {
+    alert_code: "LTKT_AMOUNT_500M",
+    alert_name: "Transaksi ≥ Rp500 Juta (Kriteria LTKT Nominal)",
+    report_type: "LTKT",
+    trigger_criteria:
+      "Nominal transaksi memenuhi kriteria LTKT internal: Rp500.000.000 atau lebih.",
+    parameters: ["Nilai transaksi tunggal ≥ Rp500 juta"],
+    analysis:
+      "Transaksi bernilai ≥ Rp500 juta wajib dilaporkan sebagai LTKT sesuai ketentuan.",
+    recommendation:
+      "Verifikasi sumber dana dan tujuan transaksi. Laporkan sebagai LTKT ke PPATK sesuai ketentuan.",
+    source: "internal_aml_alert_matrix",
+  },
+
+  // ── LTKM manual classification oleh Compliance ──
+  LTKM_COMPLIANCE_MARKED: {
+    alert_code: "LTKM_COMPLIANCE_MARKED",
+    alert_name: "Kandidat LTKM (Ditandai Compliance)",
+    report_type: "LTKM",
+    trigger_criteria:
+      "Compliance menandai transaksi sebagai kandidat LTKM pada review.",
+    parameters: ["Red flags & catatan dari compliance review"],
+    analysis:
+      "Transaksi ditandai manual sebagai mencurigakan oleh ComplianceLead.",
+    recommendation:
+      "Lanjutkan analisis dan pertimbangkan pelaporan LTKM ke PPATK.",
+    source: "compliance_review",
+  },
+
   // ── LTKT alerts ──
   LTKT_CASH_DEPOSIT_PROFILE_MISMATCH: {
     alert_code: "LTKT_CASH_DEPOSIT_PROFILE_MISMATCH",
@@ -364,6 +394,7 @@ const CLASSIFYING_LTKM_CODES = [
   "LTKM_EDD_RECOMMEND_LTKM",
   "LTKM_STRUCTURING_DAILY",
   "LTKM_MANY_BENEFICIARIES_DAILY",
+  "LTKM_COMPLIANCE_MARKED",
 ];
 
 @Injectable()
@@ -645,16 +676,31 @@ export class MonitoringService {
       factorCodes = rf.map((f: any) => f?.code).filter(Boolean);
     }
 
-    // ── LTKT: single cash ≥ 500M ──
-    if (cashCurrent && amount >= CASH_THRESHOLD) {
-      triggers.push({
-        trigger_type: "LTKT",
-        rule_code: "LTKT_CASH_SINGLE_500M",
-        rule_name: "Transaksi tunai tunggal ≥ Rp500.000.000",
-        severity: "HIGH",
-        amount,
-        details: { amount, threshold: CASH_THRESHOLD },
-      });
+    // ── LTKT: single transaksi ≥ 500M (threshold-based, wajib lapor) ──
+    // LTKT internal berbasis NOMINAL, bukan hanya tunai: setiap transaksi
+    // ≥ Rp500.000.000 wajib terdeteksi. Transaksi tunai memakai rule spesifik
+    // (profil setoran tunai); non-tunai memakai rule amount generik.
+    if (amount >= CASH_THRESHOLD) {
+      if (cashCurrent) {
+        triggers.push({
+          trigger_type: "LTKT",
+          rule_code: "LTKT_CASH_SINGLE_500M",
+          rule_name: "Transaksi tunai tunggal ≥ Rp500.000.000",
+          severity: "HIGH",
+          amount,
+          details: { amount, threshold: CASH_THRESHOLD },
+        });
+      } else {
+        triggers.push({
+          trigger_type: "LTKT",
+          rule_code: "LTKT_AMOUNT_500M",
+          rule_name:
+            "Nominal transaksi memenuhi kriteria LTKT internal: Rp500.000.000 atau lebih.",
+          severity: "HIGH",
+          amount,
+          details: { amount, threshold: CASH_THRESHOLD },
+        });
+      }
     }
 
     // ── Aggregate/structuring/many-beneficiaries butuh data 1 hari sama CIF ──
@@ -863,7 +909,20 @@ export class MonitoringService {
     if (!ctx) throw new NotFoundException("Transfer not found");
 
     const triggers = await this.evaluateRules(ctx);
+    return this.openOrAppendCase(transferId, triggers, ctx, user);
+  }
 
+  /**
+   * Buat case baru atau append trigger ke case aktif (dedup per transfer_id).
+   * Dipakai oleh rule engine (evaluateTransfer) maupun klasifikasi manual
+   * (markLtkmCandidate). Idempoten: rule_code yang sama tidak diduplikasi.
+   */
+  private async openOrAppendCase(
+    transferId: number,
+    triggers: EvalTrigger[],
+    ctx: any,
+    user?: AuthedUser,
+  ) {
     // Hanya trigger classifying yang boleh membuka case. Supporting alert
     // (mis. HIGH_VALUE_TRANSFER) tidak membuat case bila berdiri sendiri.
     const classifying = triggers.filter((t) => this.isClassifying(t));
@@ -1015,6 +1074,51 @@ export class MonitoringService {
     } catch (e: any) {
       this.logger.error(
         `auto monitoring evaluate failed for transfer ${transferId}: ${e?.message}`,
+      );
+      return { triggered: false as const, error: true as const };
+    }
+  }
+
+  /**
+   * Klasifikasi manual LTKM oleh Compliance (aksi MARK_LTKM_CANDIDATE).
+   * Buat case LTKM baru bila belum ada, atau append ke case aktif — jika case
+   * LTKT sudah ada untuk transfer ini maka case_type menjadi BOTH. Idempoten.
+   */
+  async markLtkmCandidate(
+    transferId: number,
+    opts: { redFlags?: string[]; notes?: string | null } = {},
+    user?: AuthedUser,
+  ) {
+    const ctx = await this.loadTransferContext(transferId);
+    if (!ctx) throw new NotFoundException("Transfer not found");
+
+    const trigger: EvalTrigger = {
+      trigger_type: "LTKM",
+      rule_code: "LTKM_COMPLIANCE_MARKED",
+      rule_name: "Ditandai sebagai kandidat LTKM oleh Compliance",
+      severity: "HIGH",
+      amount: Number(ctx.amount ?? 0) || null,
+      details: {
+        red_flags: opts.redFlags ?? [],
+        compliance_notes: opts.notes ?? null,
+        source: "COMPLIANCE_REVIEW",
+      },
+    };
+
+    return this.openOrAppendCase(transferId, [trigger], ctx, user);
+  }
+
+  /** Wrapper aman — tidak pernah menggagalkan compliance review. */
+  async safeMarkLtkmCandidate(
+    transferId: number,
+    opts: { redFlags?: string[]; notes?: string | null } = {},
+    user?: AuthedUser,
+  ) {
+    try {
+      return await this.markLtkmCandidate(transferId, opts, user);
+    } catch (e: any) {
+      this.logger.error(
+        `mark LTKM candidate failed for transfer ${transferId}: ${e?.message}`,
       );
       return { triggered: false as const, error: true as const };
     }
