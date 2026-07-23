@@ -371,6 +371,36 @@ const STAFF_RELEVANT_STATUSES = [
   "NEED_CLARIFICATION",
 ];
 
+// Label UI (Bahasa Indonesia) untuk status monitoring. Monitoring dimiliki tim
+// Compliance sepenuhnya — TIDAK ADA keterlibatan Operation Supervisor. FE harus
+// memakai status_label ini alih-alih menebak label dari peta status generik
+// (yang keliru menampilkan "Menunggu Review Operation Supervisor").
+const STATUS_LABELS: Record<string, string> = {
+  // flow baru
+  DETECTED: "Menunggu Review Compliance",
+  PENDING_COMPLIANCE_STAFF_REVIEW: "Menunggu Review Compliance",
+  STAFF_REVIEWED: "Sudah Direview Compliance",
+  PENDING_COMPLIANCE_MANAGER_REVIEW: "Menunggu Approval Lead Compliance",
+  MANAGER_APPROVED: "Disetujui Lead Compliance",
+  MANAGER_REJECTED: "Ditolak Lead Compliance",
+  NEED_CLARIFICATION: "Menunggu Klarifikasi Compliance",
+  READY_TO_REPORT: "Siap Dilaporkan",
+  REPORTED: "Sudah Dilaporkan",
+  CLOSED_FALSE_POSITIVE: "Ditutup (False Positive)",
+  ARCHIVED: "Diarsipkan",
+  // status lama (deprecated) → tetap dipetakan ke label compliance-owned
+  UNDER_COMPLIANCE_REVIEW: "Menunggu Review Compliance",
+  COMPLIANCE_APPROVED: "Sudah Direview Compliance",
+  COMPLIANCE_REJECTED: "Ditolak Lead Compliance",
+  PENDING_DIRECTOR_REVIEW: "Menunggu Approval Lead Compliance",
+  DIRECTOR_APPROVED: "Disetujui Lead Compliance",
+  DIRECTOR_REJECTED: "Ditolak Lead Compliance",
+};
+
+function statusLabel(status: string | null | undefined): string {
+  return STATUS_LABELS[String(status ?? "")] ?? String(status ?? "");
+}
+
 const PEP_CODES = [
   "WATCHLIST_PEP_CONFIRMED",
   "WATCHLIST_PEP_CANDIDATE",
@@ -1139,7 +1169,7 @@ export class MonitoringService {
       `SELECT * FROM monitoring_case_triggers WHERE case_id=$1 ORDER BY id`,
       [id],
     );
-    return { ...c, triggers };
+    return { ...c, status_label: statusLabel(c.status), triggers };
   }
 
   async getCase(id: number, user?: AuthedUser) {
@@ -1240,7 +1270,12 @@ export class MonitoringService {
       params,
     );
 
-    return { data, page, limit, total };
+    return {
+      data: data.map((r) => ({ ...r, status_label: statusLabel(r.status) })),
+      page,
+      limit,
+      total,
+    };
   }
 
   async listReports(query: any) {

@@ -7358,6 +7358,44 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.cif_no).toBeTruthy();
     });
 
+    // ── T-18b: monitoring status label is compliance-owned, never OperationSupervisor ──
+    it('T-18b: new detected case status_label is compliance-owned, not Operation Supervisor', async () => {
+      const caseId = await setupLtkmCase(`70188${SUFFIX}`, `07188${SUFFIX}`);
+
+      // Detail
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases/${caseId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.status).toBe('DETECTED');
+      expect(detail.body.status_label).toBe('Menunggu Review Compliance');
+      expect(detail.body.status_label).not.toMatch(/Operation Supervisor/i);
+
+      // List
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases?status=DETECTED`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(list.body.data.length).toBeGreaterThan(0);
+      for (const row of list.body.data) {
+        expect(row.status_label).toBeTruthy();
+        expect(row.status_label).not.toMatch(/Operation Supervisor/i);
+      }
+    });
+
+    // ── T-18c: escalated case waits on Lead Compliance, not Operation Supervisor ──
+    it('T-18c: PENDING_COMPLIANCE_MANAGER_REVIEW status_label mentions Lead Compliance', async () => {
+      const caseId = await setupLtkmCase(`70189${SUFFIX}`, `07189${SUFFIX}`);
+      await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi ke lead compliance').expect(200);
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases/${caseId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_MANAGER_REVIEW');
+      expect(res.body.status_label).toBe('Menunggu Approval Lead Compliance');
+      expect(res.body.status_label).not.toMatch(/Operation Supervisor/i);
+    });
+
     // Helper: siapkan case yang sudah PENDING_COMPLIANCE_MANAGER_REVIEW.
     async function setupPendingManagerCase(nik: string, phone: string): Promise<string> {
       const caseId = await setupLtkmCase(nik, phone);
