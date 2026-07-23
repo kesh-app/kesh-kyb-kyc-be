@@ -87,10 +87,8 @@ export class WatchlistController {
   }
 
   // Data watchlist entries yang tersimpan (untuk FE menampilkan isi list, bukan hanya riwayat).
-  // RBAC sama dengan history: ComplianceLead + SystemAdmin. FrontDesk/Auditor/Finance diblokir.
-  // Catatan: watchlist_entries TIDAK punya relasi ke ingest log, jadi cara paling aman
-  // memfilter data (termasuk existing) adalah via list_type / source_list.
-  @Roles("ComplianceLead", "SystemAdmin")
+  // FrontDesk: read-only access untuk Data Watchlist Tersimpan. Upload/history tetap diblokir.
+  @Roles("ComplianceLead", "SystemAdmin", "FrontDesk")
   @Get("entries")
   async entries(
     @Query("page") page?: string,

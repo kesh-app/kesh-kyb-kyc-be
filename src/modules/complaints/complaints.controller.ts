@@ -28,7 +28,7 @@ export class ComplaintsController {
 
   // SEARCH APPROVED CUSTOMERS — untuk dropdown Nama Customer
   @Get("customers/search")
-  @Roles("FrontDesk", "ComplianceLead", "FinanceManager", "Auditor")
+  @Roles("FrontDesk", "OperationSupervisor", "FinanceManager", "Auditor")
   async searchCustomers(
     @Query("q") q = "",
     @Query("page") page = "1",
@@ -39,7 +39,7 @@ export class ComplaintsController {
 
   // SEARCH TRANSACTIONS — untuk dropdown Nomor Transaksi
   @Get("transactions/search")
-  @Roles("FrontDesk", "ComplianceLead", "FinanceManager", "Auditor")
+  @Roles("FrontDesk", "OperationSupervisor", "FinanceManager", "Auditor")
   async searchTransactions(
     @Query("customer_application_id") customerAppId: string,
     @Query("q") q = "",
@@ -66,21 +66,21 @@ export class ComplaintsController {
 
   // LIST COMPLAINTS
   @Get()
-  @Roles("FrontDesk", "ComplianceLead", "FinanceManager", "Auditor")
+  @Roles("FrontDesk", "OperationSupervisor", "FinanceManager", "Auditor")
   async list(@Req() req: any, @Query() query: ListComplaintsQueryDto) {
     return this.svc.list(req.user, query);
   }
 
   // GET COMPLAINT DETAIL
   @Get(":id")
-  @Roles("FrontDesk", "ComplianceLead", "FinanceManager", "Auditor")
+  @Roles("FrontDesk", "OperationSupervisor", "FinanceManager", "Auditor")
   async getById(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.getById(id, req.user);
   }
 
   // UPDATE COMPLAINT (Auditor read-only — excluded)
   @Patch(":id")
-  @Roles("FrontDesk", "ComplianceLead", "FinanceManager")
+  @Roles("FrontDesk", "OperationSupervisor", "FinanceManager")
   async update(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,

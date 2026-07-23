@@ -88,7 +88,7 @@ export class ApplicationsController {
     });
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead", "SystemAdmin")
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead", "SystemAdmin", "FinanceStaff", "FinanceManager", "Auditor", "OperationSupervisor")
   @Get(":id/parties")
   async listParties(@Param("id", ParseIntPipe) appId: number) {
     return this.svc.listParties(appId);

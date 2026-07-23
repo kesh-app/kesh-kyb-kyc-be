@@ -3507,11 +3507,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(Array.isArray(res.body.data)).toBe(true);
     });
 
-    it('I2-03: FrontDesk GET /watchlist/entries → 403', async () => {
-      return request(app.getHttpServer())
+    it('I2-03: FrontDesk GET /watchlist/entries → 200 (read-only Data Watchlist Tersimpan)', async () => {
+      const res = await request(app.getHttpServer())
         .get(`${BASE}/watchlist/entries`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .expect(403);
+        .expect(200);
+      expect(res.body).toBeDefined();
     });
 
     it('I2-04: FinanceStaff GET /watchlist/entries → 403', async () => {
@@ -9325,11 +9326,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(found).toBeDefined();
     });
 
-    // Y-06: ComplianceLead melihat semua complaint
-    it('Y-06: ComplianceLead GET /complaints → melihat semua (≥ 1)', async () => {
-      const res = await request(app.getHttpServer())
+    // Y-06: ComplianceLead tidak lagi punya akses ke complaints → 403
+    it('Y-06: ComplianceLead GET /complaints → 403', async () => {
+      await request(app.getHttpServer())
         .get(`${BASE}/complaints`)
         .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(403);
+    });
+
+    // Y-06b: OperationSupervisor melihat semua complaint
+    it('Y-06b: OperationSupervisor GET /complaints → melihat semua (≥ 1)', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .expect(200);
 
       expect(Array.isArray(res.body.data)).toBe(true);
@@ -9354,22 +9363,22 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(403);
     });
 
-    // Y-08: ComplianceLead dapat update status ke IN_PROGRESS
-    it('Y-08: ComplianceLead PATCH /complaints/:id status=IN_PROGRESS → 200', async () => {
+    // Y-08: OperationSupervisor dapat update status ke IN_PROGRESS
+    it('Y-08: OperationSupervisor PATCH /complaints/:id status=IN_PROGRESS → 200', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/complaints/${complaintId}`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ status: 'IN_PROGRESS' })
         .expect(200);
 
       expect(res.body.status).toBe('IN_PROGRESS');
     });
 
-    // Y-09: ComplianceLead dapat resolve complaint dengan resolution_notes
-    it('Y-09: ComplianceLead PATCH /complaints/:id status=RESOLVED + resolution_notes → 200', async () => {
+    // Y-09: OperationSupervisor dapat resolve complaint dengan resolution_notes
+    it('Y-09: OperationSupervisor PATCH /complaints/:id status=RESOLVED + resolution_notes → 200', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/complaints/${complaintId}`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({
           status: 'RESOLVED',
           resolution_notes: 'Transfer telah dikonfirmasi diterima oleh bank tujuan. Kasus ditutup.',
@@ -10262,6 +10271,297 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const done = await pollDone(res.body.id, complianceToken);
       expect(done.status).toBe('COMPLETED');
       expect(done.row_counts.LTKT).toBe(0);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // Z. RBAC — role access control changes
+  // ══════════════════════════════════════════════════════════
+  describe('Z. RBAC — role access control', () => {
+
+    // ── Z-A: Complaints ─────────────────────────────────────
+
+    it('Z-A01: ComplianceLead cannot list complaints → 403', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(403);
+    });
+
+    it('Z-A02: ComplianceLead cannot create complaint → 403', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          category: 'TRANSFER',
+          complaint_notes: 'Test pengaduan dari ComplianceLead.',
+        })
+        .expect(403);
+    });
+
+    it('Z-A03: ComplianceLead cannot search complaint customers → 403', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/customers/search`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(403);
+    });
+
+    it('Z-A04: OperationSupervisor can list complaints → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    it('Z-A05: OperationSupervisor can search complaint customers → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/customers/search`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    it('Z-A06: OperationSupervisor can resolve complaint', async () => {
+      // create fresh complaint as FrontDesk then resolve as OperationSupervisor
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-RBAC-OPS`,
+          category: 'SERVICE',
+          channel: 'WALK_IN',
+          priority: 'LOW',
+          complaint_notes: 'Pengaduan RBAC test untuk OperationSupervisor resolve.',
+        })
+        .expect(201);
+      const cid = create.body.id;
+
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${cid}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ status: 'RESOLVED', resolution_notes: 'Diselesaikan oleh OperationSupervisor dalam RBAC test.' })
+        .expect(200);
+      expect(res.body.status).toBe('RESOLVED');
+    });
+
+    it('Z-A07: FinanceManager can list and view complaints → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    it('Z-A08: Auditor can view complaints (read-only) → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+    });
+
+    it('Z-A09: Auditor cannot update complaint → 403', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+      const cid = res.body.data[0]?.id;
+      if (!cid) return;
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${cid}`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ priority: 'HIGH' })
+        .expect(403);
+    });
+
+    // ── Z-B: Watchlist ──────────────────────────────────────
+
+    it('Z-B01: FrontDesk can GET /watchlist/entries → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(res.body).toBeDefined();
+    });
+
+    it('Z-B02: FrontDesk cannot POST /watchlist/upload → 403', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
+    });
+
+    it('Z-B03: FrontDesk cannot GET /watchlist/history → 403', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
+    });
+
+    it('Z-B04: ComplianceLead retains watchlist manage access → entries 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/entries`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body).toBeDefined();
+    });
+
+    it('Z-B05: ComplianceLead retains watchlist history access → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/watchlist/history`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(res.body).toBeDefined();
+    });
+
+    // ── Z-C: Manajemen Pengguna Jasa ────────────────────────
+
+    it('Z-C01: FinanceStaff can list applications → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(res.body).toBeDefined();
+    });
+
+    it('Z-C02: FinanceStaff can view application detail → 200', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+    });
+
+    it('Z-C03: FinanceStaff can view application parties → 200', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications/${bizAppId}/parties`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+    });
+
+    it('Z-C04: FinanceStaff cannot create individual application → 403', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ full_name: 'Test', identity_type: 'KTP', identity_number: '1234567890123456' })
+        .expect(403);
+    });
+
+    it('Z-C05: FinanceStaff cannot update CDD → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ full_name: 'Hacked' })
+        .expect(403);
+    });
+
+    it('Z-C06: FinanceStaff cannot submit application → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(403);
+    });
+
+    it('Z-C07: FinanceStaff cannot make KYC decision → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}/decision`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+    });
+
+    it('Z-C08: FinanceManager can list applications → 200', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      expect(res.body).toBeDefined();
+    });
+
+    it('Z-C09: FinanceManager can view application detail → 200', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+    });
+
+    it('Z-C10: FinanceManager can view application parties → 200', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications/${bizAppId}/parties`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+    });
+
+    it('Z-C11: FinanceManager cannot create individual application → 403', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ full_name: 'Test', identity_type: 'KTP', identity_number: '1234567890123456' })
+        .expect(403);
+    });
+
+    it('Z-C12: FinanceManager cannot update CDD → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ full_name: 'Hacked' })
+        .expect(403);
+    });
+
+    it('Z-C13: FinanceManager cannot submit application → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}/submit`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(403);
+    });
+
+    it('Z-C14: FinanceManager cannot make KYC decision → 403', async () => {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+    });
+
+    it('Z-C15: OperationSupervisor KYC decision endpoint still accessible → not 403', async () => {
+      // OperationSupervisor should reach the decision endpoint (may get 4xx for business reasons, not 403)
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'APPROVED' });
+      expect(res.status).not.toBe(403);
+    });
+
+    it('Z-C16: ComplianceLead KYC decision endpoint still accessible → not 403', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${indivAppIdOk}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED' });
+      expect(res.status).not.toBe(403);
+    });
+
+    it('Z-C17: OperationSupervisor can view application parties (read-only) → 200', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications/${bizAppId}/parties`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(200);
+    });
+
+    it('Z-C18: OperationSupervisor cannot add party → 403', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${bizAppId}/parties`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ role: 'DIRECTOR', full_name: 'Test', identity_type: 'KTP', identity_number: '1234567890123456' })
+        .expect(403);
+    });
+
+    it('Z-C19: OperationSupervisor cannot delete party → 403', async () => {
+      await request(app.getHttpServer())
+        .delete(`${BASE}/applications/${bizAppId}/parties/1`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(403);
     });
   });
 });
