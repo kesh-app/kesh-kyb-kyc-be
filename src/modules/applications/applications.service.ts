@@ -2461,7 +2461,8 @@ export class ApplicationsService {
 
     const res = await this.pool.query(
       `UPDATE applications
-     SET status='SUBMITTED', submitted_at=now(), reviewer_id=$2
+     SET status='SUBMITTED', submitted_at=now(),
+         first_submitted_at=COALESCE(first_submitted_at, now()), reviewer_id=$2
      WHERE id=$1
      RETURNING id`,
       [appId, reviewerId],

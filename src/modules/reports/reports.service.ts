@@ -317,7 +317,8 @@ export class ReportsService {
   private async transfersSheet([from, to]: [string, string]): Promise<Sheet> {
     const columns = [
       'Transfer ID', 'Reference No', 'CIF', 'Sender Name', 'Customer Type', 'Amount',
-      'Currency', 'Beneficiary Name', 'Beneficiary Bank', 'Beneficiary Account', 'Purpose',
+      'Currency', 'Beneficiary Name', 'Beneficiary Bank', 'Beneficiary Account',
+      'Relationship to Sender', 'Purpose',
       'Status', 'Result', 'Compliance Review Status', 'Red Flags', 'Compliance Notes',
       'Compliance Reviewed At', 'Submitted At', 'Supervisor Reviewed At',
       'Finance Reviewed At', 'Final Approved At', 'Completed At', 'Rejected At',
@@ -328,6 +329,7 @@ export class ReportsService {
               COALESCE(p.full_name, b.legal_name, t.source_account_name) AS sender_name,
               sa.type AS customer_type, t.amount, t.currency,
               t.beneficiary_account_name, t.beneficiary_bank_name, t.beneficiary_account_number,
+              t.beneficiary_relationship_to_sender,
               t.transaction_purpose, t.status, t.result,
               cr.status AS cr_status, cr.red_flags, cr.decision_notes AS cr_notes, cr.reviewed_at AS cr_reviewed_at,
               t.submitted_at, t.supervisor_reviewed_at, t.finance_reviewed_at,
@@ -348,6 +350,7 @@ export class ReportsService {
     const rows = q.rows.map((r) => [
       r.id, r.reference_no, r.cif_no, r.sender_name, r.customer_type, r.amount, r.currency,
       r.beneficiary_account_name, r.beneficiary_bank_name, r.beneficiary_account_number,
+      r.beneficiary_relationship_to_sender,
       r.transaction_purpose, r.status, r.result, r.cr_status,
       r.red_flags ? JSON.stringify(r.red_flags) : null, r.cr_notes, r.cr_reviewed_at,
       r.submitted_at, r.supervisor_reviewed_at, r.finance_reviewed_at,

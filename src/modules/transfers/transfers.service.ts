@@ -145,21 +145,16 @@ export class TransfersService {
   }
 
   // ---------------------------------------------------------------------------
-  // CREATE DRAFT
+  // INSERT satu baris transfer (DRAFT). Dipakai oleh create() dan bulkCreate().
+  // `db` bisa Pool atau PoolClient (transaksi). Tidak melakukan audit/monitoring.
   // ---------------------------------------------------------------------------
-  async create(user: AuthedUser, dto: CreateTransferDto, ip?: string) {
-    const isStaff = user.role === "FinanceStaff" || user.role === "FrontDesk";
-    const isManager = user.role === "FinanceManager";
-
-    if (!isStaff && !isManager && !FULL_ACCESS_ROLES.includes(user.role)) {
-      throw new ForbiddenException("Not allowed");
-    }
-
-    // ✅ validasi sender_application_id — harus ada & KYC/KYB APPROVED
-    await this.assertSenderApproved(dto.sender_application_id);
-    await this.assertWicTransferLimit(dto.sender_application_id, dto.amount);
-
-    // ── SNAP-ready derivations ──────────────────────────────────────────
+  private async insertTransferRow(
+    db: { query: Pool["query"] },
+    user: AuthedUser,
+    dto: any,
+    senderApplicationId: number,
+    batchId: number | null = null,
+  ) {
     const partnerRef = await this.resolvePartnerReferenceNo(
       dto.partner_reference_no,
     );
@@ -169,8 +164,7 @@ export class TransfersService {
     const transferChannel = dto.transfer_channel ?? "MANUAL";
     const additionalInfo = dto.additional_info ?? {};
 
-    // ✅ insert transfer
-    const q = await this.pool.query(
+    const q = await db.query(
       `INSERT INTO transfers(
         branch_id,
         amount,
@@ -179,6 +173,7 @@ export class TransfersService {
         beneficiary_bank_code,
         beneficiary_account_number,
         beneficiary_account_name,
+        beneficiary_relationship_to_sender,
         description,
         requested_transfer_at,
         created_by,
@@ -201,11 +196,12 @@ export class TransfersService {
         additional_info,
         source_of_funds,
         transaction_purpose,
+        batch_id,
         updated_at
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29, now()
+        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31, now()
       )
       RETURNING *`,
       [
@@ -216,10 +212,11 @@ export class TransfersService {
         dto.beneficiaryBankCode ?? null,
         dto.beneficiaryAccountNumber,
         dto.beneficiaryAccountName,
+        dto.beneficiary_relationship_to_sender,
         dto.description ?? null,
         dto.requestedTransferAt ?? null,
         resolveUserId(user),
-        dto.sender_application_id,
+        senderApplicationId,
         partnerRef,
         amountValue,
         amountCurrency,
@@ -238,10 +235,31 @@ export class TransfersService {
         JSON.stringify(additionalInfo),
         dto.source_of_funds ?? null,
         dto.transaction_purpose ?? null,
+        batchId,
       ],
     );
+    return q.rows[0];
+  }
 
-    const row = q.rows[0];
+  // ---------------------------------------------------------------------------
+  // CREATE DRAFT
+  // ---------------------------------------------------------------------------
+  async create(user: AuthedUser, dto: CreateTransferDto, ip?: string) {
+    // Input transfer = FrontDesk saja. FinanceStaff hanya layer review finance.
+    if (user.role !== "FrontDesk" && !FULL_ACCESS_ROLES.includes(user.role)) {
+      throw new ForbiddenException("Not allowed");
+    }
+
+    // ✅ validasi sender_application_id — harus ada & KYC/KYB APPROVED
+    await this.assertSenderApproved(dto.sender_application_id);
+    await this.assertWicTransferLimit(dto.sender_application_id, dto.amount);
+
+    const row = await this.insertTransferRow(
+      this.pool,
+      user,
+      dto,
+      dto.sender_application_id,
+    );
 
     await this.audit(resolveUserId(user), "TRANSFER_CREATE", String(row.id), null, row, ip);
 
@@ -249,6 +267,115 @@ export class TransfersService {
     await this.monitoring.safeEvaluateTransfer(Number(row.id), user);
 
     return row;
+  }
+
+  // ---------------------------------------------------------------------------
+  // BULK CREATE — mass input (bukan mass approval). Maks 20 item.
+  // Setiap item menjadi transfer DRAFT normal + di-link ke transfer_batches.
+  // Satu item invalid → seluruh request ditolak (validasi DTO di controller;
+  // insert dibungkus transaksi agar tidak ada baris parsial bila DB error).
+  // ---------------------------------------------------------------------------
+  async bulkCreate(
+    user: AuthedUser,
+    dto: { sender_application_id: number; items: any[] },
+    ip?: string,
+  ) {
+    // Input transfer = FrontDesk saja. FinanceStaff hanya layer review finance.
+    if (user.role !== "FrontDesk" && !FULL_ACCESS_ROLES.includes(user.role)) {
+      throw new ForbiddenException("Not allowed");
+    }
+
+    if (!Array.isArray(dto.items) || dto.items.length === 0) {
+      throw new BadRequestException("items wajib diisi minimal 1");
+    }
+    if (dto.items.length > 20) {
+      throw new BadRequestException("maksimal 20 item per bulk transfer");
+    }
+
+    // Sender divalidasi sekali (satu sender untuk seluruh batch).
+    await this.assertSenderApproved(dto.sender_application_id);
+    for (const item of dto.items) {
+      await this.assertWicTransferLimit(dto.sender_application_id, item.amount);
+    }
+
+    const actorId = resolveUserId(user);
+    const batchNo = await this.resolveBatchNo();
+
+    const client = await this.pool.connect();
+    let batchId: number;
+    let created: any[] = [];
+    try {
+      await client.query("BEGIN");
+
+      const batchRes = await client.query(
+        `INSERT INTO transfer_batches
+           (batch_no, created_by, sender_application_id, total_count, total_amount, status)
+         VALUES ($1,$2,$3,$4,$5,'CREATED')
+         RETURNING id`,
+        [
+          batchNo,
+          actorId,
+          dto.sender_application_id,
+          dto.items.length,
+          dto.items.reduce((sum, it) => sum + Number(it.amount || 0), 0),
+        ],
+      );
+      batchId = Number(batchRes.rows[0].id);
+
+      for (const item of dto.items) {
+        const row = await this.insertTransferRow(
+          client,
+          user,
+          item,
+          dto.sender_application_id,
+          batchId,
+        );
+        created.push(row);
+      }
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    await this.audit(
+      actorId,
+      "TRANSFER_BULK_CREATE",
+      String(batchId),
+      null,
+      { batch_no: batchNo, count: created.length },
+      ip,
+    );
+
+    // Monitoring evaluation per row — di luar transaksi, tidak boleh menggagalkan.
+    for (const row of created) {
+      await this.monitoring.safeEvaluateTransfer(Number(row.id), user);
+    }
+
+    return {
+      batch_id: batchId,
+      batch_no: batchNo,
+      total_count: created.length,
+      total_amount: created.reduce((sum, r) => sum + Number(r.amount || 0), 0),
+      transfers: created,
+    };
+  }
+
+  private async resolveBatchNo(): Promise<string> {
+    for (let i = 0; i < 5; i++) {
+      const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      const rand = Math.random().toString(36).toUpperCase().slice(2, 7).padEnd(5, "0");
+      const candidate = `KESH-TRB-${date}-${rand}`;
+      const dup = await this.pool.query(
+        `SELECT 1 FROM transfer_batches WHERE batch_no = $1 LIMIT 1`,
+        [candidate],
+      );
+      if ((dup.rowCount ?? 0) === 0) return candidate;
+    }
+    throw new BadRequestException("Failed to generate batch_no, please retry");
   }
 
   // ---------------------------------------------------------------------------
@@ -290,6 +417,7 @@ export class TransfersService {
         beneficiary_bank_code=$7,
         beneficiary_account_number=$8,
         beneficiary_account_name=$9,
+        beneficiary_relationship_to_sender=$27,
         description=$10,
         requested_transfer_at=$11,
         source_account_no=COALESCE($12, source_account_no),
@@ -337,6 +465,7 @@ export class TransfersService {
         dto.additional_info ? JSON.stringify(dto.additional_info) : null,
         dto.source_of_funds ?? null,
         dto.transaction_purpose ?? null,
+        dto.beneficiary_relationship_to_sender,
       ],
     );
 
@@ -384,6 +513,7 @@ export class TransfersService {
     if (!row.beneficiary_account_number) missing.push("beneficiary_account_number");
     if (!row.beneficiary_account_name) missing.push("beneficiary_account_name");
     if (!row.beneficiary_bank_name) missing.push("beneficiary_bank_name");
+    if (!row.beneficiary_relationship_to_sender) missing.push("beneficiary_relationship_to_sender");
     if (!(Number(row.amount) > 0)) missing.push("amount");
     if (missing.length > 0) {
       throw new BadRequestException(
@@ -948,6 +1078,8 @@ export class TransfersService {
          t.amount, t.currency, t.amount_value, t.amount_currency,
          t.beneficiary_account_name, t.beneficiary_account_number,
          t.beneficiary_bank_code, t.beneficiary_bank_name,
+         t.beneficiary_relationship_to_sender,
+         t.batch_id,
          t.status, t.result, t.created_at, t.submitted_at, t.approved_at,
          t.completed_at, t.failed_at,
          t.source_of_funds, t.transaction_purpose,

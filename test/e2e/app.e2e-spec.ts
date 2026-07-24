@@ -1253,13 +1253,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('F-01: POST /transfers dengan DRAFT app → 400 "harus berstatus APPROVED"', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           amount: 500000,
           sender_application_id: Number(indivAppIdMissing), // status DRAFT
           beneficiaryBankName: 'Bank Test',
           beneficiaryAccountNumber: '1234567890',
           beneficiaryAccountName: 'Penerima Test',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(400);
 
@@ -1271,13 +1272,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('F-02: POST /transfers dengan APPROVED app → 201 DRAFT + created_by terisi', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           amount: 1000000,
           sender_application_id: Number(indivAppIdOk), // status APPROVED
           beneficiaryBankName: 'Bank Mandiri',
           beneficiaryAccountNumber: '9876543210',
           beneficiaryAccountName: 'PT Penerima Dana',
+          beneficiary_relationship_to_sender: 'Keluarga',
           description: 'Transfer e2e test',
         })
         .expect(201);
@@ -1300,6 +1302,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankName: 'Bank Test',
           beneficiaryAccountNumber: '111',
           beneficiaryAccountName: 'Test',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(403);
     });
@@ -1346,6 +1349,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         beneficiaryBankName: 'Bank Test',
         beneficiaryAccountNumber: '1234567890',
         beneficiaryAccountName: 'Penerima Guard',
+        beneficiary_relationship_to_sender: 'Keluarga',
       };
     }
 
@@ -1353,7 +1357,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const appId = await createAppWithStatus('IN_REVIEW', 1);
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send(transferBody(appId))
         .expect(400);
       expect(res.body.message).toBe(GUARD_MSG);
@@ -1363,7 +1367,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const appId = await createAppWithStatus('REJECTED', 2);
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send(transferBody(appId))
         .expect(400);
       expect(res.body.message).toBe(GUARD_MSG);
@@ -1373,7 +1377,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const appId = await createAppWithStatus('APPROVED', 3);
       const create = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send(transferBody(appId))
         .expect(201);
       const txId = String(create.body.id);
@@ -1393,7 +1397,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const appId = await createAppWithStatus('APPROVED', 4);
       const create = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send(transferBody(appId))
         .expect(201);
       const txId = String(create.body.id);
@@ -1430,7 +1434,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const appId = await createAppWithStatus('APPROVED', 6);
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send(transferBody(appId))
         .expect(201);
       expect(res.body.status).toBe('DRAFT');
@@ -1475,6 +1479,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankName: 'Bank Test',
           beneficiaryAccountNumber: '9876543210',
           beneficiaryAccountName: 'Penerima FW',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
       const txId = String(create.body.id);
@@ -1639,6 +1644,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankName: 'Bank Test',
           beneficiaryAccountNumber: '1122334455',
           beneficiaryAccountName: 'Penerima FC',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
       return String(create.body.id);
@@ -3770,6 +3776,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankName: 'Bank Test',
           beneficiaryAccountNumber: '1111111111',
           beneficiaryAccountName: 'Test',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
     });
@@ -4142,7 +4149,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     async function createSubmitApprove(extra: Record<string, any> = {}) {
       const create = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           amount: 750000,
           sender_application_id: Number(indivAppIdOk),
@@ -4150,6 +4157,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankCode: '008',
           beneficiaryAccountNumber: '1112223334',
           beneficiaryAccountName: 'PT Penerima',
+          beneficiary_relationship_to_sender: 'Keluarga',
           ...extra,
         })
         .expect(201);
@@ -4185,13 +4193,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('N-01: create tanpa partner_reference_no → server generate KESH-TRF-...', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           amount: 1000000,
           sender_application_id: Number(indivAppIdOk),
           beneficiaryBankName: 'Bank BCA',
           beneficiaryAccountNumber: '5556667778',
           beneficiaryAccountName: 'PT Auto Ref',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
 
@@ -4210,7 +4219,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('N-02: create dengan SNAP-ready optional fields → persisted', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           amount: 2500000,
           currency: 'idr',
@@ -4219,6 +4228,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankCode: '002',
           beneficiaryAccountNumber: '9990001112',
           beneficiaryAccountName: 'PT SNAP Ready',
+          beneficiary_relationship_to_sender: 'Keluarga',
           partner_reference_no: MANUAL_REF,
           source_account_no: '1234567890',
           source_account_name: 'KESH Operasional',
@@ -4250,13 +4260,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('N-03: duplicate partner_reference_no → 400', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           amount: 100000,
           sender_application_id: Number(indivAppIdOk),
           beneficiaryBankName: 'Bank BRI',
           beneficiaryAccountNumber: '9990001112',
           beneficiaryAccountName: 'PT Dup',
+          beneficiary_relationship_to_sender: 'Keluarga',
           partner_reference_no: MANUAL_REF,
         })
         .expect(400);
@@ -4309,13 +4320,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       // transfer baru khusus reject
       const create = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           amount: 300000,
           sender_application_id: Number(indivAppIdOk),
           beneficiaryBankName: 'Bank BNI',
           beneficiaryAccountNumber: '4445556667',
           beneficiaryAccountName: 'PT Ditolak',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
       txReject = String(create.body.id);
@@ -4385,6 +4397,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       txFail = await createSubmitApprove({
         beneficiaryAccountNumber: '7778889990',
         beneficiaryAccountName: 'PT Gagal',
+        beneficiary_relationship_to_sender: 'Keluarga',
       });
 
       const res = await request(app.getHttpServer())
@@ -4482,6 +4495,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankCode: '014',
           beneficiaryAccountNumber: '1234500001',
           beneficiaryAccountName: 'PT FrontDesk Test',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
 
@@ -5154,6 +5168,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankName: 'Bank GF',
           beneficiaryAccountNumber: '1234567890',
           beneficiaryAccountName: 'Penerima GF',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
       const txId = String(createRes.body.id);
@@ -5227,6 +5242,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankName: 'Bank Early',
           beneficiaryAccountNumber: '9999888777',
           beneficiaryAccountName: 'Penerima Early',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
       const txId = String(createRes.body.id);
@@ -5596,6 +5612,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryBankName: 'Bank GG',
           beneficiaryAccountNumber: '5556667778',
           beneficiaryAccountName: 'Penerima GG',
+          beneficiary_relationship_to_sender: 'Keluarga',
         })
         .expect(201);
       const txId = String(createRes.body.id);
@@ -6911,13 +6928,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         beneficiaryBankCode: '009',
         beneficiaryAccountNumber: opts.benef ?? `900${SUFFIX}`,
         beneficiaryAccountName: 'PT Penerima Monitoring',
+        beneficiary_relationship_to_sender: 'Keluarga',
       };
       if (opts.transfer_method) body.transfer_method = opts.transfer_method;
       if (opts.additional_info) body.additional_info = opts.additional_info;
 
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
-        .set('Authorization', `Bearer ${opts.token ?? financeStaffToken}`)
+        .set('Authorization', `Bearer ${opts.token ?? frontDeskToken}`)
         .send(body)
         .expect(201);
       return String(res.body.id);
@@ -7918,13 +7936,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UB-01: amount 9999 → 400 (di bawah minimum)', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 9999,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank Test',
             beneficiaryAccountNumber: '1234567890',
             beneficiaryAccountName: 'Test',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(400);
         expect(res.body.message).toBeDefined();
@@ -7933,13 +7952,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UB-02: amount 10000 → 201 (tepat di batas minimum)', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 10000,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank Test',
             beneficiaryAccountNumber: '1234000010',
             beneficiaryAccountName: 'Test Min',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(201);
         expect(Number(res.body.amount)).toBe(10000);
@@ -7948,13 +7968,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UB-03: amount 500000000 → 201 (tepat di batas maksimum)', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 500_000_000,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank Test',
             beneficiaryAccountNumber: '1234000500',
             beneficiaryAccountName: 'Test Max',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(201);
         expect(Number(res.body.amount)).toBe(500_000_000);
@@ -7963,13 +7984,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UB-04: amount 500000001 → 400 (melebihi maksimum)', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 500_000_001,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank Test',
             beneficiaryAccountNumber: '1234567890',
             beneficiaryAccountName: 'Test',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(400);
         expect(res.body.message).toBeDefined();
@@ -8052,13 +8074,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 50_000,
             sender_application_id: Number(sender.application_id),
             beneficiaryBankName: 'Bank Test',
             beneficiaryAccountNumber: '9988776655',
             beneficiaryAccountName: 'Penerima Search',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(201);
         expect(res.body.status).toBe('DRAFT');
@@ -8087,13 +8110,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UE-02: account number dengan huruf → 400', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 100_000,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank Test',
             beneficiaryAccountNumber: '12345ABC',
             beneficiaryAccountName: 'Test',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(400);
         expect(res.body.message).toBeDefined();
@@ -8102,13 +8126,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UE-03: account number spasi → 400', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 100_000,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank Test',
             beneficiaryAccountNumber: '123 456',
             beneficiaryAccountName: 'Test',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(400);
         expect(res.body.message).toBeDefined();
@@ -8117,13 +8142,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UE-04: account number digit murni → 201', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 25_000,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank BCA',
             beneficiaryAccountNumber: '0987654321',
             beneficiaryAccountName: 'Test Digit',
+            beneficiary_relationship_to_sender: 'Keluarga',
           })
           .expect(201);
         expect(res.body.beneficiary_account_number).toBe('0987654321');
@@ -8137,13 +8163,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       it('UF-01: create transfer dengan source_of_funds + transaction_purpose → 201, keduanya tersimpan', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 75_000,
             sender_application_id: Number(indivAppIdOk),
             beneficiaryBankName: 'Bank BRI',
             beneficiaryAccountNumber: '1122334455',
             beneficiaryAccountName: 'PT Penerima UF',
+            beneficiary_relationship_to_sender: 'Keluarga',
             source_of_funds: 'Gaji',
             transaction_purpose: 'Pembayaran hutang',
           })
@@ -8213,13 +8240,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
         const tr = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
-          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             amount: 50_000_000,
             sender_application_id: Number(ufAppId),
             beneficiaryBankName: 'Bank Mandiri',
             beneficiaryAccountNumber: '5544332211',
             beneficiaryAccountName: 'PT UF Penerima',
+            beneficiary_relationship_to_sender: 'Keluarga',
             source_of_funds: 'Tabungan',
             transaction_purpose: 'Investasi',
           })
@@ -10561,6 +10589,411 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .delete(`${BASE}/applications/${bizAppId}/parties/1`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(403);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ZT. Transfer relationship (Hubungan dengan Pengirim) + Bulk Transfer
+  // ══════════════════════════════════════════════════════════
+  describe('ZT. Transfer relationship + Bulk', () => {
+    function txBody(extra: Record<string, any> = {}) {
+      return {
+        amount: 100_000,
+        sender_application_id: Number(indivAppIdOk),
+        beneficiaryBankName: 'Bank Test',
+        beneficiaryAccountNumber: '1234567890',
+        beneficiaryAccountName: 'Penerima ZT',
+        beneficiary_relationship_to_sender: 'Keluarga',
+        ...extra,
+      };
+    }
+    function bulkItem(extra: Record<string, any> = {}) {
+      return {
+        amount: 100_000,
+        beneficiaryBankName: 'Bank Test',
+        beneficiaryAccountNumber: '1234567890',
+        beneficiaryAccountName: 'Penerima Bulk',
+        beneficiary_relationship_to_sender: 'Keluarga',
+        ...extra,
+      };
+    }
+
+    let ztTransferId: string;
+
+    it('ZT-01: create tanpa beneficiary_relationship_to_sender → 400', async () => {
+      const body = txBody();
+      delete (body as any).beneficiary_relationship_to_sender;
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(body)
+        .expect(400);
+    });
+
+    it('ZT-01b: create dengan relationship string kosong → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(txBody({ beneficiary_relationship_to_sender: '   ' }))
+        .expect(400);
+    });
+
+    it('ZT-02: create dengan relationship → 201, field tersimpan', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(txBody())
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+      expect(res.body.beneficiary_relationship_to_sender).toBe('Keluarga');
+      ztTransferId = String(res.body.id);
+    });
+
+    it('ZT-03: detail & list mengembalikan beneficiary_relationship_to_sender', async () => {
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${ztTransferId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(detail.body.beneficiary_relationship_to_sender).toBe('Keluarga');
+
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      const found = list.body.find((t: any) => String(t.id) === ztTransferId);
+      expect(found).toBeDefined();
+      expect(found.beneficiary_relationship_to_sender).toBe('Keluarga');
+    });
+
+    it('ZT-04: bulk create 3 item → 201, batch + 3 transfer DRAFT ber-batch_id', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Bulk 2' }), bulkItem({ beneficiaryAccountName: 'Bulk 3' })],
+        })
+        .expect(201);
+
+      expect(res.body.batch_no).toMatch(/^KESH-TRB-\d{8}-[A-Z0-9]{5}$/);
+      expect(res.body.total_count).toBe(3);
+      expect(Array.isArray(res.body.transfers)).toBe(true);
+      expect(res.body.transfers.length).toBe(3);
+      for (const t of res.body.transfers) {
+        expect(t.status).toBe('DRAFT');
+        expect(t.batch_id).not.toBeNull();
+        expect(String(t.batch_id)).toBe(String(res.body.batch_id));
+        expect(t.beneficiary_relationship_to_sender).toBe('Keluarga');
+      }
+    });
+
+    it('ZT-05: bulk create 21 item → 400', async () => {
+      const items = Array.from({ length: 21 }, () => bulkItem());
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ sender_application_id: Number(indivAppIdOk), items })
+        .expect(400);
+    });
+
+    it('ZT-06: bulk create dengan 1 item invalid → tolak seluruh request (400)', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          items: [bulkItem(), bulkItem({ amount: 5_000 })], // amount di bawah minimum
+        })
+        .expect(400);
+    });
+
+    it('ZT-06b: bulk create dengan item tanpa relationship → 400', async () => {
+      const bad = bulkItem();
+      delete (bad as any).beneficiary_relationship_to_sender;
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem(), bad] })
+        .expect(400);
+    });
+
+    it('ZT-07: bulk create 0 item → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ sender_application_id: Number(indivAppIdOk), items: [] })
+        .expect(400);
+    });
+
+    it('ZT-08: transfer hasil bulk mengikuti alur approval normal → COMPLETED', async () => {
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem()] })
+        .expect(201);
+      const txId = String(bulk.body.transfers[0].id);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+
+      const decided = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(201);
+      expect(decided.body.status).toBe('COMPLETED');
+      expect(decided.body.result).toBe('SUCCESS');
+    });
+
+    it('ZT-09: FinanceStaff tidak boleh bulk create transfer → 403', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem()] })
+        .expect(403);
+    });
+
+    it('ZT-10: FinanceStaff tidak boleh single create transfer → 403', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send(txBody())
+        .expect(403);
+    });
+
+    it('ZT-11: FrontDesk dapat single create transfer → 201', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(txBody())
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // ZP. Pengkinian Data / Periodic Customer Data Review
+  // ══════════════════════════════════════════════════════════
+  describe('ZP. Pengkinian Data', () => {
+    // Buat app + set first_submitted_at & risk_level langsung via DB agar
+    // perhitungan due date terisolasi dan deterministik.
+    let zpSeq = 0;
+    async function makeReviewApp(tag: string, riskLevel: string, baseIso: string): Promise<string> {
+      const seq = String(++zpSeq).padStart(2, '0');
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Pengkinian ${tag}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3199${seq}${SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. Pengkinian No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0877${seq}${SUFFIX}`.slice(0, 15),
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      await pgPool.query(
+        `UPDATE applications SET status='APPROVED', first_submitted_at=$2 WHERE id=$1`,
+        [appId, baseIso],
+      );
+      await pgPool.query(
+        `INSERT INTO application_risk (application_id, risk_score, risk_level)
+         VALUES ($1, 50, $2)
+         ON CONFLICT (application_id) DO UPDATE SET risk_level = EXCLUDED.risk_level`,
+        [appId, riskLevel],
+      );
+      return appId;
+    }
+
+    it('ZP-01: HIGH → due_at = first_submitted_at + 1 tahun', async () => {
+      const appId = await makeReviewApp('H', 'HIGH', '2020-01-15T00:00:00.000Z');
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}/data-review/status`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(res.body.risk_level).toBe('HIGH');
+      expect(res.body.due_at).not.toBeNull();
+      expect(new Date(res.body.due_at).getUTCFullYear()).toBe(2021);
+      expect(res.body.is_due).toBe(true);
+    });
+
+    it('ZP-02: MEDIUM → due_at = first_submitted_at + 2 tahun', async () => {
+      const appId = await makeReviewApp('M', 'MEDIUM', '2020-01-15T00:00:00.000Z');
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}/data-review/status`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(res.body.risk_level).toBe('MEDIUM');
+      expect(new Date(res.body.due_at).getUTCFullYear()).toBe(2022);
+    });
+
+    it('ZP-03: LOW → due_at = first_submitted_at + 3 tahun', async () => {
+      const appId = await makeReviewApp('L', 'LOW', '2020-01-15T00:00:00.000Z');
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}/data-review/status`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(res.body.risk_level).toBe('LOW');
+      expect(new Date(res.body.due_at).getUTCFullYear()).toBe(2023);
+    });
+
+    it('ZP-04: null risk_level → due_at null, tidak crash', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Pengkinian NR ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3190${SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. NR No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0876${SUFFIX}`.slice(0, 15),
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}/data-review/status`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(res.body.due_at).toBeNull();
+      expect(res.body.status).toBe('NEED_RISK_SCORE');
+    });
+
+    it('ZP-05: FrontDesk dapat initiate manual sebelum jatuh tempo → 201 DRAFT', async () => {
+      const appId = await makeReviewApp('I', 'LOW', new Date().toISOString());
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ review_type: 'MANUAL', notes: 'Inisiasi manual sebelum due.' })
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+      expect(res.body.review_no).toMatch(/^KESH-DR-\d{8}-[A-Z0-9]{5}$/);
+      expect(res.body.review_type).toBe('MANUAL');
+    });
+
+    it('ZP-06: FrontDesk dapat submit review → SUBMITTED', async () => {
+      const appId = await makeReviewApp('S', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({})
+        .expect(201);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+      expect(res.body.status).toBe('SUBMITTED');
+    });
+
+    it('ZP-07: ComplianceLead dapat approve review → APPROVED', async () => {
+      const appId = await makeReviewApp('A', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({})
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(201);
+      expect(res.body.status).toBe('APPROVED');
+      expect(res.body.reviewed_at).not.toBeNull();
+    });
+
+    it('ZP-08: ComplianceLead return for revision wajib reason', async () => {
+      const appId = await makeReviewApp('R', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({})
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+
+      // tanpa reason → 400
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION' })
+        .expect(400);
+
+      // dengan reason → 201 RETURNED_FOR_REVISION
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'RETURN_FOR_REVISION', reason: 'Lengkapi dokumen NPWP terbaru.' })
+        .expect(201);
+      expect(res.body.status).toBe('RETURNED_FOR_REVISION');
+    });
+
+    it('ZP-09: role tidak berwenang tidak dapat approve review → 403', async () => {
+      const appId = await makeReviewApp('U', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/decision`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+    });
+
+    it('ZP-10: Auditor read-only — dapat lihat status, tidak dapat mutasi', async () => {
+      const appId = await makeReviewApp('AU', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}/data-review/status`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({})
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/submit`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/decision`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ decision: 'APPROVED' })
         .expect(403);
     });
   });

@@ -16,6 +16,7 @@ import { Roles } from "../auth/roles.decorator";
 import { TransfersService } from "./transfers.service";
 import {
   ComplianceReviewDecisionDto,
+  CreateBulkTransferDto,
   CreateTransferDto,
   DecideTransferDto,
   ReviewTransferDto,
@@ -30,10 +31,22 @@ export class TransfersController {
   constructor(private readonly svc: TransfersService) {}
 
   // CREATE TRANSFER → sekarang termasuk sender_application_id
+  // Input transfer = FrontDesk saja (+ SystemAdmin/Director via bypass).
+  // FinanceStaff adalah layer review finance, bukan input transfer.
   @Post()
-  @Roles("FinanceStaff", "FrontDesk")
+  @Roles("FrontDesk")
   async create(@Req() req: any, @Body() dto: CreateTransferDto) {
     return this.svc.create(req.user, dto, req.ip);
+  }
+
+  // BULK TRANSFER → mass input (maks 20 item). Setiap item jadi transfer DRAFT
+  // normal; alur approval yang ada tetap berlaku per transfer.
+  // Input transfer = FrontDesk saja (+ SystemAdmin/Director via bypass).
+  // FinanceStaff adalah layer review finance, bukan input transfer.
+  @Post("bulk")
+  @Roles("FrontDesk")
+  async createBulk(@Req() req: any, @Body() dto: CreateBulkTransferDto) {
+    return this.svc.bulkCreate(req.user, dto, req.ip);
   }
 
   // UPDATE DRAFT

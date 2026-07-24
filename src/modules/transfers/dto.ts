@@ -1,11 +1,14 @@
 import { Transform } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
   IsDateString,
   IsEmail,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsObject,
   IsOptional,
   IsString,
@@ -14,13 +17,22 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateTransferDto {
   @IsInt()
   @Min(10_000, { message: 'amount minimal Rp10.000' })
   @Max(500_000_000, { message: 'amount maksimal Rp500.000.000' })
   amount!: number;
+
+  // "Hubungan dengan Pengirim" — wajib diisi (single & bulk transfer).
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'beneficiary_relationship_to_sender wajib diisi' })
+  @MaxLength(150)
+  beneficiary_relationship_to_sender!: string;
 
   @IsString()
   beneficiaryBankName!: string;
@@ -106,6 +118,63 @@ export class CreateTransferDto {
 }
 
 export class UpdateTransferDto extends CreateTransferDto {}
+
+// ── Bulk Transfer ────────────────────────────────────────────────────
+// Satu item = satu transfer normal. sender_application_id ada di level batch.
+// Item divalidasi sama seperti transfer normal (kecuali sender di level batch).
+export class BulkTransferItemDto {
+  @IsInt()
+  @Min(10_000, { message: 'amount minimal Rp10.000' })
+  @Max(500_000_000, { message: 'amount maksimal Rp500.000.000' })
+  amount!: number;
+
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'beneficiary_relationship_to_sender wajib diisi' })
+  @MaxLength(150)
+  beneficiary_relationship_to_sender!: string;
+
+  @IsString()
+  beneficiaryBankName!: string;
+
+  @IsOptional() @IsString()
+  beneficiaryBankCode?: string;
+
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Matches(/^\d+$/, {
+    message: 'beneficiaryAccountNumber harus berisi digit saja (tanpa spasi, huruf, atau tanda baca)',
+  })
+  @IsString()
+  beneficiaryAccountNumber!: string;
+
+  @IsString()
+  beneficiaryAccountName!: string;
+
+  @IsOptional() @IsString()
+  description?: string;
+
+  @IsOptional() @IsString() @MaxLength(3)
+  currency?: string;
+
+  @IsOptional() @IsString() @MaxLength(255)
+  source_of_funds?: string;
+
+  @IsOptional() @IsString() @MaxLength(255)
+  transaction_purpose?: string;
+}
+
+export class CreateBulkTransferDto {
+  @IsInt()
+  sender_application_id!: number;
+
+  @IsArray()
+  @ArrayNotEmpty({ message: 'items wajib diisi minimal 1' })
+  @ArrayMinSize(1, { message: 'minimal 1 item' })
+  @ArrayMaxSize(20, { message: 'maksimal 20 item per bulk transfer' })
+  @ValidateNested({ each: true })
+  @Type(() => BulkTransferItemDto)
+  items!: BulkTransferItemDto[];
+}
 
 export class DecideTransferDto {
   @IsString()
