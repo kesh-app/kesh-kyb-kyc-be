@@ -6,7 +6,11 @@ import {
 } from "@nestjs/common";
 import { Pool } from "pg";
 import { resolveUserId } from "../../common/auth.util";
-import { InitiateDataReviewDto, DataReviewDecisionDto } from "./dto";
+import {
+  InitiateDataReviewDto,
+  DataReviewDecisionDto,
+  ListDataReviewsQueryDto,
+} from "./dto";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
@@ -78,6 +82,160 @@ export class DataReviewsService {
   }
 
   // ---------------------------------------------------------------------------
+  // LIST / WORKLIST — GET /data-reviews
+  // Sumber utama = applications, diperkaya review terakhir (kalau ada).
+  // Due date & due_status dihitung di SQL supaya bisa difilter + dipaginasi.
+  // ---------------------------------------------------------------------------
+  async list(query: ListDataReviewsQueryDto = {}) {
+    const { q, risk_level, due_status, review_status, customer_type } = query;
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const offset = (page - 1) * limit;
+
+    const params: (string | number)[] = [];
+    const conditions: string[] = [];
+
+    if (risk_level) {
+      params.push(risk_level);
+      conditions.push(`risk_level = $${params.length}`);
+    }
+    if (due_status) {
+      params.push(due_status);
+      conditions.push(`due_status = $${params.length}`);
+    }
+    if (review_status) {
+      params.push(review_status);
+      conditions.push(`review_status = $${params.length}`);
+    }
+    if (customer_type) {
+      params.push(customer_type);
+      conditions.push(`customer_type = $${params.length}`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      const pi = params.length;
+      params.push(`%${q.replace(/-/g, "")}%`);
+      const ci = params.length;
+      conditions.push(
+        `(customer_name ILIKE $${pi} OR REPLACE(COALESCE(cif_no,''),'-','') ILIKE $${ci})`,
+      );
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const cte = `
+      WITH base AS (
+        SELECT
+          a.id::int AS application_id,
+          CASE WHEN a.type = 'INDIVIDUAL' AND p.cif_relationship_type = 'WIC' THEN NULL
+               WHEN a.type = 'INDIVIDUAL' THEN p.cif_no ELSE b.cif_no END AS cif_no,
+          CASE WHEN a.type = 'INDIVIDUAL' THEN p.full_name ELSE b.legal_name END AS customer_name,
+          a.type AS customer_type,
+          a.status,
+          a.created_at,
+          COALESCE(ar.override_level, ar.risk_level) AS risk_level,
+          COALESCE(a.first_submitted_at, a.submitted_at) AS first_submitted_at,
+          dr.id::int         AS review_id,
+          dr.review_no       AS review_no,
+          dr.review_type     AS review_type,
+          dr.status          AS review_status,
+          dr.initiated_by::int AS review_initiated_by,
+          dr.initiated_at    AS review_initiated_at,
+          dr.submitted_at    AS review_submitted_at,
+          dr.reviewed_at     AS review_reviewed_at,
+          dr.decision_notes  AS review_decision_notes
+        FROM applications a
+        LEFT JOIN persons p ON p.id = a.person_id
+        LEFT JOIN business_entities b ON b.id = a.business_id
+        LEFT JOIN application_risk ar ON ar.application_id = a.id
+        LEFT JOIN LATERAL (
+          SELECT r.* FROM application_data_reviews r
+           WHERE r.application_id = a.id
+           ORDER BY r.id DESC LIMIT 1
+        ) dr ON TRUE
+      ),
+      periodic AS (
+        SELECT base.*,
+          CASE risk_level WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 END
+            AS review_period_years
+        FROM base
+      ),
+      dated AS (
+        SELECT periodic.*,
+          CASE WHEN review_period_years IS NULL OR first_submitted_at IS NULL THEN NULL
+               ELSE first_submitted_at + (review_period_years * INTERVAL '1 year') END AS due_at
+        FROM periodic
+      ),
+      rows_ AS (
+        SELECT dated.*,
+          CASE
+            WHEN risk_level IS NULL THEN 'NEED_RISK_SCORE'
+            WHEN first_submitted_at IS NULL THEN 'NO_SUBMITTED_DATE'
+            WHEN due_at IS NULL THEN 'NOT_DUE'
+            WHEN due_at::date < CURRENT_DATE THEN 'OVERDUE'
+            WHEN due_at::date = CURRENT_DATE THEN 'DUE'
+            WHEN due_at::date <= CURRENT_DATE + 30 THEN 'DUE_SOON'
+            ELSE 'NOT_DUE'
+          END AS due_status,
+          CASE WHEN due_at IS NULL THEN NULL ELSE (due_at::date - CURRENT_DATE) END
+            AS days_until_due
+        FROM dated
+      )
+    `;
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      this.pool.query(
+        `${cte}
+         SELECT * FROM rows_ ${where}
+          ORDER BY
+            CASE WHEN review_status = 'SUBMITTED' THEN 0 ELSE 1 END,
+            CASE due_status WHEN 'OVERDUE' THEN 0 WHEN 'DUE' THEN 1 WHEN 'DUE_SOON' THEN 2 ELSE 3 END,
+            due_at ASC NULLS LAST,
+            created_at DESC
+          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limit, offset],
+      ),
+      this.pool.query(
+        `${cte} SELECT COUNT(*) AS total FROM rows_ ${where}`,
+        params,
+      ),
+    ]);
+
+    return {
+      data: rows.map((r: any) => ({
+        application_id: r.application_id,
+        cif_no: r.cif_no,
+        customer_name: r.customer_name,
+        customer_type: r.customer_type,
+        status: r.status,
+        risk_level: r.risk_level,
+        first_submitted_at: r.first_submitted_at,
+        due_at: r.due_at,
+        review_period_years: r.review_period_years,
+        due_status: r.due_status,
+        days_until_due: r.days_until_due,
+        // "aktif" = review terakhir apa pun statusnya, supaya FE bisa menampilkan
+        // hasil keputusan terakhir juga (APPROVED/REJECTED).
+        active_review: r.review_id
+          ? {
+              id: r.review_id,
+              review_no: r.review_no,
+              review_type: r.review_type,
+              status: r.review_status,
+              initiated_by: r.review_initiated_by,
+              initiated_at: r.review_initiated_at,
+              submitted_at: r.review_submitted_at,
+              reviewed_at: r.review_reviewed_at,
+              decision_notes: r.review_decision_notes,
+            }
+          : null,
+      })),
+      total: Number(countRows[0].total),
+      page,
+      limit,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // STATUS
   // ---------------------------------------------------------------------------
   async getStatus(appId: number) {
@@ -127,7 +285,7 @@ export class DataReviewsService {
   }
 
   // ---------------------------------------------------------------------------
-  // INITIATE — FrontDesk/ComplianceLead/SystemAdmin/Director
+  // INITIATE / REQUEST — ComplianceLead/SystemAdmin/Director
   // ---------------------------------------------------------------------------
   async initiate(appId: number, user: AuthedUser, dto: InitiateDataReviewDto) {
     const app = await this.getApplication(appId);

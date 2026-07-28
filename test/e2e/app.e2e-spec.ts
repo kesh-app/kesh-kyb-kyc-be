@@ -10799,10 +10799,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .post(`${BASE}/applications/individual`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
-          full_name: `Pengkinian ${tag}`,
+          full_name: `Pengkinian ${tag} ${SUFFIX}`,
           ktp_number: TEST_KTP_NUMBER,
           identity_type: 'KTP',
-          identity_number: `3199${seq}${SUFFIX}`.slice(0, 16),
+          identity_number: `3411${seq}${SUFFIX}`.slice(0, 16),
           address_identity: 'Jl. Pengkinian No. 1',
           pob: 'Jakarta',
           dob: '1990-01-01',
@@ -10887,23 +10887,41 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('NEED_RISK_SCORE');
     });
 
-    it('ZP-05: FrontDesk dapat initiate manual sebelum jatuh tempo → 201 DRAFT', async () => {
+    it('ZP-05: ComplianceLead dapat request pengkinian sebelum jatuh tempo → 201 DRAFT', async () => {
       const appId = await makeReviewApp('I', 'LOW', new Date().toISOString());
       const res = await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/initiate`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ review_type: 'MANUAL', notes: 'Inisiasi manual sebelum due.' })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ review_type: 'MANUAL', notes: 'Permintaan pengkinian sebelum due.' })
         .expect(201);
       expect(res.body.status).toBe('DRAFT');
       expect(res.body.review_no).toMatch(/^KESH-DR-\d{8}-[A-Z0-9]{5}$/);
       expect(res.body.review_type).toBe('MANUAL');
+
+      // FrontDesk melihat permintaan tersebut lewat status endpoint
+      const status = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}/data-review/status`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(status.body.active_review).not.toBeNull();
+      expect(status.body.active_review.id).toBe(res.body.id);
+      expect(status.body.status).toBe('DRAFT');
+    });
+
+    it('ZP-05b: FrontDesk tidak dapat initiate pengkinian (milik ComplianceLead) → 403', async () => {
+      const appId = await makeReviewApp('IF', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({})
+        .expect(403);
     });
 
     it('ZP-06: FrontDesk dapat submit review → SUBMITTED', async () => {
       const appId = await makeReviewApp('S', 'LOW', '2020-01-01T00:00:00.000Z');
       await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/initiate`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .send({})
         .expect(201);
       const res = await request(app.getHttpServer())
@@ -10913,11 +10931,24 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('SUBMITTED');
     });
 
+    it('ZP-06b: ComplianceLead tidak dapat submit mewakili FrontDesk → 403', async () => {
+      const appId = await makeReviewApp('SC', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({})
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(403);
+    });
+
     it('ZP-07: ComplianceLead dapat approve review → APPROVED', async () => {
       const appId = await makeReviewApp('A', 'LOW', '2020-01-01T00:00:00.000Z');
       await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/initiate`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .send({})
         .expect(201);
       await request(app.getHttpServer())
@@ -10937,7 +10968,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const appId = await makeReviewApp('R', 'LOW', '2020-01-01T00:00:00.000Z');
       await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/initiate`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
         .send({})
         .expect(201);
       await request(app.getHttpServer())
@@ -10995,6 +11026,734 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${auditorToken}`)
         .send({ decision: 'APPROVED' })
         .expect(403);
+    });
+
+    // ---- Worklist GET /data-reviews -----------------------------------------
+
+    // q mencari nama/CIF, jadi cari lewat nama unik lalu pilih baris app-nya.
+    async function fetchRow(appId: string, token: string, q: string) {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/data-reviews`)
+        .query({ q, limit: 100 })
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      return res.body.data.find((r: any) => String(r.application_id) === String(appId));
+    }
+
+    it('ZP-11: FrontDesk & ComplianceLead dapat GET /data-reviews', async () => {
+      for (const token of [frontDeskToken, complianceToken, auditorToken]) {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/data-reviews`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+        expect(Array.isArray(res.body.data)).toBe(true);
+        expect(typeof res.body.total).toBe('number');
+        expect(res.body.page).toBe(1);
+      }
+    });
+
+    it('ZP-12: FinanceStaff/FinanceManager/OperationSupervisor terblokir dari list & seluruh aksi → 403', async () => {
+      const appId = await makeReviewApp('WB', 'LOW', '2020-01-01T00:00:00.000Z');
+      for (const token of [financeStaffToken, financeManagerToken, operationSupervisorToken]) {
+        const auth = `Bearer ${token}`;
+        await request(app.getHttpServer())
+          .get(`${BASE}/data-reviews`)
+          .set('Authorization', auth)
+          .expect(403);
+        await request(app.getHttpServer())
+          .get(`${BASE}/applications/${appId}/data-review/status`)
+          .set('Authorization', auth)
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/data-review/initiate`)
+          .set('Authorization', auth)
+          .send({})
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/data-review/submit`)
+          .set('Authorization', auth)
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/data-review/decision`)
+          .set('Authorization', auth)
+          .send({ decision: 'APPROVED' })
+          .expect(403);
+      }
+    });
+
+    it('ZP-13: due_at & review_period_years mengikuti risk_level (HIGH 1 / MEDIUM 2 / LOW 3)', async () => {
+      const cases: Array<[string, string, number, number]> = [
+        ['WH', 'HIGH', 1, 2021],
+        ['WM', 'MEDIUM', 2, 2022],
+        ['WL', 'LOW', 3, 2023],
+      ];
+      for (const [tag, risk, years, year] of cases) {
+        const appId = await makeReviewApp(tag, risk, '2020-01-15T00:00:00.000Z');
+        const row = await fetchRow(appId, frontDeskToken, `Pengkinian ${tag} ${SUFFIX}`);
+        expect(row).toBeDefined();
+        expect(row.risk_level).toBe(risk);
+        expect(row.review_period_years).toBe(years);
+        expect(new Date(row.due_at).getUTCFullYear()).toBe(year);
+        expect(row.due_status).toBe('OVERDUE');
+        expect(row.days_until_due).toBeLessThan(0);
+        expect(row.customer_type).toBe('INDIVIDUAL');
+      }
+    });
+
+    it('ZP-14: tanpa risk_level → due_status NEED_RISK_SCORE, due_at null', async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Pengkinian WNR ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3412${SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. WNR No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0875${SUFFIX}`.slice(0, 15),
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      const row = await fetchRow(appId, frontDeskToken, `Pengkinian WNR ${SUFFIX}`);
+      expect(row).toBeDefined();
+      expect(row.due_status).toBe('NEED_RISK_SCORE');
+      expect(row.due_at).toBeNull();
+      expect(row.review_period_years).toBeNull();
+      expect(row.active_review).toBeNull();
+    });
+
+    it('ZP-15: active_review terisi ketika review ada', async () => {
+      const appId = await makeReviewApp('WA', 'LOW', '2020-01-01T00:00:00.000Z');
+      let row = await fetchRow(appId, frontDeskToken, `Pengkinian WA ${SUFFIX}`);
+      expect(row.active_review).toBeNull();
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ review_type: 'PERIODIC' })
+        .expect(201);
+
+      row = await fetchRow(appId, frontDeskToken, `Pengkinian WA ${SUFFIX}`);
+      expect(row.active_review).not.toBeNull();
+      expect(row.active_review.status).toBe('DRAFT');
+      expect(row.active_review.review_type).toBe('PERIODIC');
+      expect(row.active_review.review_no).toMatch(/^KESH-DR-/);
+      expect(row.active_review.initiated_at).not.toBeNull();
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+
+      row = await fetchRow(appId, complianceToken, `Pengkinian WA ${SUFFIX}`);
+      expect(row.active_review.status).toBe('SUBMITTED');
+      expect(row.active_review.submitted_at).not.toBeNull();
+    });
+
+    it('ZP-16: filter q / risk_level / due_status / review_status bekerja', async () => {
+      const appId = await makeReviewApp('WF', 'HIGH', '2020-02-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({})
+        .expect(201);
+
+      // q by customer name
+      const byName = await request(app.getHttpServer())
+        .get(`${BASE}/data-reviews`)
+        .query({ q: `Pengkinian WF ${SUFFIX}`, limit: 100 })
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(byName.body.data.some((r: any) => String(r.application_id) === appId)).toBe(true);
+      expect(byName.body.data.every((r: any) => /Pengkinian WF/i.test(r.customer_name))).toBe(true);
+
+      // risk_level
+      const byRisk = await request(app.getHttpServer())
+        .get(`${BASE}/data-reviews`)
+        .query({ risk_level: 'HIGH', limit: 100 })
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(byRisk.body.data.every((r: any) => r.risk_level === 'HIGH')).toBe(true);
+
+      // due_status
+      const byDue = await request(app.getHttpServer())
+        .get(`${BASE}/data-reviews`)
+        .query({ due_status: 'OVERDUE', limit: 100 })
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(byDue.body.data.every((r: any) => r.due_status === 'OVERDUE')).toBe(true);
+
+      // review_status
+      const byReview = await request(app.getHttpServer())
+        .get(`${BASE}/data-reviews`)
+        .query({ review_status: 'DRAFT', limit: 100 })
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(byReview.body.data.every((r: any) => r.active_review?.status === 'DRAFT')).toBe(true);
+      expect(byReview.body.data.some((r: any) => String(r.application_id) === appId)).toBe(true);
+
+      // customer_type
+      const byType = await request(app.getHttpServer())
+        .get(`${BASE}/data-reviews`)
+        .query({ customer_type: 'INDIVIDUAL', limit: 100 })
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(byType.body.data.every((r: any) => r.customer_type === 'INDIVIDUAL')).toBe(true);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // SR. Statement Refund — Pencatatan Refund (3 layer audit)
+  // ══════════════════════════════════════════════════════════
+  describe('SR. Statement Refund', () => {
+    let srSeq = 0;
+    const nextRef = () => `RFD-${SUFFIX}-${String(++srSeq).padStart(3, '0')}`;
+
+    async function createApprovedSender(tag: string): Promise<string> {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Refund Partner ${tag} ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3413${tag}${SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. Refund No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0866${tag}${SUFFIX}`.slice(0, 15),
+          occupation: 'Wiraswasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [appId]);
+      return appId;
+    }
+
+    async function createTransfer(tag: string, amount = 250_000): Promise<string> {
+      const senderAppId = await createApprovedSender(tag);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount,
+          sender_application_id: Number(senderAppId),
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '1122334455',
+          beneficiaryAccountName: `Penerima SR ${tag}`,
+          beneficiary_relationship_to_sender: 'Keluarga',
+        })
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    function refundPayload(over: any = {}) {
+      const seq = srSeq;
+      return {
+        statement_date: '2026-07-29',
+        received_at: `2026-07-29T${String(6 + (seq % 12)).padStart(2, '0')}:${String(seq % 60).padStart(2, '0')}:00+07:00`,
+        amount: 250_000,
+        currency: 'IDR',
+        bank_account_no: '9988776655',
+        bank_name: 'Bank KESH',
+        bank_reference_no: nextRef(),
+        statement_description: '  Refund transfer gagal  ',
+        ...over,
+      };
+    }
+
+    function createRefund(body: any, token = financeStaffToken) {
+      return request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+    }
+
+    // ── Creation ────────────────────────────────────────────────────────────
+    it('SR-01: FinanceStaff dapat membuat refund UNMATCHED (tanpa transfer asal)', async () => {
+      const res = await createRefund(refundPayload()).expect(201);
+      expect(res.body.refund_no).toMatch(/^KESH-RFD-\d{8}-[A-Z0-9]{5}$/);
+      expect(res.body.status).toBe('UNMATCHED');
+      expect(res.body.original_transfer_id).toBeNull();
+      expect(res.body.balance_event_id).toBeNull();
+      expect(res.body.credited_at).toBeNull();
+      expect(res.body.statement_description).toBe('Refund transfer gagal');
+    });
+
+    it('SR-02: FinanceStaff dapat membuat refund MATCHED dengan original_transfer_id', async () => {
+      const txId = await createTransfer('M2');
+      const res = await createRefund(
+        refundPayload({ original_transfer_id: Number(txId) }),
+      ).expect(201);
+      expect(res.body.status).toBe('MATCHED');
+      expect(res.body.match_confidence).toBe('HIGH');
+      expect(res.body.match_method).toBe('MANUAL');
+      expect(String(res.body.original_transfer_id)).toBe(txId);
+      expect(res.body.partner_application_id).not.toBeNull();
+      expect(res.body.credited_at).toBeNull();
+      expect(res.body.balance_event_id).toBeNull();
+    });
+
+    it('SR-03: duplikat mutasi bank yang sama → 409', async () => {
+      const body = refundPayload();
+      await createRefund(body).expect(201);
+      await createRefund(body).expect(409);
+    });
+
+    it('SR-04: amount <= 0 → 400', async () => {
+      await createRefund(refundPayload({ amount: 0 })).expect(400);
+      await createRefund(refundPayload({ amount: -5000 })).expect(400);
+    });
+
+    it('SR-05: FrontDesk & OperationSupervisor tidak dapat membuat refund → 403', async () => {
+      await createRefund(refundPayload(), frontDeskToken).expect(403);
+      await createRefund(refundPayload(), operationSupervisorToken).expect(403);
+    });
+
+    // ── List & detail ───────────────────────────────────────────────────────
+    it('SR-06: FinanceStaff/FinanceManager/ComplianceLead/Auditor dapat list & detail', async () => {
+      const created = await createRefund(refundPayload()).expect(201);
+      for (const token of [financeStaffToken, financeManagerToken, complianceToken, auditorToken]) {
+        const list = await request(app.getHttpServer())
+          .get(`${BASE}/statement-refunds`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+        expect(Array.isArray(list.body.data)).toBe(true);
+        expect(typeof list.body.total).toBe('number');
+        expect(list.body.page).toBe(1);
+
+        await request(app.getHttpServer())
+          .get(`${BASE}/statement-refunds/${created.body.id}`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+      }
+    });
+
+    it('SR-07: ComplianceLead & Auditor read-only — tidak dapat create/match/submit/decision', async () => {
+      const created = await createRefund(refundPayload()).expect(201);
+      const id = created.body.id;
+      for (const token of [complianceToken, auditorToken]) {
+        const auth = `Bearer ${token}`;
+        await createRefund(refundPayload(), token).expect(403);
+        await request(app.getHttpServer())
+          .patch(`${BASE}/statement-refunds/${id}`)
+          .set('Authorization', auth)
+          .send({ bank_name: 'X' })
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/statement-refunds/${id}/match`)
+          .set('Authorization', auth)
+          .send({ original_transfer_id: 1 })
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/statement-refunds/${id}/submit`)
+          .set('Authorization', auth)
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/statement-refunds/${id}/decision`)
+          .set('Authorization', auth)
+          .send({ decision: 'APPROVED' })
+          .expect(403);
+      }
+    });
+
+    it('SR-08: filter q/status/statement_date/received_at bekerja', async () => {
+      const ref = nextRef();
+      const created = await createRefund(
+        refundPayload({ bank_reference_no: ref, statement_date: '2026-06-15' }),
+      ).expect(201);
+
+      const byQ = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds`)
+        .query({ q: ref, limit: 50 })
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(byQ.body.data.length).toBe(1);
+      expect(String(byQ.body.data[0].id)).toBe(String(created.body.id));
+
+      const byStatus = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds`)
+        .query({ status: 'UNMATCHED', limit: 50 })
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      expect(byStatus.body.data.every((r: any) => r.status === 'UNMATCHED')).toBe(true);
+
+      const byDate = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds`)
+        .query({ statement_date_from: '2026-06-01', statement_date_to: '2026-06-30', limit: 50 })
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
+      expect(byDate.body.data.some((r: any) => String(r.id) === String(created.body.id))).toBe(true);
+      expect(
+        byDate.body.data.every((r: any) => String(r.statement_date).slice(0, 7) === '2026-06'),
+      ).toBe(true);
+
+      const byReceived = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds`)
+        .query({ received_from: '2020-01-01T00:00:00Z', limit: 50 })
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(byReceived.body.total).toBeGreaterThan(0);
+    });
+
+    it('SR-08b: FinanceStaff dapat update refund yang belum diputus', async () => {
+      const created = await createRefund(refundPayload()).expect(201);
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/statement-refunds/${created.body.id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ bank_name: 'Bank Revisi', statement_description: '  Koreksi deskripsi  ' })
+        .expect(200);
+      expect(res.body.bank_name).toBe('Bank Revisi');
+      expect(res.body.statement_description).toBe('Koreksi deskripsi');
+    });
+
+    // ── Match ───────────────────────────────────────────────────────────────
+    it('SR-09: FinanceStaff dapat match refund UNMATCHED ke transfer → MATCHED/HIGH', async () => {
+      const txId = await createTransfer('M9');
+      const created = await createRefund(refundPayload()).expect(201);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${created.body.id}/match`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ original_transfer_id: Number(txId), match_method: 'MANUAL' })
+        .expect(201);
+      expect(res.body.status).toBe('MATCHED');
+      expect(res.body.match_confidence).toBe('HIGH');
+      expect(res.body.matched_at).not.toBeNull();
+      expect(res.body.credited_at).toBeNull();
+    });
+
+    it('SR-10: match ke transfer tidak dikenal → 400', async () => {
+      const created = await createRefund(refundPayload()).expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${created.body.id}/match`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ original_transfer_id: 99999999 })
+        .expect(400);
+    });
+
+    it('SR-11: nominal tidak sama → wajib notes, hasil NEED_INVESTIGATION/LOW', async () => {
+      const txId = await createTransfer('M11', 250_000);
+      const created = await createRefund(refundPayload({ amount: 200_000 })).expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${created.body.id}/match`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ original_transfer_id: Number(txId) })
+        .expect(400);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${created.body.id}/match`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          original_transfer_id: Number(txId),
+          investigation_notes: 'Refund parsial, sisa masih ditelusuri ke bank.',
+        })
+        .expect(201);
+      expect(res.body.status).toBe('NEED_INVESTIGATION');
+      expect(res.body.match_confidence).toBe('LOW');
+    });
+
+    // ── Submit ──────────────────────────────────────────────────────────────
+    async function matchedRefund(tag: string) {
+      const txId = await createTransfer(tag);
+      const created = await createRefund(
+        refundPayload({ original_transfer_id: Number(txId) }),
+      ).expect(201);
+      return { id: created.body.id, txId };
+    }
+
+    it('SR-12: FinanceStaff dapat submit refund MATCHED → PENDING_APPROVAL', async () => {
+      const { id } = await matchedRefund('S12');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+      expect(res.body.status).toBe('PENDING_APPROVAL');
+      expect(res.body.submitted_at).not.toBeNull();
+    });
+
+    it('SR-13: refund UNMATCHED tidak dapat disubmit → 400', async () => {
+      const created = await createRefund(refundPayload()).expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${created.body.id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(400);
+    });
+
+    it('SR-14: FinanceManager & ComplianceLead tidak dapat submit (maker = FinanceStaff) → 403', async () => {
+      const { id } = await matchedRefund('S14');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(403);
+    });
+
+    it('SR-14b: FinanceManager checker-only — tidak dapat create/update/match → 403', async () => {
+      const { id } = await matchedRefund('S14B');
+      const txId = await createTransfer('S14C');
+      const auth = `Bearer ${financeManagerToken}`;
+
+      await createRefund(refundPayload(), financeManagerToken).expect(403);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', auth)
+        .send({ bank_name: 'Bank Lain' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/match`)
+        .set('Authorization', auth)
+        .send({ original_transfer_id: Number(txId) })
+        .expect(403);
+
+      // list & detail tetap boleh
+      await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds`)
+        .set('Authorization', auth)
+        .expect(200);
+      await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', auth)
+        .expect(200);
+    });
+
+    it('SR-14c: FrontDesk & OperationSupervisor terblokir dari seluruh endpoint refund → 403', async () => {
+      const { id } = await matchedRefund('S14D');
+      for (const token of [frontDeskToken, operationSupervisorToken]) {
+        const auth = `Bearer ${token}`;
+        await request(app.getHttpServer())
+          .get(`${BASE}/statement-refunds`)
+          .set('Authorization', auth)
+          .expect(403);
+        await request(app.getHttpServer())
+          .get(`${BASE}/statement-refunds/${id}`)
+          .set('Authorization', auth)
+          .expect(403);
+        await createRefund(refundPayload(), token).expect(403);
+        await request(app.getHttpServer())
+          .patch(`${BASE}/statement-refunds/${id}`)
+          .set('Authorization', auth)
+          .send({ bank_name: 'X' })
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/statement-refunds/${id}/match`)
+          .set('Authorization', auth)
+          .send({ original_transfer_id: 1 })
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/statement-refunds/${id}/submit`)
+          .set('Authorization', auth)
+          .expect(403);
+        await request(app.getHttpServer())
+          .post(`${BASE}/statement-refunds/${id}/decision`)
+          .set('Authorization', auth)
+          .send({ decision: 'APPROVED' })
+          .expect(403);
+      }
+    });
+
+    // ── Decision ────────────────────────────────────────────────────────────
+    async function pendingRefund(tag: string) {
+      const { id, txId } = await matchedRefund(tag);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+      return { id, txId };
+    }
+
+    it('SR-15: FinanceManager dapat approve → APPROVED, saldo belum dikredit lokal', async () => {
+      const { id } = await pendingRefund('D15');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED', finance_notes: 'Dana refund cocok dengan mutasi.' })
+        .expect(201);
+      expect(res.body.status).toBe('APPROVED');
+      expect(res.body.approved_at).not.toBeNull();
+      expect(res.body.balance_event_id).toBeNull();
+      expect(res.body.credited_at).toBeNull();
+      expect(res.body.balance_credit_status).toBe('PENDING_EXTERNAL_POSTING');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      expect(detail.body.balance_event).toBeNull();
+      expect(detail.body.balance_credit_status).toBe('PENDING_EXTERNAL_POSTING');
+    });
+
+    it('SR-16: FinanceManager reject wajib reason', async () => {
+      const { id } = await pendingRefund('D16');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'REJECTED' })
+        .expect(400);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'REJECTED', reason: 'Mutasi ternyata bukan refund transaksi ini.' })
+        .expect(201);
+      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.rejection_reason).toBeTruthy();
+      expect(res.body.rejected_at).not.toBeNull();
+    });
+
+    it('SR-17: FinanceStaff & ComplianceLead tidak dapat approve/reject → 403', async () => {
+      const { id } = await pendingRefund('D17');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+    });
+
+    it('SR-18: approve dua kali ditolak — tidak ada double credit', async () => {
+      const { id } = await pendingRefund('D18');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(400);
+
+      // simulasi saldo sudah dikredit modul eksternal → approve tetap ditolak
+      await pgPool.query(
+        `UPDATE statement_refunds SET status='BALANCE_CREDITED', balance_event_id=1, credited_at=now() WHERE id=$1`,
+        [id],
+      );
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(400);
+    });
+
+    it('SR-19: refund yang sudah diputus tidak dapat diubah/di-match ulang', async () => {
+      const { id } = await pendingRefund('D19');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(201);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ bank_name: 'Bank Lain' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/match`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ original_transfer_id: 1 })
+        .expect(400);
+    });
+
+    // ── Complaint linkage ───────────────────────────────────────────────────
+    it('SR-20: refund tertaut complaint muncul di detail refund dan detail complaint', async () => {
+      const complaint = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-RFD-${SUFFIX}`,
+          category: 'TRANSFER',
+          channel: 'WALK_IN',
+          priority: 'HIGH',
+          complaint_notes: 'Nasabah melapor dana transfer belum masuk ke rekening tujuan.',
+        })
+        .expect(201);
+      const complaintId = String(complaint.body.id);
+      const txId = await createTransfer('C20');
+
+      const refund = await createRefund(
+        refundPayload({
+          complaint_id: Number(complaintId),
+          original_transfer_id: Number(txId),
+        }),
+      ).expect(201);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${refund.body.id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(detail.body.complaint).toBeTruthy();
+      expect(String(detail.body.complaint.id)).toBe(complaintId);
+      expect(detail.body.complaint.complaint_no).toBe(complaint.body.complaint_no);
+      expect(detail.body.transfer).toBeTruthy();
+      expect(String(detail.body.transfer.id)).toBe(txId);
+      expect(detail.body.partner).toBeTruthy();
+
+      const cDetail = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(Array.isArray(cDetail.body.statement_refunds)).toBe(true);
+      expect(cDetail.body.statement_refunds.length).toBe(1);
+      expect(String(cDetail.body.statement_refunds[0].id)).toBe(String(refund.body.id));
+      expect(cDetail.body.status).toBe('OPEN');
+    });
+
+    it('SR-21: complaint tidak tertutup otomatis walau refund sudah disetujui', async () => {
+      const complaint = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-RFD2-${SUFFIX}`,
+          category: 'TRANSFER',
+          channel: 'WALK_IN',
+          priority: 'HIGH',
+          complaint_notes: 'Nasabah melapor dana transfer belum masuk, menunggu refund.',
+        })
+        .expect(201);
+      const txId = await createTransfer('C21');
+      const refund = await createRefund(
+        refundPayload({
+          complaint_id: Number(complaint.body.id),
+          original_transfer_id: Number(txId),
+        }),
+      ).expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${refund.body.id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${refund.body.id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(201);
+
+      const cDetail = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaint.body.id}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(cDetail.body.status).toBe('OPEN');
+      expect(cDetail.body.resolved_at).toBeNull();
+      expect(cDetail.body.statement_refunds[0].status).toBe('APPROVED');
     });
   });
 });

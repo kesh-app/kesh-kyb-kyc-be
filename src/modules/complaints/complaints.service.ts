@@ -269,7 +269,18 @@ export class ComplaintsService {
       }
     }
 
-    return row;
+    // Refund yang tertaut — read-only. Complaint TIDAK ditutup otomatis oleh
+    // refund; penutupan tetap manual lewat PATCH /complaints/:id.
+    const refunds = await this.pool.query(
+      `SELECT id, refund_no, amount, currency, status, statement_date, received_at,
+              original_transfer_id, approved_at, credited_at
+         FROM statement_refunds
+        WHERE complaint_id = $1
+        ORDER BY id DESC`,
+      [id],
+    );
+
+    return { ...row, statement_refunds: refunds.rows };
   }
 
   // ---------------------------------------------------------------------------
