@@ -14,6 +14,7 @@ export const INTERNAL_ROLES = [
   'Director',
   'BranchAdmin',
   'FrontDesk',
+  'ComplaintHandling',
   'OperationSupervisor',
   'ComplianceLead',
   'Auditor',

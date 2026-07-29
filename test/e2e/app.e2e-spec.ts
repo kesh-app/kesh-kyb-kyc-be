@@ -50,6 +50,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   let directorToken: string;
   let auditorToken: string;
   let operationSupervisorToken: string;
+  let complaintHandlingToken: string;
 
   // Application IDs yang diakumulasi lintas describe block
   // pg driver mengembalikan BIGINT sebagai string — simpan sebagai string
@@ -188,6 +189,24 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       .post(`${BASE}/auth/login`)
       .send({ email: opSupEmail, password: 'Test@123456' });
     operationSupervisorToken = loginOpSup.body.access_token;
+
+    // Buat ComplaintHandling test user (pemilik tiket pengaduan — menggantikan FrontDesk)
+    const complaintEmail = `complaint${SUFFIX}@test.local`;
+    await request(app.getHttpServer())
+      .post(`${BASE}/users/admins`)
+      .set('Authorization', `Bearer ${sysAdminToken}`)
+      .send({
+        email: complaintEmail,
+        fullName: `Test Complaint Handling ${SUFFIX}`,
+        role: 'ComplaintHandling',
+        password: 'Test@123456',
+      })
+      .expect(201);
+    const loginComplaint = await request(app.getHttpServer())
+      .post(`${BASE}/auth/login`)
+      .send({ email: complaintEmail, password: 'Test@123456' });
+    expect(loginComplaint.status).toBe(201);
+    complaintHandlingToken = loginComplaint.body.access_token;
   }, 30000);
 
   afterAll(async () => {
@@ -9267,17 +9286,64 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   });
 
   // ══════════════════════════════════════════════════════════
-  // Y. Complaints — Pencatatan Pengaduan
+  // Y. Complaints — Pencatatan Pengaduan (workflow ComplaintHandling)
   // ══════════════════════════════════════════════════════════
   describe('Y. Complaints — Pencatatan Pengaduan', () => {
     let complaintId: string;
     let complaintNo: string;
+    let ySeq = 0;
 
-    // Y-01: customer search returns APPROVED applications
+    // Helper: buat complaint baru sebagai ComplaintHandling
+    async function newComplaint(overrides: Record<string, any> = {}, token = complaintHandlingToken) {
+      ySeq += 1;
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-Y${ySeq}`,
+          category: 'TRANSFER',
+          channel: 'WALK_IN',
+          priority: 'MEDIUM',
+          complaint_level: 'LEVEL_2',
+          complaint_notes: 'Nasabah mengadukan transfer yang tidak sampai ke rekening tujuan.',
+          ...overrides,
+        })
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    // Helper: bawa complaint baru sampai status tertentu lewat workflow resmi
+    async function complaintAt(status: string) {
+      const id = await newComplaint();
+      if (status === 'OPEN') return id;
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(201);
+      if (status === 'OPERATION_INVESTIGATION') return id;
+
+      const resultByStatus: Record<string, string> = {
+        AML_REVIEW: 'NEED_AML_REVIEW',
+        FINANCE_REVIEW: 'NEED_FINANCE_REVIEW',
+        RESOLVED: 'SUCCESS',
+      };
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: resultByStatus[status], notes: `Routing ke ${status} untuk test.` })
+        .expect(201);
+      return id;
+    }
+
+    // ── Search & create ──────────────────────────────────────
+
     it('Y-01: GET /complaints/customers/search → 200, hanya aplikasi APPROVED', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/complaints/customers/search`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
 
       expect(Array.isArray(res.body.data)).toBe(true);
@@ -9286,35 +9352,32 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(typeof res.body.limit).toBe('number');
     });
 
-    // Y-02: DRAFT app tidak muncul, APPROVED app muncul di customer search
     it('Y-02: customer search tidak mengembalikan aplikasi non-APPROVED', async () => {
-      // Search dengan nama unik indivAppIdOk "Individu OK <SUFFIX>" — hanya 1 match per run
       const res = await request(app.getHttpServer())
         .get(`${BASE}/complaints/customers/search?q=Individu+OK+${SUFFIX}&limit=10`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
 
-      // indivAppIdOk (APPROVED) harus muncul
       const found = res.body.data.find((d: any) => String(d.application_id) === String(indivAppIdOk));
       expect(found).toBeDefined();
       expect(found.display_name).toBeTruthy();
 
-      // indivAppIdMissing (DRAFT) tidak boleh ada di hasil
       const notApproved = res.body.data.find((d: any) => String(d.application_id) === String(indivAppIdMissing));
       expect(notApproved).toBeUndefined();
     });
 
-    // Y-03: FrontDesk dapat membuat complaint
-    it('Y-03: FrontDesk POST /complaints → 201, complaint_no KESH-CMP-...', async () => {
+    it('Y-03: ComplaintHandling POST /complaints → 201, complaint_no KESH-CMP-..., status OPEN', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
           transaction_reference: `TRX-${SUFFIX}`,
           category: 'TRANSFER',
           channel: 'WALK_IN',
           priority: 'MEDIUM',
+          complaint_level: 'LEVEL_3',
+          level_3_risk_category: 'FRAUD_SECURITY',
           complaint_notes: 'Nasabah mengadukan transfer yang tidak sampai ke rekening tujuan.',
         })
         .expect(201);
@@ -9322,129 +9385,651 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.id).toBeDefined();
       expect(res.body.complaint_no).toMatch(/^KESH-CMP-\d{8}-[A-Z0-9]{5}$/);
       expect(res.body.status).toBe('OPEN');
+      expect(res.body.complaint_level).toBe('LEVEL_3');
+      expect(res.body.level_3_risk_category).toBe('FRAUD_SECURITY');
       complaintId = String(res.body.id);
       complaintNo = res.body.complaint_no;
     });
 
-    // Y-04: snapshot customer_name dan customer_cif_no tersimpan
     it('Y-04: GET /complaints/:id → customer_name dan customer_cif_no di-snapshot', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/complaints/${complaintId}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
 
       expect(res.body.customer_name).toBeTruthy();
-      // cif_no nullable tapi harus tersimpan jika ada
       expect(res.body.complaint_no).toBe(complaintNo);
       expect(String(res.body.customer_application_id)).toBe(String(indivAppIdOk));
     });
 
-    // Y-05: FrontDesk list hanya menampilkan complaint milik sendiri
-    it('Y-05: FrontDesk GET /complaints → hanya complaint milik sendiri', async () => {
-      // Buat 1 complaint tambahan dari FrontDesk (sudah ada Y-03)
+    it('Y-05: ComplaintHandling GET /complaints → melihat semua complaint', async () => {
       const res = await request(app.getHttpServer())
-        .get(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .expect(200);
-
-      expect(Array.isArray(res.body.data)).toBe(true);
-      // Semua complaint yang dikembalikan harus milik FrontDesk user ini
-      // Verifikasi dengan memastikan complaint dari Y-03 ada
-      const found = res.body.data.find((c: any) => String(c.id) === complaintId);
-      expect(found).toBeDefined();
-    });
-
-    // Y-06: ComplianceLead tidak lagi punya akses ke complaints → 403
-    it('Y-06: ComplianceLead GET /complaints → 403', async () => {
-      await request(app.getHttpServer())
-        .get(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .expect(403);
-    });
-
-    // Y-06b: OperationSupervisor melihat semua complaint
-    it('Y-06b: OperationSupervisor GET /complaints → melihat semua (≥ 1)', async () => {
-      const res = await request(app.getHttpServer())
-        .get(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .get(`${BASE}/complaints?limit=100`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.total).toBeGreaterThanOrEqual(1);
     });
 
-    // Y-07: FrontDesk tidak boleh set status RESOLVED
-    it('Y-07: FrontDesk PATCH /complaints/:id status=RESOLVED → 403', async () => {
+    // ── RBAC per role ────────────────────────────────────────
+
+    it('Y-06: FrontDesk tidak punya akses complaint sama sekali → 403', async () => {
       await request(app.getHttpServer())
-        .patch(`${BASE}/complaints/${complaintId}`)
+        .get(`${BASE}/complaints`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ status: 'RESOLVED' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-FD`,
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'FrontDesk seharusnya tidak boleh membuat pengaduan.',
+        })
         .expect(403);
     });
 
-    // Y-07b: FrontDesk tidak boleh set status CLOSED
-    it('Y-07b: FrontDesk PATCH /complaints/:id status=CLOSED → 403', async () => {
-      await request(app.getHttpServer())
-        .patch(`${BASE}/complaints/${complaintId}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ status: 'CLOSED' })
-        .expect(403);
-    });
-
-    // Y-08: OperationSupervisor dapat update status ke IN_PROGRESS
-    it('Y-08: OperationSupervisor PATCH /complaints/:id status=IN_PROGRESS → 200', async () => {
+    it('Y-06b: OperationSupervisor bisa list/detail tapi tidak bisa create', async () => {
       const res = await request(app.getHttpServer())
-        .patch(`${BASE}/complaints/${complaintId}`)
+        .get(`${BASE}/complaints`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
-        .send({ status: 'IN_PROGRESS' })
         .expect(200);
-
-      expect(res.body.status).toBe('IN_PROGRESS');
-    });
-
-    // Y-09: OperationSupervisor dapat resolve complaint dengan resolution_notes
-    it('Y-09: OperationSupervisor PATCH /complaints/:id status=RESOLVED + resolution_notes → 200', async () => {
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/complaints/${complaintId}`)
+      expect(res.body.total).toBeGreaterThanOrEqual(1);
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({
-          status: 'RESOLVED',
-          resolution_notes: 'Transfer telah dikonfirmasi diterima oleh bank tujuan. Kasus ditutup.',
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-OPS`,
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'OperationSupervisor seharusnya tidak boleh membuat pengaduan.',
         })
-        .expect(200);
-
-      expect(res.body.status).toBe('RESOLVED');
-      expect(res.body.resolution_notes).toContain('dikonfirmasi');
-      expect(res.body.resolved_at).not.toBeNull();
-      expect(res.body.resolved_by).not.toBeNull();
+        .expect(403);
     });
 
-    // Y-10: Auditor dapat view complaint tapi tidak bisa update
-    it('Y-10: Auditor GET /complaints/:id → 200 (read-only)', async () => {
+    it('Y-06c: ComplianceLead bisa list/detail tapi tidak bisa create', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-CL`,
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'ComplianceLead seharusnya tidak boleh membuat pengaduan.',
+        })
+        .expect(403);
+    });
+
+    it('Y-06d: FinanceStaff bisa list/detail tapi tidak bisa create', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-FS`,
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'FinanceStaff seharusnya tidak boleh membuat pengaduan.',
+        })
+        .expect(403);
+    });
+
+    it('Y-06e: FinanceManager bisa list/detail tapi tidak bisa create', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-FM`,
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'FinanceManager seharusnya tidak boleh membuat pengaduan.',
+        })
+        .expect(403);
+    });
+
+    it('Y-06f: Auditor read-only — list/detail 200, semua aksi 403', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .expect(200);
       await request(app.getHttpServer())
         .get(`${BASE}/complaints/${complaintId}`)
         .set('Authorization', `Bearer ${auditorToken}`)
         .expect(200);
-    });
-
-    it('Y-10b: Auditor PATCH /complaints/:id → 403', async () => {
       await request(app.getHttpServer())
         .patch(`${BASE}/complaints/${complaintId}`)
         .set('Authorization', `Bearer ${auditorToken}`)
         .send({ priority: 'HIGH' })
         .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${complaintId}/resolve`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ resolution_notes: 'Auditor seharusnya tidak bisa menyelesaikan.' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${complaintId}/close`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({ closing_notes: 'Auditor seharusnya tidak bisa menutup.' })
+        .expect(403);
     });
 
-    // Y-11: transaction search mengembalikan transfer refs
+    it('Y-06g: SystemAdmin dan Director full access (create + aksi workflow)', async () => {
+      const sysId = await newComplaint({ transaction_reference: `TRX-${SUFFIX}-SA` }, sysAdminToken);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${sysId}/verify-data`)
+        .set('Authorization', `Bearer ${sysAdminToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(201);
+
+      const dirId = await newComplaint({ transaction_reference: `TRX-${SUFFIX}-DIR` }, directorToken);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${dirId}/operation-investigation`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ result: 'PENDING', notes: 'Director bypass full access.' })
+        .expect(201);
+      expect(res.body.status).toBe('WAITING_BANK_CONFIRMATION');
+    });
+
+    // ── Complaint level ──────────────────────────────────────
+
+    it('Y-18: POST /complaints tanpa complaint_level → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-NOLVL`,
+          complaint_notes: 'Pengaduan tanpa level seharusnya ditolak.',
+        })
+        .expect(400);
+    });
+
+    it('Y-19: LEVEL_3 tanpa level_3_risk_category → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-L3BAD`,
+          complaint_level: 'LEVEL_3',
+          complaint_notes: 'Level 3 tanpa kategori risiko seharusnya ditolak.',
+        })
+        .expect(400);
+    });
+
+    it('Y-20: LEVEL_1/LEVEL_2 tidak butuh level_3_risk_category → 201, kategori NULL', async () => {
+      for (const level of ['LEVEL_1', 'LEVEL_2']) {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/complaints`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .send({
+            customer_application_id: Number(indivAppIdOk),
+            transaction_reference: `TRX-${SUFFIX}-${level}`,
+            complaint_level: level,
+            complaint_notes: `Pengaduan ${level} tanpa kategori risiko.`,
+          })
+          .expect(201);
+        expect(res.body.complaint_level).toBe(level);
+        expect(res.body.level_3_risk_category).toBeNull();
+      }
+    });
+
+    // ── Verifikasi data ──────────────────────────────────────
+
+    it('Y-21: ComplaintHandling verify COMPLETE → OPERATION_INVESTIGATION', async () => {
+      const id = await newComplaint();
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'COMPLETE', notes: 'Data nasabah lengkap.' })
+        .expect(201);
+
+      expect(res.body.status).toBe('OPERATION_INVESTIGATION');
+      expect(res.body.data_verification_status).toBe('COMPLETE');
+      expect(res.body.data_verified_by).not.toBeNull();
+      expect(res.body.data_verified_at).not.toBeNull();
+    });
+
+    it('Y-22: ComplaintHandling verify INCOMPLETE → WAITING_CUSTOMER_DATA (notes wajib)', async () => {
+      const id = await newComplaint();
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'INCOMPLETE' })
+        .expect(400);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'INCOMPLETE', notes: 'Bukti transfer belum dilampirkan.' })
+        .expect(201);
+
+      expect(res.body.status).toBe('WAITING_CUSTOMER_DATA');
+      expect(res.body.data_verification_notes).toContain('Bukti transfer');
+    });
+
+    it('Y-23: OperationSupervisor tidak bisa verify-data → 403', async () => {
+      const id = await newComplaint();
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(403);
+    });
+
+    it('Y-24: ComplianceLead tidak bisa verify-data → 403', async () => {
+      const id = await newComplaint();
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(403);
+    });
+
+    // ── Investigasi transaksi ────────────────────────────────
+
+    it('Y-25: OperationSupervisor SUCCESS → RESOLVED', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'SUCCESS', notes: 'Dana sudah diterima bank tujuan.' })
+        .expect(201);
+
+      expect(res.body.status).toBe('RESOLVED');
+      expect(res.body.operation_investigation_result).toBe('SUCCESS');
+      expect(res.body.operation_investigated_by).not.toBeNull();
+      expect(res.body.operation_investigated_at).not.toBeNull();
+    });
+
+    it('Y-26: OperationSupervisor PENDING → WAITING_BANK_CONFIRMATION', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'PENDING', notes: 'Menunggu konfirmasi bank penerima.' })
+        .expect(201);
+      expect(res.body.status).toBe('WAITING_BANK_CONFIRMATION');
+    });
+
+    it('Y-27: OperationSupervisor RETURNED → FINANCE_REVIEW', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'RETURNED', notes: 'Dana dikembalikan ke rekening perusahaan.' })
+        .expect(201);
+      expect(res.body.status).toBe('FINANCE_REVIEW');
+    });
+
+    it('Y-28: OperationSupervisor NEED_AML_REVIEW → AML_REVIEW', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'NEED_AML_REVIEW', notes: 'Indikasi transaksi mencurigakan.' })
+        .expect(201);
+      expect(res.body.status).toBe('AML_REVIEW');
+    });
+
+    it('Y-29: OperationSupervisor NEED_FINANCE_REVIEW → FINANCE_REVIEW', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'NEED_FINANCE_REVIEW', notes: 'Perlu pengecekan dampak keuangan.' })
+        .expect(201);
+      expect(res.body.status).toBe('FINANCE_REVIEW');
+    });
+
+    it('Y-30: ComplaintHandling tidak bisa operation-investigation → 403', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ result: 'SUCCESS', notes: 'ComplaintHandling seharusnya ditolak.' })
+        .expect(403);
+    });
+
+    it('Y-30b: operation-investigation tanpa notes → 400', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'SUCCESS' })
+        .expect(400);
+    });
+
+    // ── AML / Compliance review ──────────────────────────────
+
+    it('Y-31: ComplianceLead APPROVE saat AML_REVIEW → kembali ke OPERATION_INVESTIGATION', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVE', notes: 'Tidak ditemukan indikasi pencucian uang.' })
+        .expect(201);
+
+      expect(res.body.aml_decision).toBe('APPROVE');
+      expect(res.body.status).toBe('OPERATION_INVESTIGATION');
+      expect(res.body.aml_reviewed_by).not.toBeNull();
+      expect(res.body.aml_reviewed_at).not.toBeNull();
+    });
+
+    it('Y-32: ComplianceLead HOLD → AML_HOLD, masih bisa direview ulang', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      const hold = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'HOLD', notes: 'Menunggu dokumen tambahan dari nasabah.' })
+        .expect(201);
+      expect(hold.body.status).toBe('AML_HOLD');
+
+      const approve = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVE', notes: 'Dokumen sudah lengkap, tidak ada indikasi.' })
+        .expect(201);
+      expect(approve.body.status).toBe('OPERATION_INVESTIGATION');
+    });
+
+    it('Y-33: ComplianceLead REJECT → REJECTED', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'REJECT', notes: 'Pengaduan ditolak karena indikasi fraud dari nasabah.' })
+        .expect(201);
+      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.aml_decision).toBe('REJECT');
+    });
+
+    it('Y-33b: aml-review saat status bukan AML_REVIEW/AML_HOLD → 400', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVE', notes: 'Belum masuk tahap AML review.' })
+        .expect(400);
+    });
+
+    it('Y-34: OperationSupervisor tidak bisa aml-review → 403', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ decision: 'APPROVE', notes: 'OperationSupervisor seharusnya ditolak.' })
+        .expect(403);
+    });
+
+    it('Y-35: FinanceStaff tidak bisa aml-review → 403', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'APPROVE', notes: 'FinanceStaff seharusnya ditolak.' })
+        .expect(403);
+    });
+
+    // ── Finance review ───────────────────────────────────────
+
+    it('Y-36: FinanceStaff NO_REFUND → RESOLVED', async () => {
+      const id = await complaintAt('FINANCE_REVIEW');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'NO_REFUND', notes: 'Dana sudah diterima nasabah, tidak perlu refund.' })
+        .expect(201);
+
+      expect(res.body.finance_decision).toBe('NO_REFUND');
+      expect(res.body.status).toBe('RESOLVED');
+      expect(res.body.finance_reviewed_by).not.toBeNull();
+      expect(res.body.finance_reviewed_at).not.toBeNull();
+    });
+
+    it('Y-37: FinanceStaff REFUND_REQUIRED → REFUND_PROCESS', async () => {
+      const id = await complaintAt('FINANCE_REVIEW');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'REFUND_REQUIRED', notes: 'Dana kembali ke rekening perusahaan, perlu refund.' })
+        .expect(201);
+
+      expect(res.body.finance_decision).toBe('REFUND_REQUIRED');
+      expect(res.body.status).toBe('REFUND_PROCESS');
+    });
+
+    it('Y-38: FinanceManager tidak bisa finance-review complaint → 403 (approval refund di statement-refunds)', async () => {
+      const id = await complaintAt('FINANCE_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-review`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'NO_REFUND', notes: 'FinanceManager seharusnya ditolak.' })
+        .expect(403);
+    });
+
+    it('Y-39: ComplianceLead tidak bisa finance-review → 403', async () => {
+      const id = await complaintAt('FINANCE_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'NO_REFUND', notes: 'ComplianceLead seharusnya ditolak.' })
+        .expect(403);
+    });
+
+    // ── Resolve & close ──────────────────────────────────────
+
+    it('Y-40: ComplaintHandling resolve → RESOLVED + audit terisi', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/resolve`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({
+          resolution_notes: 'Transfer telah dikonfirmasi diterima oleh bank tujuan.',
+          customer_communication_notes: 'Nasabah sudah dihubungi via WhatsApp.',
+        })
+        .expect(201);
+
+      expect(res.body.status).toBe('RESOLVED');
+      expect(res.body.resolution_notes).toContain('dikonfirmasi');
+      expect(res.body.customer_communication_notes).toContain('WhatsApp');
+      expect(res.body.resolved_by).not.toBeNull();
+      expect(res.body.resolved_at).not.toBeNull();
+    });
+
+    it('Y-40b: resolve tanpa resolution_notes → 400', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/resolve`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({})
+        .expect(400);
+    });
+
+    it('Y-41: close hanya setelah RESOLVED atau REJECTED', async () => {
+      const resolvedId = await complaintAt('RESOLVED');
+      const closed = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${resolvedId}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Nasabah sudah diinformasikan, tiket ditutup.' })
+        .expect(201);
+      expect(closed.body.status).toBe('CLOSED');
+      expect(closed.body.closed_by).not.toBeNull();
+      expect(closed.body.closed_at).not.toBeNull();
+
+      const rejectedId = await complaintAt('AML_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${rejectedId}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'REJECT', notes: 'Pengaduan tidak terbukti.' })
+        .expect(201);
+      const closedRejected = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${rejectedId}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Ditutup setelah penolakan AML.' })
+        .expect(201);
+      expect(closedRejected.body.status).toBe('CLOSED');
+    });
+
+    it('Y-42: close complaint berstatus OPEN → 400', async () => {
+      const id = await newComplaint();
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Belum boleh ditutup.' })
+        .expect(400);
+    });
+
+    it('Y-43: complaint CLOSED tidak bisa diproses lagi', async () => {
+      const id = await complaintAt('RESOLVED');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Tiket selesai.' })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ priority: 'HIGH' })
+        .expect(400);
+    });
+
+    it('Y-44: RESOLVED terkunci — hanya close yang diizinkan', async () => {
+      const id = await complaintAt('RESOLVED');
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'FAILED', notes: 'Tidak boleh mengubah complaint yang sudah RESOLVED.' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'HOLD', notes: 'Tidak boleh AML review setelah RESOLVED.' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'NO_REFUND', notes: 'Tidak boleh finance review setelah RESOLVED.' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/resolve`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ resolution_notes: 'Tidak boleh resolve dua kali.' })
+        .expect(400);
+
+      const closed = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Close adalah satu-satunya aksi yang tersisa.' })
+        .expect(201);
+      expect(closed.body.status).toBe('CLOSED');
+    });
+
+    it('Y-45: REJECTED terkunci — hanya close yang diizinkan', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'REJECT', notes: 'Pengaduan ditolak, tiket menunggu penutupan.' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'PENDING', notes: 'Tidak boleh mengubah complaint yang sudah REJECTED.' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/resolve`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ resolution_notes: 'Tidak boleh resolve complaint yang ditolak.' })
+        .expect(400);
+
+      const closed = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Ditutup setelah penolakan AML.' })
+        .expect(201);
+      expect(closed.body.status).toBe('CLOSED');
+    });
+
+    it('Y-46: CLOSED tidak menerima aksi apa pun, termasuk close ulang', async () => {
+      const id = await complaintAt('RESOLVED');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Tiket selesai.' })
+        .expect(201);
+
+      for (const [path, token, body] of [
+        ['verify-data', complaintHandlingToken, { data_verification_status: 'COMPLETE' }],
+        ['operation-investigation', operationSupervisorToken, { result: 'SUCCESS', notes: 'Sudah ditutup.' }],
+        ['aml-review', complianceToken, { decision: 'APPROVE', notes: 'Sudah ditutup.' }],
+        ['finance-review', financeStaffToken, { decision: 'NO_REFUND', notes: 'Sudah ditutup.' }],
+        ['resolve', complaintHandlingToken, { resolution_notes: 'Sudah ditutup.' }],
+        ['close', complaintHandlingToken, { closing_notes: 'Sudah ditutup.' }],
+      ] as [string, string, any][]) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/complaints/${id}/${path}`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(body)
+          .expect(400);
+      }
+    });
+
+    // ── Search & validasi create ─────────────────────────────
+
     it('Y-11: GET /complaints/transactions/search?customer_application_id=X → 200, transfer list', async () => {
       const res = await request(app.getHttpServer())
         .get(`${BASE}/complaints/transactions/search?customer_application_id=${indivAppIdOk}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(typeof res.body.total).toBe('number');
-      // indivAppIdOk dipakai sebagai sender di banyak transfer sebelumnya
       expect(res.body.total).toBeGreaterThanOrEqual(1);
       if (res.body.data.length > 0) {
         const t = res.body.data[0];
@@ -9455,99 +10040,77 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       }
     });
 
-    // Y-11b: transaction search without customer_application_id → 400
     it('Y-11b: GET /complaints/transactions/search tanpa customer_application_id → 400', async () => {
       await request(app.getHttpServer())
         .get(`${BASE}/complaints/transactions/search`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(400);
     });
 
-    // Y-12: create dengan category tidak valid → 400
     it('Y-12: POST /complaints dengan category tidak valid → 400', async () => {
       await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
           transaction_reference: `TRX-${SUFFIX}-BAD`,
           category: 'INVALID_CATEGORY',
+          complaint_level: 'LEVEL_1',
           complaint_notes: 'Notes minimal sepuluh karakter.',
         })
         .expect(400);
     });
 
-    // Y-13: create dengan complaint_notes terlalu pendek → 400
     it('Y-13: POST /complaints dengan complaint_notes < 10 chars → 400', async () => {
       await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
           transaction_reference: `TRX-${SUFFIX}-SHORT`,
+          complaint_level: 'LEVEL_1',
           complaint_notes: 'Pendek',
         })
         .expect(400);
     });
 
-    // Y-14: create dengan customer non-APPROVED → 400
     it('Y-14: POST /complaints dengan customer DRAFT → 400', async () => {
-      // indivAppIdMissing dibuat di B-01 dan tidak pernah APPROVED
       await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdMissing),
           transaction_reference: `TRX-${SUFFIX}-DRAFT`,
+          complaint_level: 'LEVEL_1',
           complaint_notes: 'Nasabah belum approved seharusnya ditolak.',
         })
         .expect(400);
     });
 
-    // Y-15: FrontDesk tidak bisa update complaint yang sudah RESOLVED (status != OPEN)
-    it('Y-15: FrontDesk PATCH complaint yang sudah RESOLVED → 403', async () => {
-      // complaintId sudah RESOLVED dari Y-09
-      await request(app.getHttpServer())
-        .patch(`${BASE}/complaints/${complaintId}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ priority: 'HIGH' })
-        .expect(403);
-    });
-
-    // Y-16: FrontDesk dengan complaint OPEN bisa update priority/channel
-    it('Y-16: FrontDesk PATCH complaint OPEN → update priority berhasil', async () => {
-      // Buat complaint baru yang masih OPEN
-      const create = await request(app.getHttpServer())
-        .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({
-          customer_application_id: Number(indivAppIdOk),
-          transaction_reference: `TRX-${SUFFIX}-EDIT`,
-          category: 'SERVICE',
-          channel: 'PHONE',
-          priority: 'LOW',
-          complaint_notes: 'Pengaduan layanan untuk diupdate prioritasnya kemudian.',
-        })
-        .expect(201);
-
-      const newId = create.body.id;
+    it('Y-16: ComplaintHandling PATCH complaint → update priority/channel berhasil', async () => {
+      const id = await newComplaint({
+        transaction_reference: `TRX-${SUFFIX}-EDIT`,
+        category: 'SERVICE',
+        channel: 'PHONE',
+        priority: 'LOW',
+        complaint_level: 'LEVEL_1',
+      });
 
       const res = await request(app.getHttpServer())
-        .patch(`${BASE}/complaints/${newId}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ priority: 'HIGH', channel: 'WHATSAPP' })
+        .patch(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ priority: 'HIGH', channel: 'WHATSAPP', customer_communication_notes: 'Nasabah ditelepon kembali.' })
         .expect(200);
 
       expect(res.body.priority).toBe('HIGH');
       expect(res.body.channel).toBe('WHATSAPP');
+      expect(res.body.customer_communication_notes).toContain('ditelepon');
     });
 
-    // Y-17: complaint dengan transfer_id valid tersimpan
     it('Y-17: POST /complaints dengan transfer_id valid → 201, transfer_id tersimpan', async () => {
-      // Ambil transfer yang terkait dengan indivAppIdOk
       const txSearch = await request(app.getHttpServer())
         .get(`${BASE}/complaints/transactions/search?customer_application_id=${indivAppIdOk}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
 
       const tx = txSearch.body.data[0];
@@ -9555,7 +10118,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
           transfer_id: Number(tx.transfer_id),
@@ -9563,6 +10126,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           category: 'TRANSFER',
           channel: 'WALK_IN',
           priority: 'HIGH',
+          complaint_level: 'LEVEL_2',
           complaint_notes: 'Transfer sudah 3 hari belum tiba di rekening penerima.',
         })
         .expect(201);
@@ -10308,12 +10872,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   describe('Z. RBAC — role access control', () => {
 
     // ── Z-A: Complaints ─────────────────────────────────────
+    // Pemilik tiket = ComplaintHandling. FrontDesk sudah tidak punya akses.
 
-    it('Z-A01: ComplianceLead cannot list complaints → 403', async () => {
-      await request(app.getHttpServer())
+    it('Z-A01: ComplianceLead can list complaints (read-only untuk AML review) → 200', async () => {
+      const res = await request(app.getHttpServer())
         .get(`${BASE}/complaints`)
         .set('Authorization', `Bearer ${complianceToken}`)
-        .expect(403);
+        .expect(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
     });
 
     it('Z-A02: ComplianceLead cannot create complaint → 403', async () => {
@@ -10322,16 +10888,18 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-RBAC-CL`,
           category: 'TRANSFER',
+          complaint_level: 'LEVEL_1',
           complaint_notes: 'Test pengaduan dari ComplianceLead.',
         })
         .expect(403);
     });
 
-    it('Z-A03: ComplianceLead cannot search complaint customers → 403', async () => {
+    it('Z-A03: FrontDesk cannot search complaint customers → 403', async () => {
       await request(app.getHttpServer())
         .get(`${BASE}/complaints/customers/search`)
-        .set('Authorization', `Bearer ${complianceToken}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
         .expect(403);
     });
 
@@ -10351,27 +10919,33 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(Array.isArray(res.body.data)).toBe(true);
     });
 
-    it('Z-A06: OperationSupervisor can resolve complaint', async () => {
-      // create fresh complaint as FrontDesk then resolve as OperationSupervisor
+    it('Z-A06: ComplaintHandling can resolve complaint, OperationSupervisor cannot', async () => {
       const create = await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
           transaction_reference: `TRX-RBAC-OPS`,
           category: 'SERVICE',
           channel: 'WALK_IN',
           priority: 'LOW',
-          complaint_notes: 'Pengaduan RBAC test untuk OperationSupervisor resolve.',
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'Pengaduan RBAC test untuk resolve oleh ComplaintHandling.',
         })
         .expect(201);
       const cid = create.body.id;
 
-      const res = await request(app.getHttpServer())
-        .patch(`${BASE}/complaints/${cid}`)
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${cid}/resolve`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
-        .send({ status: 'RESOLVED', resolution_notes: 'Diselesaikan oleh OperationSupervisor dalam RBAC test.' })
-        .expect(200);
+        .send({ resolution_notes: 'OperationSupervisor seharusnya tidak bisa resolve.' })
+        .expect(403);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${cid}/resolve`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ resolution_notes: 'Diselesaikan oleh ComplaintHandling dalam RBAC test.' })
+        .expect(201);
       expect(res.body.status).toBe('RESOLVED');
     });
 
@@ -11675,13 +12249,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('SR-20: refund tertaut complaint muncul di detail refund dan detail complaint', async () => {
       const complaint = await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
           transaction_reference: `TRX-RFD-${SUFFIX}`,
           category: 'TRANSFER',
           channel: 'WALK_IN',
           priority: 'HIGH',
+          complaint_level: 'LEVEL_2',
           complaint_notes: 'Nasabah melapor dana transfer belum masuk ke rekening tujuan.',
         })
         .expect(201);
@@ -11708,7 +12283,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const cDetail = await request(app.getHttpServer())
         .get(`${BASE}/complaints/${complaintId}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
       expect(Array.isArray(cDetail.body.statement_refunds)).toBe(true);
       expect(cDetail.body.statement_refunds.length).toBe(1);
@@ -11719,13 +12294,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('SR-21: complaint tidak tertutup otomatis walau refund sudah disetujui', async () => {
       const complaint = await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .send({
           customer_application_id: Number(indivAppIdOk),
           transaction_reference: `TRX-RFD2-${SUFFIX}`,
           category: 'TRANSFER',
           channel: 'WALK_IN',
           priority: 'HIGH',
+          complaint_level: 'LEVEL_2',
           complaint_notes: 'Nasabah melapor dana transfer belum masuk, menunggu refund.',
         })
         .expect(201);
@@ -11749,7 +12325,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const cDetail = await request(app.getHttpServer())
         .get(`${BASE}/complaints/${complaint.body.id}`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
         .expect(200);
       expect(cDetail.body.status).toBe('OPEN');
       expect(cDetail.body.resolved_at).toBeNull();

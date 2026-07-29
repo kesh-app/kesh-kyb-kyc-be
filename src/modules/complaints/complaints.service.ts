@@ -1,16 +1,21 @@
 import {
   Inject,
   Injectable,
-  ForbiddenException,
   NotFoundException,
   BadRequestException,
 } from "@nestjs/common";
 import { Pool } from "pg";
 import { resolveUserId } from "../../common/auth.util";
 import {
+  AmlReviewDto,
+  CloseComplaintDto,
+  ComplaintFinanceReviewDto,
   CreateComplaintDto,
-  UpdateComplaintDto,
   ListComplaintsQueryDto,
+  OperationInvestigationDto,
+  ResolveComplaintDto,
+  UpdateComplaintDto,
+  VerifyComplaintDataDto,
 } from "./dto";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
@@ -171,8 +176,9 @@ export class ComplaintsService {
       `INSERT INTO complaints (
          complaint_no, customer_application_id, customer_cif_no, customer_name, customer_type,
          transfer_id, transaction_reference, category, channel, priority,
+         complaint_level, level_3_risk_category,
          complaint_notes, status, created_by, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'OPEN',$12,now())
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'OPEN',$14,now())
        RETURNING *`,
       [
         complaintNo,
@@ -185,6 +191,9 @@ export class ComplaintsService {
         dto.category ?? "TRANSFER",
         dto.channel ?? "WALK_IN",
         dto.priority ?? "MEDIUM",
+        dto.complaint_level,
+        // kategori risiko hanya relevan untuk LEVEL_3 — level lain diabaikan
+        dto.complaint_level === "LEVEL_3" ? dto.level_3_risk_category : null,
         dto.complaint_notes,
         actorId,
       ],
@@ -196,8 +205,9 @@ export class ComplaintsService {
   // ---------------------------------------------------------------------------
   // LIST
   // ---------------------------------------------------------------------------
+  // Semua role yang diizinkan melihat seluruh complaint (tidak ada filter ownership):
+  // satu tiket dikerjakan bergiliran oleh ComplaintHandling → Operation → Compliance → Finance.
   async list(user: AuthedUser, query: ListComplaintsQueryDto) {
-    const role = user.role;
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 20));
     const offset = (page - 1) * limit;
@@ -205,9 +215,9 @@ export class ComplaintsService {
     const params: any[] = [];
     const conditions: string[] = [];
 
-    if (role === "FrontDesk") {
-      params.push(resolveUserId(user));
-      conditions.push(`c.created_by = $${params.length}`);
+    if (query.complaint_level) {
+      params.push(query.complaint_level);
+      conditions.push(`c.complaint_level = $${params.length}`);
     }
 
     if (query.status) {
@@ -239,7 +249,11 @@ export class ComplaintsService {
       `SELECT c.id, c.complaint_no, c.customer_application_id, c.customer_cif_no,
               c.customer_name, c.customer_type, c.transfer_id, c.transaction_reference,
               c.category, c.channel, c.priority, c.status,
-              c.resolution_notes, c.created_by, c.resolved_at, c.created_at, c.updated_at
+              c.complaint_level, c.level_3_risk_category,
+              c.data_verification_status, c.operation_investigation_result,
+              c.aml_decision, c.finance_decision,
+              c.resolution_notes, c.created_by, c.resolved_at, c.closed_at,
+              c.created_at, c.updated_at
        FROM complaints c ${where}
        ORDER BY c.created_at DESC
        LIMIT ${limit} OFFSET ${offset}`,
@@ -257,20 +271,15 @@ export class ComplaintsService {
   // ---------------------------------------------------------------------------
   // DETAIL
   // ---------------------------------------------------------------------------
-  async getById(id: number, user: AuthedUser) {
+  async getById(id: number, _user?: AuthedUser) {
     const q = await this.pool.query(`SELECT * FROM complaints WHERE id = $1`, [id]);
 
     if (!q.rows[0]) throw new NotFoundException("Complaint not found");
     const row = q.rows[0];
 
-    if (user.role === "FrontDesk") {
-      if (String(row.created_by) !== String(resolveUserId(user))) {
-        throw new ForbiddenException("Not allowed");
-      }
-    }
-
-    // Refund yang tertaut — read-only. Complaint TIDAK ditutup otomatis oleh
-    // refund; penutupan tetap manual lewat PATCH /complaints/:id.
+    // Refund yang tertaut — read-only. Complaint TIDAK ditutup otomatis oleh refund
+    // (dibuat maupun disetujui); penutupan tetap manual lewat POST /complaints/:id/close
+    // oleh ComplaintHandling setelah nasabah diberi tahu.
     const refunds = await this.pool.query(
       `SELECT id, refund_no, amount, currency, status, statement_date, received_at,
               original_transfer_id, approved_at, credited_at
@@ -287,15 +296,9 @@ export class ComplaintsService {
   // UPDATE
   // ---------------------------------------------------------------------------
   async update(id: number, user: AuthedUser, dto: UpdateComplaintDto) {
-    const existing = await this.getById(id, user);
-
-    if (user.role === "FrontDesk") {
-      if (existing.status !== "OPEN") {
-        throw new ForbiddenException("FrontDesk can only update OPEN complaints");
-      }
-      if (dto.status === "RESOLVED" || dto.status === "CLOSED") {
-        throw new ForbiddenException("FrontDesk cannot set status RESOLVED or CLOSED");
-      }
+    const existing = await this.getById(id);
+    if (existing.status === "CLOSED") {
+      throw new BadRequestException("Complaint sudah CLOSED dan tidak dapat diubah");
     }
 
     const actorId = resolveUserId(user);
@@ -314,6 +317,17 @@ export class ComplaintsService {
     if (dto.priority !== undefined) sets.push(`priority = ${addField(dto.priority)}`);
     if (dto.complaint_notes !== undefined) sets.push(`complaint_notes = ${addField(dto.complaint_notes)}`);
     if (dto.resolution_notes !== undefined) sets.push(`resolution_notes = ${addField(dto.resolution_notes)}`);
+    if (dto.customer_communication_notes !== undefined) {
+      sets.push(`customer_communication_notes = ${addField(dto.customer_communication_notes)}`);
+    }
+    if (dto.complaint_level !== undefined) {
+      sets.push(`complaint_level = ${addField(dto.complaint_level)}`);
+      sets.push(
+        `level_3_risk_category = ${addField(
+          dto.complaint_level === "LEVEL_3" ? dto.level_3_risk_category : null,
+        )}`,
+      );
+    }
     if (dto.status !== undefined) {
       sets.push(`status = ${addField(dto.status)}`);
       if (dto.status === "RESOLVED") {
@@ -328,5 +342,185 @@ export class ComplaintsService {
     );
 
     return result.rows[0];
+  }
+
+  // ---------------------------------------------------------------------------
+  // WORKFLOW ACTIONS
+  // ---------------------------------------------------------------------------
+  // Setiap aksi: ambil complaint, tolak kalau sudah final, tulis hasil + audit,
+  // lalu pindahkan status sesuai routing yang disepakati bisnis.
+  // RESOLVED = menunggu penutupan, bukan state kerja: satu-satunya aksi yang
+  // tersisa untuk RESOLVED/REJECTED adalah close(). CLOSED tidak bisa apa-apa lagi.
+  private static readonly LOCKED_STATUSES = ["RESOLVED", "REJECTED", "CLOSED"];
+
+  private async loadOpen(id: number) {
+    const row = await this.getById(id);
+    if (ComplaintsService.LOCKED_STATUSES.includes(row.status)) {
+      throw new BadRequestException(
+        `Complaint sudah ${row.status} — tidak dapat diproses lagi`,
+      );
+    }
+    return row;
+  }
+
+  private async applyWorkflow(id: number, sets: string[], params: any[]) {
+    const result = await this.pool.query(
+      `UPDATE complaints SET ${["updated_at = now()", ...sets].join(", ")} WHERE id = $1 RETURNING *`,
+      params,
+    );
+    return result.rows[0];
+  }
+
+  // Verifikasi kelengkapan data nasabah — ComplaintHandling
+  async verifyData(id: number, user: AuthedUser, dto: VerifyComplaintDataDto) {
+    await this.loadOpen(id);
+    const actorId = resolveUserId(user);
+    const nextStatus =
+      dto.data_verification_status === "COMPLETE"
+        ? "OPERATION_INVESTIGATION"
+        : "WAITING_CUSTOMER_DATA";
+
+    return this.applyWorkflow(
+      id,
+      [
+        "data_verification_status = $2",
+        "data_verification_notes = $3",
+        "data_verified_by = $4",
+        "data_verified_at = now()",
+        "updated_by = $4",
+        "status = $5",
+      ],
+      [id, dto.data_verification_status, dto.notes ?? null, actorId, nextStatus],
+    );
+  }
+
+  // Investigasi transaksi — OperationSupervisor. Tidak pernah membuat refund.
+  async operationInvestigation(
+    id: number,
+    user: AuthedUser,
+    dto: OperationInvestigationDto,
+  ) {
+    const existing = await this.loadOpen(id);
+    const actorId = resolveUserId(user);
+
+    const routing: Record<string, string | null> = {
+      SUCCESS: "RESOLVED",
+      PENDING: "WAITING_BANK_CONFIRMATION",
+      FAILED: null, // status tetap; ComplaintHandling yang menyelesaikan manual
+      RETURNED: "FINANCE_REVIEW",
+      NEED_AML_REVIEW: "AML_REVIEW",
+      NEED_FINANCE_REVIEW: "FINANCE_REVIEW",
+    };
+    const nextStatus = routing[dto.result] ?? existing.status;
+
+    return this.applyWorkflow(
+      id,
+      [
+        "operation_investigation_result = $2",
+        "operation_investigation_notes = $3",
+        "operation_investigated_by = $4",
+        "operation_investigated_at = now()",
+        "updated_by = $4",
+        "status = $5",
+      ],
+      [id, dto.result, dto.notes, actorId, nextStatus],
+    );
+  }
+
+  // AML / Compliance review — ComplianceLead
+  async amlReview(id: number, user: AuthedUser, dto: AmlReviewDto) {
+    const existing = await this.loadOpen(id);
+    if (existing.status !== "AML_REVIEW" && existing.status !== "AML_HOLD") {
+      throw new BadRequestException(
+        "AML review hanya untuk complaint berstatus AML_REVIEW atau AML_HOLD",
+      );
+    }
+    const actorId = resolveUserId(user);
+    const nextStatus =
+      dto.decision === "REJECT"
+        ? "REJECTED"
+        : dto.decision === "HOLD"
+          ? "AML_HOLD"
+          : "OPERATION_INVESTIGATION";
+
+    return this.applyWorkflow(
+      id,
+      [
+        "aml_decision = $2",
+        "aml_notes = $3",
+        "aml_reviewed_by = $4",
+        "aml_reviewed_at = now()",
+        "updated_by = $4",
+        "status = $5",
+      ],
+      [id, dto.decision, dto.notes, actorId, nextStatus],
+    );
+  }
+
+  // Finance review — FinanceStaff. Approval refund tetap di modul statement-refunds.
+  async financeReview(id: number, user: AuthedUser, dto: ComplaintFinanceReviewDto) {
+    const existing = await this.loadOpen(id);
+    if (existing.status !== "FINANCE_REVIEW" && existing.status !== "REFUND_PROCESS") {
+      throw new BadRequestException(
+        "Finance review hanya untuk complaint berstatus FINANCE_REVIEW atau REFUND_PROCESS",
+      );
+    }
+    const actorId = resolveUserId(user);
+    const nextStatus = dto.decision === "REFUND_REQUIRED" ? "REFUND_PROCESS" : "RESOLVED";
+
+    return this.applyWorkflow(
+      id,
+      [
+        "finance_decision = $2",
+        "finance_review_notes = $3",
+        "finance_reviewed_by = $4",
+        "finance_reviewed_at = now()",
+        "updated_by = $4",
+        "status = $5",
+      ],
+      [id, dto.decision, dto.notes, actorId, nextStatus],
+    );
+  }
+
+  // Resolve — ComplaintHandling, setelah nasabah diinformasikan
+  async resolve(id: number, user: AuthedUser, dto: ResolveComplaintDto) {
+    await this.loadOpen(id);
+    const actorId = resolveUserId(user);
+
+    return this.applyWorkflow(
+      id,
+      [
+        "resolution_notes = $2",
+        "customer_communication_notes = COALESCE($3, customer_communication_notes)",
+        "resolved_by = $4",
+        "resolved_at = now()",
+        "updated_by = $4",
+        "status = 'RESOLVED'",
+      ],
+      [id, dto.resolution_notes, dto.customer_communication_notes ?? null, actorId],
+    );
+  }
+
+  // Close — ComplaintHandling. Tidak pernah otomatis karena refund.
+  async close(id: number, user: AuthedUser, dto: CloseComplaintDto) {
+    const existing = await this.getById(id);
+    if (existing.status !== "RESOLVED" && existing.status !== "REJECTED") {
+      throw new BadRequestException(
+        "Hanya complaint berstatus RESOLVED atau REJECTED yang dapat ditutup",
+      );
+    }
+    const actorId = resolveUserId(user);
+
+    return this.applyWorkflow(
+      id,
+      [
+        "closing_notes = $2",
+        "closed_by = $3",
+        "closed_at = now()",
+        "updated_by = $3",
+        "status = 'CLOSED'",
+      ],
+      [id, dto.closing_notes, actorId],
+    );
   }
 }

@@ -16,6 +16,8 @@ export type UserRow = {
   role:
     | "BranchAdmin"
     | "FrontDesk"
+    | "ComplaintHandling"
+    | "OperationSupervisor"
     | "ComplianceStaff"
     | "ComplianceLead"
     | "Auditor"
