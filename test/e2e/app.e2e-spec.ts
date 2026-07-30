@@ -11192,6 +11192,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         ...extra,
       };
     }
+    // Nomor referensi bulk unik per test — unique-nya di-scope per sender.
+    let bulkRefSeq = 0;
+    function bulkRef() {
+      return `BULK-REF-${SUFFIX}-${String(++bulkRefSeq).padStart(3, '0')}`;
+    }
 
     let ztTransferId: string;
 
@@ -11241,15 +11246,18 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     it('ZT-04: bulk create 3 item → 201, batch + 3 transfer DRAFT ber-batch_id', async () => {
+      const ref = bulkRef();
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: ref,
           items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Bulk 2' }), bulkItem({ beneficiaryAccountName: 'Bulk 3' })],
         })
         .expect(201);
 
+      expect(res.body.bulk_reference_no).toBe(ref);
       expect(res.body.batch_no).toMatch(/^KESH-TRB-\d{8}-[A-Z0-9]{5}$/);
       expect(res.body.total_count).toBe(3);
       expect(Array.isArray(res.body.transfers)).toBe(true);
@@ -11267,7 +11275,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), items })
+        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items })
         .expect(400);
     });
 
@@ -11277,6 +11285,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: bulkRef(),
           items: [bulkItem(), bulkItem({ amount: 5_000 })], // amount di bawah minimum
         })
         .expect(400);
@@ -11288,7 +11297,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem(), bad] })
+        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [bulkItem(), bad] })
         .expect(400);
     });
 
@@ -11296,7 +11305,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), items: [] })
+        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [] })
         .expect(400);
     });
 
@@ -11304,7 +11313,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem()] })
+        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [bulkItem()] })
         .expect(201);
       const txId = String(bulk.body.transfers[0].id);
 
@@ -11338,7 +11347,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${financeStaffToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem()] })
+        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [bulkItem()] })
         .expect(403);
     });
 
@@ -11357,6 +11366,418 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send(txBody())
         .expect(201);
       expect(res.body.status).toBe('DRAFT');
+    });
+
+    // ── bulk_reference_no level batch ────────────────────────
+    it('ZT-20: bulk create tanpa bulk_reference_no → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem()] })
+        .expect(400);
+    });
+
+    it('ZT-21: bulk create dengan bulk_reference_no kosong/whitespace → 400', async () => {
+      for (const ref of ['', '   ']) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/bulk`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            sender_application_id: Number(indivAppIdOk),
+            bulk_reference_no: ref,
+            items: [bulkItem()],
+          })
+          .expect(400);
+      }
+    });
+
+    it('ZT-22: bulk create valid → 201, response memuat bulk_reference_no + batch trimmed di DB', async () => {
+      const ref = bulkRef();
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: `  ${ref}  `,
+          items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Bulk Ref 2' })],
+        })
+        .expect(201);
+
+      expect(res.body.bulk_reference_no).toBe(ref);
+      expect(res.body.batch_id).toBeDefined();
+      expect(res.body.total_count).toBe(2);
+      expect(res.body.total_amount).toBe(200_000);
+      // Semua transfer tetap ter-link ke batch seperti sebelumnya.
+      for (const t of res.body.transfers) {
+        expect(String(t.batch_id)).toBe(String(res.body.batch_id));
+      }
+      const db = await pgPool.query(
+        `SELECT bulk_reference_no FROM transfer_batches WHERE id=$1`,
+        [res.body.batch_id],
+      );
+      expect(db.rows[0].bulk_reference_no).toBe(ref);
+    });
+
+    it('ZT-23: detail & list transfer mengembalikan batch_no + bulk_reference_no', async () => {
+      const ref = bulkRef();
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: ref,
+          items: [bulkItem()],
+        })
+        .expect(201);
+      const txId = String(bulk.body.transfers[0].id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(detail.body.batch_no).toBe(bulk.body.batch_no);
+      expect(detail.body.bulk_reference_no).toBe(ref);
+
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      const found = list.body.find((t: any) => String(t.id) === txId);
+      expect(found).toBeDefined();
+      expect(found.batch_no).toBe(bulk.body.batch_no);
+      expect(found.bulk_reference_no).toBe(ref);
+    });
+
+    it('ZT-24: transfer non-bulk tetap punya batch info null (shape tidak berubah)', async () => {
+      const single = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(txBody())
+        .expect(201);
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${single.body.id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(detail.body.batch_id).toBeNull();
+      expect(detail.body.batch_no).toBeNull();
+      expect(detail.body.bulk_reference_no).toBeNull();
+    });
+
+    it('ZT-25: bulk_reference_no duplikat untuk sender yang sama → 409', async () => {
+      const ref = bulkRef();
+      const body = {
+        sender_application_id: Number(indivAppIdOk),
+        bulk_reference_no: ref,
+        items: [bulkItem()],
+      };
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(body)
+        .expect(201);
+
+      const dup = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(body)
+        .expect(409);
+      expect(String(dup.body.message)).toContain(ref);
+    });
+
+    it('ZT-26: bulk_reference_no sama untuk sender berbeda → 201 (unique per sender)', async () => {
+      // Sender kedua yang APPROVED.
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Bulk Ref Sender 2 ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3266${SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. Bulk Ref No. 2',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0866${SUFFIX}`.slice(0, 15),
+          occupation: 'Wiraswasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const senderB = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [senderB]);
+
+      const ref = bulkRef();
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: ref,
+          items: [bulkItem()],
+        })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(senderB),
+          bulk_reference_no: ref,
+          items: [bulkItem()],
+        })
+        .expect(201);
+      expect(res.body.bulk_reference_no).toBe(ref);
+    });
+
+    it('ZT-27: bulk_reference_no > 150 karakter → 400', async () => {
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: 'X'.repeat(151),
+          items: [bulkItem()],
+        })
+        .expect(400);
+    });
+
+    // ── Pemisahan single vs bulk listing ─────────────────────
+    it('ZT-30: transfer_mode=single hanya mengembalikan transfer tanpa batch_id', async () => {
+      // Pastikan ada minimal satu single dan satu bulk.
+      const single = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(txBody())
+        .expect(201);
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: bulkRef(),
+          items: [bulkItem()],
+        })
+        .expect(201);
+      const bulkChildId = String(bulk.body.transfers[0].id);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers?transfer_mode=single`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(res.body.length).toBeGreaterThan(0);
+      for (const t of res.body) expect(t.batch_id).toBeNull();
+      const ids = res.body.map((t: any) => String(t.id));
+      expect(ids).toContain(String(single.body.id));
+      expect(ids).not.toContain(bulkChildId);
+    });
+
+    it('ZT-31: transfer_mode=bulk_item hanya mengembalikan transfer ber-batch_id', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers?transfer_mode=bulk_item`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(res.body.length).toBeGreaterThan(0);
+      for (const t of res.body) {
+        expect(t.batch_id).not.toBeNull();
+        expect(t.batch_no).toBeTruthy();
+      }
+    });
+
+    it('ZT-32: tanpa transfer_mode = perilaku lama (superset single + bulk_item)', async () => {
+      const [all, single, bulkItems] = await Promise.all([
+        request(app.getHttpServer())
+          .get(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200),
+        request(app.getHttpServer())
+          .get(`${BASE}/transfers?transfer_mode=single`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200),
+        request(app.getHttpServer())
+          .get(`${BASE}/transfers?transfer_mode=bulk_item`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200),
+      ]);
+      const allIds = new Set(all.body.map((t: any) => String(t.id)));
+      // LIMIT 200 sama untuk ketiganya; cek yang teratas saja agar tidak rapuh.
+      for (const t of [...single.body, ...bulkItems.body].slice(0, 20)) {
+        expect(allIds.has(String(t.id))).toBe(true);
+      }
+      // transfer_mode=all identik dengan tanpa parameter.
+      const explicit = await request(app.getHttpServer())
+        .get(`${BASE}/transfers?transfer_mode=all`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(explicit.body.length).toBe(all.body.length);
+    });
+
+    it('ZT-33: transfer_mode tidak dikenal → 400', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers?transfer_mode=weird`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(400);
+    });
+
+    it('ZT-34: bulk-batches = satu baris per batch, memuat batch_no + bulk_reference_no', async () => {
+      const ref = bulkRef();
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: ref,
+          items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Batch List 2' }), bulkItem({ beneficiaryAccountName: 'Batch List 3' })],
+        })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches?q=${ref}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+
+      // 3 transfer anak, tapi hanya 1 baris batch.
+      expect(res.body.total).toBe(1);
+      expect(res.body.data.length).toBe(1);
+      const row = res.body.data[0];
+      expect(String(row.id)).toBe(String(bulk.body.batch_id));
+      expect(row.batch_no).toBe(bulk.body.batch_no);
+      expect(row.bulk_reference_no).toBe(ref);
+      expect(row.sender_display_name).toBeTruthy();
+      expect(row.total_count).toBe(3);
+      expect(row.status_summary.DRAFT).toBe(3);
+      expect(res.body.page).toBe(1);
+    });
+
+    it('ZT-35: bulk-batches detail = ringkasan batch + seluruh transfer anak', async () => {
+      const ref = bulkRef();
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: ref,
+          items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Batch Detail 2' })],
+        })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches/${bulk.body.batch_id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+
+      expect(res.body.batch.batch_no).toBe(bulk.body.batch_no);
+      expect(res.body.batch.bulk_reference_no).toBe(ref);
+      expect(res.body.batch.total_count).toBe(2);
+      expect(res.body.transfers.length).toBe(2);
+      for (const t of res.body.transfers) {
+        expect(String(t.batch_id)).toBe(String(bulk.body.batch_id));
+        // shape sama dengan list transfer
+        expect(t.beneficiary_account_name).toBeTruthy();
+        expect(t.status).toBe('DRAFT');
+        expect(t.sender_name).toBeTruthy();
+      }
+    });
+
+    it('ZT-36: status_summary mengikuti status transfer anak', async () => {
+      const ref = bulkRef();
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: ref,
+          items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Summary 2' })],
+        })
+        .expect(201);
+      const batchId = bulk.body.batch_id;
+
+      const before = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches/${batchId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(before.body.batch.status_summary).toMatchObject({
+        DRAFT: 2,
+        SUBMITTED: 0,
+        PENDING_COMPLIANCE_REVIEW: 0,
+        PENDING_FINANCE_STAFF_REVIEW: 0,
+        PENDING_FINANCE_MANAGER_APPROVAL: 0,
+        COMPLETED: 0,
+        REJECTED: 0,
+      });
+
+      // Submit satu anak → summary bergeser DRAFT 1 / SUBMITTED 1.
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${bulk.body.transfers[0].id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+
+      const after = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches/${batchId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(after.body.batch.status_summary.DRAFT).toBe(1);
+      expect(after.body.batch.status_summary.SUBMITTED).toBe(1);
+    });
+
+    it('ZT-37: bulk-batches detail batch tidak dikenal → 404', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches/99999999`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(404);
+    });
+
+    it('ZT-38: RBAC bulk-batches mengikuti hak baca transfer yang ada', async () => {
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: bulkRef(),
+          items: [bulkItem()],
+        })
+        .expect(201);
+
+      // Boleh baca: seluruh role pembaca transfer + FrontDesk pembuatnya.
+      for (const token of [
+        financeStaffToken,
+        financeManagerToken,
+        operationSupervisorToken,
+        complianceToken,
+        auditorToken,
+        frontDeskToken,
+        sysAdminToken,
+        directorToken,
+      ]) {
+        await request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+        await request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches/${bulk.body.batch_id}`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+      }
+
+      // ComplaintHandling tidak punya hak baca transfer → 403.
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches/${bulk.body.batch_id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .expect(403);
+      // Endpoint baca tidak memberi kemampuan tulis baru.
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${auditorToken}`)
+        .send({
+          sender_application_id: Number(indivAppIdOk),
+          bulk_reference_no: bulkRef(),
+          items: [bulkItem()],
+        })
+        .expect(403);
     });
   });
 

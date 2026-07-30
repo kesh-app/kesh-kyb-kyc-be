@@ -167,6 +167,13 @@ export class CreateBulkTransferDto {
   @IsInt()
   sender_application_id!: number;
 
+  // Nomor referensi bulk dari finance/partner untuk seluruh batch — wajib diisi.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'bulk_reference_no wajib diisi' })
+  @MaxLength(150)
+  bulk_reference_no!: string;
+
   @IsArray()
   @ArrayNotEmpty({ message: 'items wajib diisi minimal 1' })
   @ArrayMinSize(1, { message: 'minimal 1 item' })

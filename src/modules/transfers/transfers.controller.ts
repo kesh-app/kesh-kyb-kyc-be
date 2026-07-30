@@ -25,6 +25,16 @@ import {
   UpdateTransferDto,
 } from "./dto";
 
+// Hak baca transfer (SystemAdmin/Director lewat bypass RolesGuard).
+const READ_ROLES = [
+  "FinanceStaff",
+  "FinanceManager",
+  "OperationSupervisor",
+  "ComplianceLead",
+  "Auditor",
+  "FrontDesk",
+] as const;
+
 @Controller("transfers")
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class TransfersController {
@@ -135,10 +145,43 @@ export class TransfersController {
   }
 
   // LIST TRANSFERS
+  // transfer_mode: all (default, perilaku lama) | single | bulk_item
   @Get()
-  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "ComplianceLead", "Auditor", "FrontDesk")
-  async list(@Req() req: any, @Query("status") status?: string) {
-    return this.svc.list(req.user, status);
+  @Roles(...READ_ROLES)
+  async list(
+    @Req() req: any,
+    @Query("status") status?: string,
+    @Query("transfer_mode") transferMode?: string,
+  ) {
+    return this.svc.list(req.user, status, { transferMode });
+  }
+
+  // BULK BATCH LIST — satu baris per batch (bukan per transfer anak).
+  // Harus dideklarasikan sebelum @Get(":id") agar tidak tertangkap ParseIntPipe.
+  @Get("bulk-batches")
+  @Roles(...READ_ROLES)
+  async listBulkBatches(
+    @Req() req: any,
+    @Query("q") q?: string,
+    @Query("date_from") dateFrom?: string,
+    @Query("date_to") dateTo?: string,
+    @Query("page") page?: string,
+    @Query("limit") limit?: string,
+  ) {
+    return this.svc.listBulkBatches(req.user, {
+      q,
+      date_from: dateFrom,
+      date_to: dateTo,
+      page: Number(page),
+      limit: Number(limit),
+    });
+  }
+
+  // BULK BATCH DETAIL — ringkasan batch + seluruh transfer anak.
+  @Get("bulk-batches/:id")
+  @Roles(...READ_ROLES)
+  async getBulkBatch(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
+    return this.svc.getBulkBatchById(id, req.user);
   }
 
   // BANK CATALOG — static list for FE dropdown

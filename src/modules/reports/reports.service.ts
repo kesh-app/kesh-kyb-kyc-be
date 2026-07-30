@@ -322,6 +322,8 @@ export class ReportsService {
       'Status', 'Result', 'Compliance Review Status', 'Red Flags', 'Compliance Notes',
       'Compliance Reviewed At', 'Submitted At', 'Supervisor Reviewed At',
       'Finance Reviewed At', 'Final Approved At', 'Completed At', 'Rejected At',
+      // Additive di akhir agar posisi kolom lama tidak bergeser.
+      'Batch No', 'Bulk Reference No',
     ];
     const q = await this.pool.query(
       `SELECT t.id, COALESCE(t.reference_no, t.partner_reference_no) AS reference_no,
@@ -333,8 +335,10 @@ export class ReportsService {
               t.transaction_purpose, t.status, t.result,
               cr.status AS cr_status, cr.red_flags, cr.decision_notes AS cr_notes, cr.reviewed_at AS cr_reviewed_at,
               t.submitted_at, t.supervisor_reviewed_at, t.finance_reviewed_at,
-              t.approved_at, t.completed_at, t.rejected_at
+              t.approved_at, t.completed_at, t.rejected_at,
+              tb.batch_no, tb.bulk_reference_no
        FROM transfers t
+       LEFT JOIN transfer_batches tb ON tb.id = t.batch_id
        LEFT JOIN applications sa ON sa.id = t.sender_application_id
        LEFT JOIN persons p ON p.id = sa.person_id
        LEFT JOIN business_entities b ON b.id = sa.business_id
@@ -355,6 +359,7 @@ export class ReportsService {
       r.red_flags ? JSON.stringify(r.red_flags) : null, r.cr_notes, r.cr_reviewed_at,
       r.submitted_at, r.supervisor_reviewed_at, r.finance_reviewed_at,
       r.approved_at, r.completed_at, r.rejected_at,
+      r.batch_no, r.bulk_reference_no,
     ]);
     return { name: 'Transfers', columns, rows };
   }

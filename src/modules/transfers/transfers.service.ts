@@ -1,6 +1,7 @@
 import {
   Inject,
   Injectable,
+  ConflictException,
   ForbiddenException,
   NotFoundException,
   BadRequestException,
@@ -277,7 +278,7 @@ export class TransfersService {
   // ---------------------------------------------------------------------------
   async bulkCreate(
     user: AuthedUser,
-    dto: { sender_application_id: number; items: any[] },
+    dto: { sender_application_id: number; bulk_reference_no?: string; items: any[] },
     ip?: string,
   ) {
     // Input transfer = FrontDesk saja. FinanceStaff hanya layer review finance.
@@ -290,6 +291,22 @@ export class TransfersService {
     }
     if (dto.items.length > 20) {
       throw new BadRequestException("maksimal 20 item per bulk transfer");
+    }
+
+    // Nomor referensi bulk level batch — wajib, trimmed, unik per sender.
+    const bulkRef = (dto.bulk_reference_no ?? "").trim();
+    if (!bulkRef) {
+      throw new BadRequestException("bulk_reference_no wajib diisi");
+    }
+    const dupRef = await this.pool.query(
+      `SELECT 1 FROM transfer_batches
+        WHERE sender_application_id = $1 AND bulk_reference_no = $2 LIMIT 1`,
+      [dto.sender_application_id, bulkRef],
+    );
+    if ((dupRef.rowCount ?? 0) > 0) {
+      throw new ConflictException(
+        `bulk_reference_no "${bulkRef}" sudah dipakai untuk pengirim ini`,
+      );
     }
 
     // Sender divalidasi sekali (satu sender untuk seluruh batch).
@@ -309,11 +326,12 @@ export class TransfersService {
 
       const batchRes = await client.query(
         `INSERT INTO transfer_batches
-           (batch_no, created_by, sender_application_id, total_count, total_amount, status)
-         VALUES ($1,$2,$3,$4,$5,'CREATED')
+           (batch_no, bulk_reference_no, created_by, sender_application_id, total_count, total_amount, status)
+         VALUES ($1,$2,$3,$4,$5,$6,'CREATED')
          RETURNING id`,
         [
           batchNo,
+          bulkRef,
           actorId,
           dto.sender_application_id,
           dto.items.length,
@@ -334,8 +352,14 @@ export class TransfersService {
       }
 
       await client.query("COMMIT");
-    } catch (err) {
+    } catch (err: any) {
       await client.query("ROLLBACK");
+      // Race dengan request lain yang memakai referensi sama (unique index).
+      if (err?.code === "23505") {
+        throw new ConflictException(
+          `bulk_reference_no "${bulkRef}" sudah dipakai untuk pengirim ini`,
+        );
+      }
       throw err;
     } finally {
       client.release();
@@ -346,7 +370,7 @@ export class TransfersService {
       "TRANSFER_BULK_CREATE",
       String(batchId),
       null,
-      { batch_no: batchNo, count: created.length },
+      { batch_no: batchNo, bulk_reference_no: bulkRef, count: created.length },
       ip,
     );
 
@@ -358,6 +382,7 @@ export class TransfersService {
     return {
       batch_id: batchId,
       batch_no: batchNo,
+      bulk_reference_no: bulkRef,
       total_count: created.length,
       total_amount: created.reduce((sum, r) => sum + Number(r.amount || 0), 0),
       transfers: created,
@@ -1053,8 +1078,13 @@ export class TransfersService {
 
   // ---------------------------------------------------------------------------
   // LIST – FinanceStaff: hanya miliknya; FinanceManager/SystemAdmin: semua
+  // transfer_mode memisahkan single vs item bulk; tanpa filter = perilaku lama.
   // ---------------------------------------------------------------------------
-  async list(user: AuthedUser, status?: string) {
+  async list(
+    user: AuthedUser,
+    status?: string,
+    opts: { transferMode?: string; batchId?: number } = {},
+  ) {
     const role = user.role;
     const params: any[] = [];
     let where = "WHERE 1=1";
@@ -1072,6 +1102,22 @@ export class TransfersService {
       where += ` AND t.status = $${params.length}`;
     }
 
+    const mode = (opts.transferMode ?? "").toUpperCase();
+    if (mode === "SINGLE") {
+      where += ` AND t.batch_id IS NULL`;
+    } else if (mode === "BULK_ITEM") {
+      where += ` AND t.batch_id IS NOT NULL`;
+    } else if (mode && mode !== "ALL") {
+      throw new BadRequestException(
+        "transfer_mode harus salah satu dari: all, single, bulk_item",
+      );
+    }
+
+    if (opts.batchId !== undefined) {
+      params.push(opts.batchId);
+      where += ` AND t.batch_id = $${params.length}`;
+    }
+
     const q = await this.pool.query(
       `SELECT
          t.id, t.partner_reference_no, t.reference_no, t.sender_application_id,
@@ -1079,7 +1125,7 @@ export class TransfersService {
          t.beneficiary_account_name, t.beneficiary_account_number,
          t.beneficiary_bank_code, t.beneficiary_bank_name,
          t.beneficiary_relationship_to_sender,
-         t.batch_id,
+         t.batch_id, tb.batch_no, tb.bulk_reference_no,
          t.status, t.result, t.created_at, t.submitted_at, t.approved_at,
          t.completed_at, t.failed_at,
          t.source_of_funds, t.transaction_purpose,
@@ -1092,6 +1138,7 @@ export class TransfersService {
        LEFT JOIN applications a ON a.id = t.sender_application_id
        LEFT JOIN persons p ON p.id = a.person_id
        LEFT JOIN business_entities b ON b.id = a.business_id
+       LEFT JOIN transfer_batches tb ON tb.id = t.batch_id
        LEFT JOIN LATERAL (
          SELECT status FROM transfer_compliance_reviews
           WHERE transfer_id = t.id ORDER BY id DESC LIMIT 1
@@ -1103,6 +1150,139 @@ export class TransfersService {
     );
 
     return q.rows;
+  }
+
+  // ---------------------------------------------------------------------------
+  // BULK BATCH LIST/DETAIL — satu baris per batch (bukan per transfer anak).
+  // Hak baca sama dengan list transfer; FrontDesk hanya batch buatannya sendiri.
+  // ---------------------------------------------------------------------------
+  private static readonly BATCH_STATUS_KEYS = [
+    "DRAFT",
+    "SUBMITTED",
+    "PENDING_COMPLIANCE_REVIEW",
+    "PENDING_FINANCE_STAFF_REVIEW",
+    "PENDING_FINANCE_MANAGER_APPROVAL",
+    "COMPLETED",
+    "REJECTED",
+  ];
+
+  // Kunci wajib selalu ada (nol bila tidak dipakai); status di luar daftar
+  // (mis. APPROVED) tetap disertakan agar jumlah tidak hilang.
+  private buildStatusSummary(counts: Record<string, any> | null) {
+    const summary: Record<string, number> = {};
+    for (const key of TransfersService.BATCH_STATUS_KEYS) summary[key] = 0;
+    for (const [status, cnt] of Object.entries(counts ?? {})) {
+      summary[status] = Number(cnt);
+    }
+    return summary;
+  }
+
+  private batchSelectSql(where: string, tail = "") {
+    return `SELECT tb.id, tb.batch_no, tb.bulk_reference_no, tb.sender_application_id,
+                   tb.total_count, tb.total_amount, tb.status, tb.created_by,
+                   tb.created_at, tb.updated_at,
+                   COALESCE(p.full_name, b.legal_name) AS sender_display_name,
+                   sc.counts
+            FROM transfer_batches tb
+            LEFT JOIN applications a ON a.id = tb.sender_application_id
+            LEFT JOIN persons p ON p.id = a.person_id
+            LEFT JOIN business_entities b ON b.id = a.business_id
+            LEFT JOIN LATERAL (
+              SELECT json_object_agg(s.status, s.cnt) AS counts
+              FROM (
+                SELECT t.status::text AS status, COUNT(*)::int AS cnt
+                FROM transfers t WHERE t.batch_id = tb.id GROUP BY t.status
+              ) s
+            ) sc ON true
+            ${where}
+            ${tail}`;
+  }
+
+  private mapBatchRow(row: any) {
+    const { counts, ...batch } = row;
+    return { ...batch, status_summary: this.buildStatusSummary(counts) };
+  }
+
+  async listBulkBatches(
+    user: AuthedUser,
+    filters: {
+      q?: string;
+      date_from?: string;
+      date_to?: string;
+      page?: number;
+      limit?: number;
+    } = {},
+  ) {
+    const page = Math.max(1, Number(filters.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(filters.limit) || 20));
+    const offset = (page - 1) * limit;
+
+    const params: any[] = [];
+    let where = "WHERE 1=1";
+
+    if (user.role === "FrontDesk") {
+      params.push(resolveUserId(user));
+      where += ` AND (tb.created_by = $${params.length} OR tb.created_by IS NULL)`;
+    }
+
+    const q = (filters.q ?? "").trim();
+    if (q) {
+      params.push(`%${q}%`);
+      where += ` AND (tb.batch_no ILIKE $${params.length}
+                      OR COALESCE(tb.bulk_reference_no, '') ILIKE $${params.length}
+                      OR COALESCE(p.full_name, b.legal_name, '') ILIKE $${params.length})`;
+    }
+    if (filters.date_from) {
+      params.push(filters.date_from);
+      where += ` AND tb.created_at >= $${params.length}`;
+    }
+    if (filters.date_to) {
+      params.push(filters.date_to);
+      where += ` AND tb.created_at <= $${params.length}`;
+    }
+
+    const countQ = await this.pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM transfer_batches tb
+       LEFT JOIN applications a ON a.id = tb.sender_application_id
+       LEFT JOIN persons p ON p.id = a.person_id
+       LEFT JOIN business_entities b ON b.id = a.business_id
+       ${where}`,
+      params,
+    );
+
+    const dataQ = await this.pool.query(
+      this.batchSelectSql(where, `ORDER BY tb.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`),
+      [...params, limit, offset],
+    );
+
+    return {
+      data: dataQ.rows.map((r) => this.mapBatchRow(r)),
+      page,
+      limit,
+      total: countQ.rows[0].total,
+    };
+  }
+
+  async getBulkBatchById(id: number, user: AuthedUser) {
+    const q = await this.pool.query(this.batchSelectSql("WHERE tb.id = $1"), [id]);
+    if ((q.rowCount ?? 0) === 0) {
+      throw new NotFoundException("Transfer batch not found");
+    }
+    const batch = this.mapBatchRow(q.rows[0]);
+
+    // FrontDesk hanya boleh melihat batch yang dia buat (sama seperti list transfer).
+    if (user.role === "FrontDesk") {
+      const creator = batch.created_by === null ? null : String(batch.created_by);
+      if (creator !== null && creator !== String(resolveUserId(user))) {
+        throw new ForbiddenException("Not allowed");
+      }
+    }
+
+    // Baris transfer anak memakai shape yang sama dengan list transfer.
+    const transfers = await this.list(user, undefined, { batchId: id });
+
+    return { batch, transfers };
   }
 
   // ---------------------------------------------------------------------------
@@ -1122,11 +1302,13 @@ export class TransfersService {
               COALESCE(p.full_name, b.legal_name) AS sender_name,
               CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS sender_cif_no,
               p.cif_relationship_type AS sender_cif_relationship_type,
-              a.type                              AS sender_type
+              a.type                              AS sender_type,
+              tb.batch_no, tb.bulk_reference_no
        FROM transfers t
        LEFT JOIN applications a ON a.id = t.sender_application_id
        LEFT JOIN persons p ON p.id = a.person_id
        LEFT JOIN business_entities b ON b.id = a.business_id
+       LEFT JOIN transfer_batches tb ON tb.id = t.batch_id
        WHERE t.id=$1`,
       [id],
     );
