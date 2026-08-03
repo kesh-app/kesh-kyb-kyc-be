@@ -42,6 +42,16 @@ type IngestRow = {
   description?: string | null;
 };
 
+// Peringatan duplikat nama — informasi saja, tidak pernah memblokir baris.
+type DuplicateWarning = {
+  row?: number;
+  name: string;
+  list_type: string;
+  unique_id: string | null;
+  existing_unique_ids: (string | null)[];
+  message: string;
+};
+
 @Injectable()
 export class WatchlistService {
   constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
@@ -308,25 +318,67 @@ export class WatchlistService {
       r.description,        // $38
     ];
 
+    const sanctionNo = r.sanction_number?.trim() || null;
+
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
 
-      // Cari existing: coba via upper(unique_id) dulu, fallback ke natural_key
+      // Urutan kunci duplikat (lihat migration 0059):
+      //   1. list_type + unique_id       — kunci utama
+      //   2. list_type + sanction_number — kunci sekunder
+      // Nama SENGAJA tidak pernah jadi kunci dedup: dua orang berbeda bisa
+      // bernama sama pada daftar sanksi. Kemiripan nama hanya jadi warning.
+      // natural_key juga tidak lagi dipakai mencari existing — lihat catatan
+      // pada migration 0059.
       let existingId: number | null = null;
+      let matchedBy: "UNIQUE_ID" | "SANCTION_NUMBER" | null = null;
+
       if (uid) {
         const { rows } = await client.query(
-          `SELECT id FROM watchlist_entries WHERE upper(unique_id) = upper($1) LIMIT 1`,
-          [uid],
+          `SELECT id FROM watchlist_entries
+            WHERE list_type = $1 AND upper(unique_id) = upper($2) LIMIT 1`,
+          [r.list_type, uid],
         );
-        if (rows[0]) existingId = rows[0].id;
+        if (rows[0]) {
+          existingId = rows[0].id;
+          matchedBy = "UNIQUE_ID";
+        }
       }
+      if (!existingId && sanctionNo) {
+        const { rows } = await client.query(
+          `SELECT id FROM watchlist_entries
+            WHERE list_type = $1 AND upper(sanction_number) = upper($2) LIMIT 1`,
+          [r.list_type, sanctionNo],
+        );
+        if (rows[0]) {
+          existingId = rows[0].id;
+          matchedBy = "SANCTION_NUMBER";
+        }
+      }
+      // Kandidat duplikat nama (hanya bila baris ini benar-benar baris baru):
+      // list_type + nama + tanggal lahir + kewarganegaraan cocok, tapi
+      // unique_id/sanction_number berbeda → tidak diblokir, cukup diperingatkan.
+      let nameWarning: DuplicateWarning | null = null;
       if (!existingId) {
         const { rows } = await client.query(
-          `SELECT id FROM watchlist_entries WHERE natural_key = $1 LIMIT 1`,
-          [natural_key],
+          `SELECT unique_id FROM watchlist_entries
+            WHERE list_type = $1 AND name_norm = $2
+              AND date_of_birth IS NOT DISTINCT FROM $3::date
+              AND upper(COALESCE(nationality,'')) = upper(COALESCE($4,''))
+            LIMIT 5`,
+          [r.list_type, name_norm, r.date_of_birth || null, r.nationality],
         );
-        if (rows[0]) existingId = rows[0].id;
+        if (rows.length) {
+          nameWarning = {
+            name: r.full_name || r.entity_name || name_norm || "",
+            list_type: r.list_type,
+            unique_id: uid,
+            existing_unique_ids: rows.map((x: any) => x.unique_id),
+            message:
+              "Kemungkinan duplikat nama ditemukan, perlu review manual.",
+          };
+        }
       }
 
       if (existingId) {
@@ -371,6 +423,11 @@ export class WatchlistService {
       }
 
       await client.query("COMMIT");
+      return {
+        action: existingId ? ("updated" as const) : ("inserted" as const),
+        matched_by: matchedBy,
+        warning: nameWarning,
+      };
     } catch (e) {
       await client.query("ROLLBACK");
       throw e;
@@ -393,6 +450,9 @@ export class WatchlistService {
       );
 
     let successRows = 0;
+    let insertedCount = 0;
+    let updatedCount = 0;
+    const duplicateWarnings: DuplicateWarning[] = [];
     const rowErrors: { row: number; message: string }[] = [];
 
     for (let i = 0; i < rows.length; i++) {
@@ -408,8 +468,12 @@ export class WatchlistService {
             `Watchlist_Type (${r.watchlist_type}) tidak cocok dengan Jenis List yang dipilih (${list_type}).`,
           );
         }
-        await this.upsertRow(r);
+        const res = await this.upsertRow(r);
         successRows++;
+        if (res.action === "updated") updatedCount++;
+        else insertedCount++;
+        if (res.warning)
+          duplicateWarnings.push({ ...res.warning, row: fileLine });
       } catch (err: any) {
         rowErrors.push({ row: fileLine, message: err.message });
       }
@@ -456,6 +520,14 @@ export class WatchlistService {
       error_count: rowErrors.length,
       errors: errorMessage, // string gabungan (backward-compat), null bila tak ada
       row_errors: rowErrors, // detail per-baris: [{ row, message }]
+      // ── Ringkasan duplikat ────────────────────────────────────────────────
+      inserted_count: insertedCount,
+      updated_count: updatedCount, // baris yang menimpa entri lama (bukan duplikat baru)
+      // Tidak ada baris yang dibuang diam-diam: yang tidak masuk pasti punya
+      // alasan di row_errors, jadi skipped_count mencerminkan baris tsb.
+      skipped_count: rowErrors.length,
+      warning_count: duplicateWarnings.length,
+      duplicate_warnings: duplicateWarnings,
       log: { uploaded_by: logRes.rows[0]?.uploaded_by ?? null },
     };
   }

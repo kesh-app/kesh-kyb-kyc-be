@@ -43,6 +43,23 @@ Sumber hash (dinormalisasi: trim → uppercase → string kosong bila null → j
   (`list_type` + `list_source` + nama + `Date_of_Birth`). Unique_ID eksplisit yang sudah
   ada tidak akan tertimpa oleh ID auto-generate.
 
+## Konversi file DTTOT PPATK → template KESH
+
+File DTTOT asli (sheet `Export`, kolom `Nama`/`Deskripsi`/`Terduga`/`Kode Densus`/…)
+menggabungkan nama utama dan alias dalam satu kolom `Nama`. Converter:
+
+```bash
+node scripts/convert-dttot-to-kesh-template.cjs <sumber.xlsx> [output.xlsx]
+```
+
+`Nama` dipecah pada penanda alias (`alias`/`aka`/`a.k.a`/`dikenal sebagai`, juga `;`) →
+nama pertama jadi `Full_Name` (Terduga = Orang) atau `Entity_Name` (Korporasi), sisanya
+jadi `Alias_Name` dipisah `; `. `Kode Densus` → `Unique_ID` (`DTTOT-<kode>`) +
+`Sanction_Number`. Tanggal lahir hanya masuk `Date_of_Birth` bila berupa satu tanggal
+`DD/MM/YYYY` yang valid; `00/00/YYYY`, `-`, dan "X atau Y" masuk `Raw_Date_of_Birth`
+apa adanya (tanggal tidak pernah ditebak). Semua sel ditulis sebagai teks agar Excel
+tidak menggeser tanggal lewat serial number.
+
 ## Watchlist Template v3 (kolom opsional tambahan)
 
 Semua kolom v3 **opsional** dan hanya untuk **audit / traceability / persiapan

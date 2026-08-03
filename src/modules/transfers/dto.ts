@@ -221,6 +221,9 @@ export const TRANSFER_RED_FLAG_CODES = [
   'RBA_HIGH',
   'RBA_INCOMPLETE',
   'WATCHLIST_NEAR_MATCH',
+  // Diisi otomatis oleh screening beneficiary saat submit (bukan input manual).
+  'WATCHLIST_HIT',
+  'DTTOT_HIT',
   'DOCUMENT_OR_INFORMATION_UNUSUAL',
   'OTHER',
 ] as const;

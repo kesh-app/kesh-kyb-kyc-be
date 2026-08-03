@@ -835,6 +835,54 @@ export class MonitoringService {
       });
     }
 
+    // ── LTKM: beneficiary transfer cocok watchlist (screening saat submit) ──
+    // Memakai rule_code yang sudah ada agar dedup case & rendering alert existing
+    // langsung berlaku. Guard `some(...)`: bila trigger dari risk factor pengirim
+    // sudah menyala dengan kode yang sama, jangan tambahkan duplikat di satu array.
+    const { rows: wlHits } = await this.pool.query(
+      `SELECT DISTINCT list_type, matched_name FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+      [ctx.id],
+    );
+    if (wlHits.length) {
+      const byList = (types: string[]) =>
+        wlHits.filter((h) => types.includes(String(h.list_type).toUpperCase()));
+      const names = (rows: any[]) => rows.map((h) => h.matched_name).filter(Boolean);
+
+      const sanctionBene = byList(["DTTOT", "PPPSPM"]);
+      if (
+        sanctionBene.length &&
+        !triggers.some((t) => t.rule_code === "LTKM_SANCTION_RELATED")
+      ) {
+        triggers.push({
+          trigger_type: "LTKM",
+          rule_code: "LTKM_SANCTION_RELATED",
+          rule_name: "Penerima transfer terkait DTTOT/PPPSPM",
+          severity: "CRITICAL",
+          details: {
+            risk_factors: names(sanctionBene),
+            source: "BENEFICIARY_WATCHLIST_SCREENING",
+          },
+        });
+      }
+
+      const pepBene = byList(["PEP"]);
+      if (
+        pepBene.length &&
+        !triggers.some((t) => t.rule_code === "LTKM_PEP_RELATED")
+      ) {
+        triggers.push({
+          trigger_type: "LTKM",
+          rule_code: "LTKM_PEP_RELATED",
+          rule_name: "Penerima transfer terkait PEP",
+          severity: "HIGH",
+          details: {
+            risk_factors: names(pepBene),
+            source: "BENEFICIARY_WATCHLIST_SCREENING",
+          },
+        });
+      }
+    }
+
     // ── LTKM: EDD recommend LTKM ──
     if (ctx.application_id) {
       const { rows: eddRows } = await this.pool.query(

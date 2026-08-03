@@ -115,16 +115,24 @@ export class ApplicationsController {
   // detail aplikasi sdh ada; tambahkan endpoint hasil screening & risk
   @Get(":id/screening")
   async screening(@Param("id", ParseIntPipe) appId: number) {
-    const { rows: results } = await this.svc["pool"].query(
-      `SELECT subject_type, subject_ref, list_type, watchlist_id, matched_name, matched_dob, matched_nationality, score, created_at
-     FROM screening_results WHERE application_id=$1 ORDER BY score DESC, created_at DESC`,
-      [appId]
-    );
+    // Bentuk hit sengaja sama dengan yang dikembalikan detail aplikasi
+    // supaya kedua endpoint tidak pernah bercerita berbeda.
+    const results = await this.svc.getScreeningHits(appId);
     const { rows: risk } = await this.svc["pool"].query(
       `SELECT application_id, risk_score::float AS risk_score, risk_level, factors, risk_factors, created_at FROM application_risk WHERE application_id=$1`,
       [appId]
     );
     return { results, risk: risk[0] || null };
+  }
+
+  // Re-screen manual setelah upload watchlist baru (tidak ada auto re-screen massal).
+  @Roles("ComplianceLead", "SystemAdmin", "Director")
+  @Post(":id/rescreen-watchlist")
+  async rescreenWatchlist(
+    @Param("id", ParseIntPipe) appId: number,
+    @Req() req: any,
+  ) {
+    return this.svc.rescreenWatchlist(appId, req.user.sub, req.ip);
   }
 
   @Get(":id/documents")

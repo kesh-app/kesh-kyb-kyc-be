@@ -12,7 +12,31 @@ import { computeRbaV01, INDUSTRY_MAP, type RbaInput } from "./rba-v01.engine";
 // ─── Internal Preliminary Risk Scoring — RBA v2 ────────────────────────────
 // Bukan formula resmi BI. Dipakai sebagai dasar review compliance internal.
 
-const SIMILARITY_THRESHOLD = 0.35;
+// Di-export agar screening beneficiary transfer memakai ambang yang sama
+// (satu kebijakan matching untuk aplikasi & transfer).
+export const SIMILARITY_THRESHOLD = 0.35;
+
+// Di atas ambang ini similarity dianggap match pasti (exact/high-confidence),
+// bukan sekadar "mirip". Di bawahnya hit masih perlu review manual → NEAR_MATCH.
+export const EXACT_MATCH_THRESHOLD = 0.95;
+
+/**
+ * Klasifikasi satu hit screening menjadi status name screening.
+ *   CLEAR      → sudah di-clear reviewer (FALSE_POSITIVE / DISMISSED)
+ *   MATCH      → CONFIRMED reviewer, ATAU similarity ≥ EXACT_MATCH_THRESHOLD
+ *   NEAR_MATCH → mirip tapi belum pasti, perlu review
+ * Dipakai bersama oleh RBA name screening, ringkasan watchlist Business,
+ * dan blocking approval agar tidak ada dua definisi "match" yang berbeda.
+ */
+export function classifyScreeningHit(
+  reviewStatus: string | null | undefined,
+  topScore: number | null | undefined,
+): "CLEAR" | "NEAR_MATCH" | "MATCH" {
+  const rs = reviewStatus ?? "UNREVIEWED";
+  if (["FALSE_POSITIVE", "DISMISSED"].includes(rs)) return "CLEAR";
+  if (rs === "CONFIRMED") return "MATCH";
+  return Number(topScore ?? 0) >= EXACT_MATCH_THRESHOLD ? "MATCH" : "NEAR_MATCH";
+}
 
 // Bobot per faktor (satuan poin, cap total 100)
 const W = {
@@ -1321,8 +1345,8 @@ export class ApplicationsService {
    * Ringkasan status watchlist Business per kategori: perusahaan, pengurus,
    * pemegang saham. Murni baca dari screening_results yang sudah ada (tidak
    * mengubah perhitungan risk). Default CLEAR bila belum ada screening.
-   *   MATCH      → ada hit CONFIRMED
-   *   NEAR_MATCH → ada hit yang belum di-clear (bukan FALSE_POSITIVE/DISMISSED)
+   *   MATCH      → hit CONFIRMED atau exact (skor ≥ EXACT_MATCH_THRESHOLD)
+   *   NEAR_MATCH → hit mirip yang belum di-clear & belum pasti
    *   CLEAR      → tidak ada hit relevan
    */
   private async getBusinessWatchlistStatuses(appId: number) {
@@ -1335,6 +1359,7 @@ export class ApplicationsService {
     const { rows } = await this.pool.query(
       `SELECT sr.subject_type,
               COALESCE(sr.review_status::text, 'UNREVIEWED') AS review_status,
+              sr.score::float AS score,
               bp.role
          FROM screening_results sr
          LEFT JOIN business_parties bp
@@ -1344,11 +1369,6 @@ export class ApplicationsService {
     );
 
     const rank: Record<string, number> = { CLEAR: 0, NEAR_MATCH: 1, MATCH: 2 };
-    const classify = (review_status: string) => {
-      if (["FALSE_POSITIVE", "DISMISSED"].includes(review_status))
-        return "CLEAR";
-      return review_status === "CONFIRMED" ? "MATCH" : "NEAR_MATCH";
-    };
     const bump = (key: keyof typeof result, status: string) => {
       if (rank[status] > rank[result[key]]) result[key] = status;
     };
@@ -1357,7 +1377,7 @@ export class ApplicationsService {
     const SHAREHOLDERS = ["SHAREHOLDER", "BO"];
 
     for (const r of rows) {
-      const status = classify(r.review_status);
+      const status = classifyScreeningHit(r.review_status, r.score);
       if (status === "CLEAR") continue;
       if (r.subject_type === "BUSINESS") {
         bump("company_watchlist_status", status);
@@ -1370,6 +1390,53 @@ export class ApplicationsService {
     }
 
     return result;
+  }
+
+  /**
+   * Hit watchlist milik satu aplikasi, siap dipakai FE.
+   * Baca murni dari screening_results (tidak menjalankan screening ulang).
+   * input_name/matched_field/unique_id diturunkan lewat join — tidak ada kolom
+   * baru, jadi row screening lama ikut tampil benar tanpa backfill.
+   */
+  async getScreeningHits(appId: number) {
+    const norm = `upper(regexp_replace(COALESCE(sr.input_name, ''), '\\s+', ' ', 'g'))`;
+    const { rows } = await this.pool.query(
+      `WITH sr AS (
+         SELECT s.*, COALESCE(p.full_name, b.legal_name, pp.full_name) AS input_name
+           FROM screening_results s
+           LEFT JOIN persons p
+             ON s.subject_type = 'INDIVIDUAL' AND p.id = s.subject_ref
+           LEFT JOIN business_entities b
+             ON s.subject_type = 'BUSINESS' AND b.id = s.subject_ref
+           LEFT JOIN business_parties bp
+             ON s.subject_type = 'PARTY' AND bp.id = s.subject_ref
+           LEFT JOIN persons pp ON pp.id = bp.person_id
+          WHERE s.application_id = $1
+       )
+       SELECT sr.id, sr.list_type, sr.input_name, sr.matched_name,
+              CASE
+                WHEN w.id IS NULL THEN NULL
+                WHEN w.aliases_concat IS NOT NULL
+                     AND similarity(w.aliases_concat, ${norm})
+                       > similarity(w.name_norm, ${norm})      THEN 'ALIAS_NAME'
+                WHEN w.full_name IS NOT NULL                    THEN 'FULL_NAME'
+                WHEN w.entity_name IS NOT NULL                  THEN 'ENTITY_NAME'
+                ELSE 'FULL_NAME'
+              END                                              AS matched_field,
+              sr.score::float                                  AS match_score,
+              w.unique_id, sr.subject_type, sr.subject_ref, sr.watchlist_id,
+              sr.matched_dob, sr.matched_nationality,
+              COALESCE(sr.review_status::text, 'UNREVIEWED')   AS review_status,
+              sr.created_at
+         FROM sr
+         LEFT JOIN watchlist_entries w ON w.id = sr.watchlist_id
+        ORDER BY sr.score DESC NULLS LAST, sr.created_at DESC`,
+      [appId],
+    );
+    return rows.map((r) => ({
+      ...r,
+      status: classifyScreeningHit(r.review_status, r.match_score),
+    }));
   }
 
   async getDetail(appId: number) {
@@ -1500,6 +1567,13 @@ export class ApplicationsService {
         }
       : { edd_required: false, edd_completed: false };
 
+    // Hit watchlist — additive. FE menampilkan section screening dari sini,
+    // jadi hit yang sudah tersimpan tidak lagi terbaca sebagai "tidak ada match".
+    const screening = await this.getScreeningHits(appId);
+    const sanctionBlocking = screening.some(
+      (h) => h.status === "MATCH" && ["DTTOT", "PPPSPM"].includes(h.list_type),
+    );
+
     return {
       application: app,
       person,
@@ -1508,6 +1582,21 @@ export class ApplicationsService {
       parties,
       risk,
       edd,
+      screening,
+      watchlist_summary: {
+        has_hit: screening.some((h) => h.status !== "CLEAR"),
+        status: screening.some((h) => h.status === "MATCH")
+          ? "MATCH"
+          : screening.some((h) => h.status === "NEAR_MATCH")
+            ? "NEAR_MATCH"
+            : "CLEAR",
+        list_types: [
+          ...new Set(
+            screening.filter((h) => h.status !== "CLEAR").map((h) => h.list_type),
+          ),
+        ],
+        compliance_blocking: sanctionBlocking,
+      },
     };
   }
 
@@ -1757,48 +1846,84 @@ export class ApplicationsService {
     }
 
     // ── 3. Bersihkan screening lama & jalankan screening baru ──
-    await this.pool.query(
-      `DELETE FROM screening_results WHERE application_id=$1`,
-      [appId],
-    );
+    // Delete-then-insert dalam SATU transaksi: tanpa ini pembaca yang kebetulan
+    // masuk di antara DELETE dan INSERT melihat aplikasi bersanksi sebagai bersih.
+    // Keputusan reviewer (FALSE_POSITIVE/DISMISSED/CONFIRMED) dibawa maju per
+    // (watchlist_id, subject_ref) supaya re-screen tidak menghidupkan lagi hit
+    // yang sudah di-clear manual.
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
 
-    for (const s of subjects) {
-      const expr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
-      const { rows: candidates } = await this.pool.query(
-        `SELECT id, list_type, name, date_of_birth, nationality,
-                similarity(name_norm, ${expr}) AS score
-         FROM watchlist_entries
-         WHERE name_norm % ${expr}
-            OR (aliases_concat IS NOT NULL AND aliases_concat % ${expr})
-         ORDER BY score DESC LIMIT 30`,
-        [s.name],
+      const { rows: priorRows } = await client.query(
+        `SELECT watchlist_id, subject_ref, review_status::text AS review_status,
+                review_notes, reviewed_by, reviewed_at
+           FROM screening_results
+          WHERE application_id=$1 AND review_status::text <> 'OPEN'`,
+        [appId],
       );
-      for (const c of candidates) {
-        if (Number(c.score) < SIMILARITY_THRESHOLD) continue;
-        // entity_ref CHECK constraint: 'PERSON' | 'BUSINESS' | 'BO'
-        const entityRef = s.subject_type === "BUSINESS" ? "BUSINESS" : "PERSON";
+      const priorReview = new Map(
+        priorRows.map((r: any) => [`${r.watchlist_id}:${r.subject_ref}`, r]),
+      );
 
-        await this.pool.query(
-          `INSERT INTO screening_results
-             (application_id, subject_type, entity_ref, subject_ref, ref_id,
-              list_type, watchlist_id,
-              matched_name, matched_dob, matched_nationality, score)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-          [
-            appId,
-            s.subject_type,
-            entityRef,
-            s.ref || null,
-            s.ref,
-            c.list_type,
-            c.id,
-            c.name,
-            c.date_of_birth || null,
-            c.nationality || null,
-            c.score,
-          ],
+      await client.query(
+        `DELETE FROM screening_results WHERE application_id=$1`,
+        [appId],
+      );
+
+      for (const s of subjects) {
+        const expr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
+        const { rows: candidates } = await client.query(
+          `SELECT id, list_type, name, date_of_birth, nationality,
+                  similarity(name_norm, ${expr}) AS score
+           FROM watchlist_entries
+           WHERE name_norm % ${expr}
+              OR (aliases_concat IS NOT NULL AND aliases_concat % ${expr})
+           ORDER BY score DESC LIMIT 30`,
+          [s.name],
         );
+        for (const c of candidates) {
+          if (Number(c.score) < SIMILARITY_THRESHOLD) continue;
+          // entity_ref CHECK constraint: 'PERSON' | 'BUSINESS' | 'BO'
+          const entityRef =
+            s.subject_type === "BUSINESS" ? "BUSINESS" : "PERSON";
+          const prior = priorReview.get(`${c.id}:${s.ref ?? null}`);
+
+          await client.query(
+            `INSERT INTO screening_results
+               (application_id, subject_type, entity_ref, subject_ref, ref_id,
+                list_type, watchlist_id,
+                matched_name, matched_dob, matched_nationality, score,
+                review_status, review_notes, reviewed_by, reviewed_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                     COALESCE($12,'OPEN')::screen_review_status,$13,$14,$15)`,
+            [
+              appId,
+              s.subject_type,
+              entityRef,
+              s.ref || null,
+              s.ref,
+              c.list_type,
+              c.id,
+              c.name,
+              c.date_of_birth || null,
+              c.nationality || null,
+              c.score,
+              prior?.review_status ?? null,
+              prior?.review_notes ?? null,
+              prior?.reviewed_by ?? null,
+              prior?.reviewed_at ?? null,
+            ],
+          );
+        }
       }
+
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
     }
 
     // ── 4. Baca kembali hasil screening dikelompokkan ──
@@ -1815,16 +1940,21 @@ export class ApplicationsService {
     );
 
     // Derive overall screening status for RBA V01 Name Screening parameter.
-    // Rank: MATCH > NEAR_MATCH > CLEAR. Ignored statuses (FALSE_POSITIVE/DISMISSED) count as CLEAR.
+    // Rank: MATCH > NEAR_MATCH > CLEAR. Exact/high-confidence hit dihitung MATCH
+    // walaupun belum direview manual — hit DTTOT 1.000 bukan "near match".
     const _nsRank: Record<string, number> = {
       CLEAR: 0,
       NEAR_MATCH: 1,
       MATCH: 2,
     };
     let rbaNameScreeningResult = "CLEAR";
+    // Sanction (DTTOT/PPPSPM) dengan status MATCH → compliance-blocking.
+    let hasSanctionMatch = false;
     for (const h of hitRows) {
-      if (["FALSE_POSITIVE", "DISMISSED"].includes(h.review_status)) continue;
-      const s = h.review_status === "CONFIRMED" ? "MATCH" : "NEAR_MATCH";
+      const s = classifyScreeningHit(h.review_status, h.top_score);
+      if (s === "CLEAR") continue;
+      if (s === "MATCH" && ["DTTOT", "PPPSPM"].includes(h.list_type))
+        hasSanctionMatch = true;
       if (_nsRank[s] > _nsRank[rbaNameScreeningResult])
         rbaNameScreeningResult = s;
     }
@@ -2129,8 +2259,9 @@ export class ApplicationsService {
       "INDIVIDUAL_PEP_SELF_DECLARED",
     ];
     const hasPep = riskFactors.some((f) => PEP_RISK_CODES.includes(f.code));
-    if (hasPep) score = Math.max(score, 70);
-    const risk_level = hasPep ? "HIGH" : levelOf(score);
+    // Hit DTTOT/PPPSPM yang exact atau sudah CONFIRMED = sanksi → HIGH mutlak.
+    if (hasPep || hasSanctionMatch) score = Math.max(score, 70);
+    const risk_level = hasPep || hasSanctionMatch ? "HIGH" : levelOf(score);
 
     // ── 11. Legacy factors (backward compat untuk kolom factors) ──
     const hitSummary = hitRows
@@ -2207,13 +2338,22 @@ export class ApplicationsService {
     }
 
     // ── 13. Simpan ke DB ──────────────────────────────────────────────────────
-    const finalRiskScore =
+    const rbaComplete =
       rbaResult?.rba_calculation_status === "COMPLETE" &&
-      rbaResult.rba_score_v01 !== null
-        ? Math.round((rbaResult.rba_score_v01 / 3) * 100)
-        : score;
-    const finalRiskLevel =
-      rbaResult?.rba_calculation_status === "COMPLETE" && rbaResult.risk_level
+      rbaResult.rba_score_v01 !== null;
+    // Skor RBA yang COMPLETE dipakai apa adanya, KECUALI saat hit sanksi memaksa
+    // level HIGH — skor harus ikut minimal ambang HIGH (70) supaya kartu risk di
+    // UI tidak menampilkan "HIGH / 67" yang saling bertentangan.
+    const finalRiskScore = Math.max(
+      rbaComplete ? Math.round((rbaResult!.rba_score_v01! / 3) * 100) : score,
+      hasSanctionMatch ? 70 : 0,
+    );
+    // Bobot Name Screening di RBA V01 hanya 0.01 sehingga hit sanksi tidak pernah
+    // membuat skor RBA sendiri jadi HIGH. Karena itu hit DTTOT/PPPSPM di-override
+    // eksplisit ke HIGH (pola yang sama dengan hasPep pada scoring legacy).
+    const finalRiskLevel = hasSanctionMatch
+      ? "HIGH"
+      : rbaResult?.rba_calculation_status === "COMPLETE" && rbaResult.risk_level
         ? rbaResult.risk_level
         : risk_level;
 
@@ -2258,6 +2398,45 @@ export class ApplicationsService {
       rba_calculation_status: rbaResult?.rba_calculation_status ?? "INCOMPLETE",
       rba_unmapped_parameters: rbaResult?.rba_unmapped_parameters ?? [],
       rba_components: rbaResult?.rba_components ?? {},
+    };
+  }
+
+  /**
+   * Re-screen manual — dipakai setelah upload watchlist baru agar aplikasi lama
+   * ikut dievaluasi ulang. Tidak ada auto re-screen massal di fase ini.
+   */
+  async rescreenWatchlist(appId: number, actorId: number, ip?: string) {
+    const before = await this.getScreeningHits(appId);
+    const risk = await this.screenAndComputeRisk(appId);
+    const after = await this.getScreeningHits(appId);
+
+    await this.pool.query(
+      `INSERT INTO audit_logs(actor_id, action, object_type, object_id, before_json, after_json, ip)
+       VALUES ($1,'APPLICATION_RESCREEN_WATCHLIST','APPLICATION',$2,$3,$4,$5)`,
+      [
+        actorId,
+        String(appId),
+        JSON.stringify({ screening: before }),
+        JSON.stringify({ screening: after, risk_level: risk.risk_level }),
+        ip ?? null,
+      ],
+    );
+
+    return {
+      application_id: appId,
+      screening: after,
+      hit_count: after.filter((h) => h.status !== "CLEAR").length,
+      status: after.some((h) => h.status === "MATCH")
+        ? "MATCH"
+        : after.some((h) => h.status === "NEAR_MATCH")
+          ? "NEAR_MATCH"
+          : "CLEAR",
+      compliance_blocking: after.some(
+        (h) => h.status === "MATCH" && ["DTTOT", "PPPSPM"].includes(h.list_type),
+      ),
+      risk_level: risk.risk_level,
+      risk_score: risk.risk_score,
+      rba_calculation_status: risk.rba_calculation_status,
     };
   }
 
@@ -3192,6 +3371,26 @@ export class ApplicationsService {
     }
 
     if (decision === "APPROVED") {
+      // Blokir jika ada hit sanksi DTTOT/PPPSPM berstatus MATCH — CONFIRMED oleh
+      // reviewer ATAU exact match dari sistem (skor ≥ EXACT_MATCH_THRESHOLD).
+      // Reviewer tetap bisa membuka jalan dengan FALSE_POSITIVE/DISMISSED.
+      // Dicek sebelum EDD: sanksi memblokir approval terlepas dari status EDD.
+      const { rows: blockers } = await this.pool.query(
+        `SELECT id, list_type FROM screening_results
+         WHERE application_id = $1
+           AND list_type IN ('DTTOT','PPPSPM')
+           AND COALESCE(review_status::text,'UNREVIEWED')
+               NOT IN ('FALSE_POSITIVE','DISMISSED')
+           AND (review_status = 'CONFIRMED' OR score >= $2)
+         LIMIT 1`,
+        [appId, EXACT_MATCH_THRESHOLD],
+      );
+      if (blockers.length) {
+        throw new BadRequestException(
+          `Tidak dapat approve: terdapat ${blockers[0].list_type} hit. Lakukan review manual terlebih dahulu.`,
+        );
+      }
+
       // HIGH RISK wajib memiliki EDD lengkap sebelum approval Lead Compliance.
       const { rows: eddRows } = await this.pool.query(
         `SELECT edd_required, edd_completed FROM application_edd WHERE application_id=$1`,
@@ -3200,21 +3399,6 @@ export class ApplicationsService {
       if (effectiveLevel === "HIGH" && !eddRows[0]?.edd_completed) {
         throw new BadRequestException(
           "Application HIGH RISK wajib memiliki EDD lengkap sebelum disetujui.",
-        );
-      }
-
-      // Blokir jika ada CONFIRMED DTTOT/PPPSPM
-      const { rows: blockers } = await this.pool.query(
-        `SELECT id, list_type FROM screening_results
-         WHERE application_id = $1
-           AND review_status = 'CONFIRMED'
-           AND list_type IN ('DTTOT','PPPSPM')
-         LIMIT 1`,
-        [appId],
-      );
-      if (blockers.length) {
-        throw new BadRequestException(
-          `Tidak dapat approve: terdapat CONFIRMED ${blockers[0].list_type} hit. Lakukan review manual terlebih dahulu.`,
         );
       }
 
