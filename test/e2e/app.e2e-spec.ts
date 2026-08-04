@@ -3274,6 +3274,298 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   });
 
   // ══════════════════════════════════════════════════════════
+  // GU. KYB Business identity update — PATCH :id/business
+  // ══════════════════════════════════════════════════════════
+  describe('GU. KYB Business identity update', () => {
+    let guSeq = 0;
+    const uniq = () => `${SUFFIX}${(guSeq += 1)}`;
+
+    function bizBody(over: Record<string, unknown> = {}) {
+      const u = uniq();
+      return {
+        legal_name: `PT GU ${u}`,
+        legal_form: 'PT',
+        incorporation_place: 'Jakarta',
+        incorporation_date: '2018-03-03',
+        deed_establishment_number: `AKTA-GU-${u}`,
+        business_license_number: `IZN-GU-${u}`,
+        nib: `NIB-GU-${u}`,
+        npwp: npwp15(u),
+        address_line: 'Jl. GU No. 1',
+        city: 'Jakarta',
+        province: 'DKI Jakarta',
+        postal_code: '10110',
+        business_activity: 'Perdagangan Umum',
+        phone: `0218${u}`.slice(0, 15),
+        ...over,
+      };
+    }
+
+    async function createBiz(over: Record<string, unknown> = {}) {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(bizBody(over))
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    const patchBiz = (appId: string, body: any, token = frontDeskToken) =>
+      request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/business`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+
+    const detail = (appId: string) =>
+      request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+    it('GU-01: FrontDesk PATCH identitas badan usaha di DRAFT → 200 + audit log', async () => {
+      const appId = await createBiz();
+      const u = uniq();
+      const res = await patchBiz(appId, {
+        legal_name: `PT GU Edited ${u}`,
+        address_line: 'Jl. GU Revisi No. 99',
+        company_email: `gu${u}@perusahaan.co.id`,
+      }).expect(200);
+
+      expect(res.body.business.legal_name).toBe(`PT GU Edited ${u}`);
+      expect(res.body.business.address_line).toBe('Jl. GU Revisi No. 99');
+      expect(res.body.business.company_email).toBe(`gu${u}@perusahaan.co.id`);
+
+      const audit = await pgPool.query(
+        `SELECT action, after_json FROM audit_logs
+          WHERE object_type='APPLICATION' AND object_id=$1
+            AND action='APPLICATION_UPDATE_BUSINESS'`,
+        [String(appId)],
+      );
+      expect(audit.rowCount).toBe(1);
+      expect(audit.rows[0].after_json.changed_fields).toEqual(
+        expect.arrayContaining(['legal_name', 'address_line', 'company_email']),
+      );
+    });
+
+    it('GU-02: FrontDesk PATCH identitas badan usaha di REVISION_REQUIRED → 200', async () => {
+      const appId = await createBiz();
+      await pgPool.query(
+        `UPDATE applications SET status='REVISION_REQUIRED' WHERE id=$1`,
+        [appId],
+      );
+      const res = await patchBiz(appId, { city: 'Bandung' }).expect(200);
+      expect(res.body.business.city).toBe('Bandung');
+      expect(res.body.application.status).toBe('REVISION_REQUIRED');
+    });
+
+    // Trigger DB menolak status SUBMITTED/APPROVED bila dokumen wajib atau
+    // pengurus belum ada, jadi aplikasi harus dilengkapi sebelum status dipaksa.
+    async function completeKyb(appId: string) {
+      for (const docType of [
+        'AKTA_PENDIRIAN',
+        'NIB_SIUP',
+        'NPWP_BADAN',
+        'BUSINESS_MANAGEMENT_IDENTITY',
+      ]) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            doc_type: docType,
+            file_uri: `https://storage.test/docs/${docType}.pdf`,
+          })
+          .expect(201);
+      }
+      const u = uniq();
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/parties`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          role: 'DIRECTOR',
+          full_name: `Direktur GU ${u}`,
+          identity_type: 'KTP',
+          identity_number: `3277${u}`.slice(0, 16),
+          dob: '1980-01-01',
+          nationality: 'ID',
+          phone: `0817${u}`.slice(0, 15),
+        })
+        .expect(201);
+    }
+
+    it('GU-03: PATCH di status SUBMITTED / APPROVED → 400', async () => {
+      const appId = await createBiz();
+      await completeKyb(appId);
+      for (const status of ['SUBMITTED', 'APPROVED']) {
+        await pgPool.query(`UPDATE applications SET status=$2 WHERE id=$1`, [
+          appId,
+          status,
+        ]);
+        const res = await patchBiz(appId, { city: 'Surabaya' }).expect(400);
+        expect(res.body.message).toContain('DRAFT atau REVISION_REQUIRED');
+      }
+    });
+
+    it('GU-04: Auditor / FinanceStaff / OperationSupervisor tidak boleh PATCH → 403', async () => {
+      const appId = await createBiz();
+      for (const token of [
+        auditorToken,
+        financeStaffToken,
+        financeManagerToken,
+        operationSupervisorToken,
+      ]) {
+        await patchBiz(appId, { city: 'Medan' }, token).expect(403);
+      }
+      // Data tidak berubah.
+      const d = await detail(appId);
+      expect(d.body.business.city).toBe('Jakarta');
+    });
+
+    it('GU-05: PATCH mengubah baris business_entities yang sama, tidak membuat aplikasi baru', async () => {
+      const appId = await createBiz();
+      const before = await detail(appId);
+      const businessId = before.body.business.id;
+      const legalName = before.body.business.legal_name;
+
+      await patchBiz(appId, { phone: '0217770001' }).expect(200);
+
+      const after = await detail(appId);
+      expect(after.body.business.id).toBe(businessId);
+      expect(after.body.business.phone).toBe('0217770001');
+      // PATCH parsial: field yang tidak dikirim tetap utuh.
+      expect(after.body.business.legal_name).toBe(legalName);
+
+      const apps = await pgPool.query(
+        `SELECT id FROM applications WHERE business_id=$1`,
+        [businessId],
+      );
+      expect(apps.rowCount).toBe(1);
+      const biz = await pgPool.query(
+        `SELECT id FROM business_entities WHERE legal_name=$1`,
+        [legalName],
+      );
+      expect(biz.rowCount).toBe(1);
+    });
+
+    it('GU-06: PT — mengosongkan deed_establishment_number → 400', async () => {
+      const appId = await createBiz();
+      const res = await patchBiz(appId, {
+        deed_establishment_number: '   ',
+      }).expect(400);
+      expect(res.body.message).toBe(
+        'Nomor Akta Pendirian wajib diisi untuk badan usaha PT.',
+      );
+      // CV tidak wajib akta pendirian.
+      const cvId = await createBiz({ legal_form: 'CV' });
+      await patchBiz(cvId, { deed_establishment_number: '' }).expect(200);
+    });
+
+    it('GU-07: deed_latest_amendment_number opsional — di-trim, kosong → null', async () => {
+      const appId = await createBiz();
+      const u = uniq();
+      const set = await patchBiz(appId, {
+        deed_latest_amendment_number: `  AKTA-UBAH-${u}  `,
+      }).expect(200);
+      expect(set.body.business.deed_latest_amendment_number).toBe(
+        `AKTA-UBAH-${u}`,
+      );
+
+      const cleared = await patchBiz(appId, {
+        deed_latest_amendment_number: '   ',
+      }).expect(200);
+      expect(cleared.body.business.deed_latest_amendment_number).toBeNull();
+      // Akta pendirian tidak ikut terhapus.
+      expect(cleared.body.business.deed_establishment_number).not.toBeNull();
+    });
+
+    it('GU-08: deed_number lama dipetakan ke deed_establishment_number; field baru menang', async () => {
+      const appId = await createBiz();
+      const u = uniq();
+      const legacy = await patchBiz(appId, {
+        deed_number: `AKTA-LEGACY-${u}`,
+      }).expect(200);
+      expect(legacy.body.business.deed_establishment_number).toBe(
+        `AKTA-LEGACY-${u}`,
+      );
+      expect(legacy.body.business.deed_number).toBe(`AKTA-LEGACY-${u}`);
+
+      const both = await patchBiz(appId, {
+        deed_number: `AKTA-OLD-${u}`,
+        deed_establishment_number: `AKTA-NEW-${u}`,
+      }).expect(200);
+      expect(both.body.business.deed_establishment_number).toBe(`AKTA-NEW-${u}`);
+      expect(both.body.business.deed_number).toBe(`AKTA-NEW-${u}`);
+    });
+
+    it('GU-09: validasi create tetap berlaku (NPWP 15 digit, "Lainnya", field wajib)', async () => {
+      const appId = await createBiz();
+      await patchBiz(appId, { npwp: '01.234.567.8-901.234' }).expect(400);
+      await patchBiz(appId, { legal_name: '  ' }).expect(400);
+      await patchBiz(appId, { business_activity: 'Lainnya' }).expect(400);
+
+      const ok = await patchBiz(appId, {
+        business_activity: 'Lainnya',
+        business_activity_other: 'Ekspedisi barang khusus B3',
+      }).expect(200);
+      // RBA V01 strict: nilai dropdown tidak diganti teks bebas.
+      expect(ok.body.business.business_activity).toBe('Lainnya');
+      expect(ok.body.business.business_activity_other).toBe(
+        'Ekspedisi barang khusus B3',
+      );
+
+      const back = await patchBiz(appId, {
+        business_activity: 'Perdagangan Umum',
+      }).expect(200);
+      expect(back.body.business.business_activity_other).toBeNull();
+    });
+
+    it('GU-10: FrontDesk edit identitas KYB yang dikembalikan lalu resubmit → SUBMITTED', async () => {
+      const appId = await createBiz();
+      await completeKyb(appId);
+
+      await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+
+      const returned = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({
+          decision: 'RETURN_FOR_REVISION',
+          reason: 'Alamat kedudukan tidak sesuai akta.',
+        })
+        .expect(200);
+      expect(returned.body.status).toBe('REVISION_REQUIRED');
+
+      const edited = await patchBiz(appId, {
+        address_line: 'Jl. Sesuai Akta No. 7',
+      }).expect(200);
+      expect(edited.body.business.address_line).toBe('Jl. Sesuai Akta No. 7');
+
+      const resubmit = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(resubmit.body.status).toBe('SUBMITTED');
+      // Risk dihitung ulang saat submit, bukan saat PATCH identitas.
+      expect(resubmit.body.risk).toBeDefined();
+
+      const d = await detail(appId);
+      expect(d.body.business.address_line).toBe('Jl. Sesuai Akta No. 7');
+    });
+
+    it('GU-11: PATCH :id lama untuk aplikasi Business diteruskan ke updater KYB', async () => {
+      const appId = await createBiz();
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ city: 'Semarang' })
+        .expect(200);
+      expect(res.body.business.city).toBe('Semarang');
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
   // H. DASHBOARD — regression: tidak boleh query risk_profiles
   // ══════════════════════════════════════════════════════════
   describe('H. Dashboard & Registrants — regression test', () => {

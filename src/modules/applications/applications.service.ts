@@ -921,14 +921,23 @@ export class ApplicationsService {
     return (q.rowCount ?? 0) > 0; // true kalau ada di watchlist
   }
 
-  async updateIndividualCdd(appId: number, dto: any, userId: number) {
-    void userId;
+  async updateIndividualCdd(
+    appId: number,
+    dto: any,
+    userId: number,
+    ip?: string,
+  ) {
     const { rows: apps } = await this.pool.query(
       `SELECT id, type, status, person_id FROM applications WHERE id=$1`,
       [appId],
     );
     const app = apps[0];
     if (!app) throw new NotFoundException("Application not found");
+    // Aplikasi Business punya tabel & aturan sendiri — teruskan ke updater KYB
+    // supaya PATCH :id lama tidak lagi buntu untuk badan usaha.
+    if (app.type === "BUSINESS") {
+      return this.updateBusinessCdd(appId, dto, userId, ip);
+    }
     if (app.type !== "INDIVIDUAL" || !app.person_id) {
       throw new BadRequestException(
         "Update CDD hanya berlaku untuk aplikasi Individual",
@@ -1155,6 +1164,219 @@ export class ApplicationsService {
         );
       }
     }
+
+    return this.getDetail(appId);
+  }
+
+  /**
+   * Update Informasi Identitas Badan Usaha (KYB) untuk aplikasi DRAFT /
+   * REVISION_REQUIRED. Bersifat PATCH parsial: hanya key yang dikirim yang
+   * diubah — berbeda dari updateIndividualCdd yang full-replace, karena kolom
+   * badan usaha banyak yang NOT NULL dan FE revisi hanya mengirim yang diedit.
+   *
+   * Risiko/RBA TIDAK dihitung ulang di sini: createBusiness pun tidak
+   * menghitungnya. Skor baru terbentuk saat submit (screenAndComputeRisk), jadi
+   * resubmit dari REVISION_REQUIRED otomatis memakai data terbaru.
+   */
+  async updateBusinessCdd(
+    appId: number,
+    dto: any,
+    userId: number,
+    ip?: string,
+  ) {
+    const { rows: apps } = await this.pool.query(
+      `SELECT id, type, status, business_id FROM applications WHERE id=$1`,
+      [appId],
+    );
+    const app = apps[0];
+    if (!app) throw new NotFoundException("Application not found");
+    if (app.type !== "BUSINESS" || !app.business_id) {
+      throw new BadRequestException(
+        "Update identitas badan usaha hanya berlaku untuk aplikasi Business",
+      );
+    }
+    if (!["DRAFT", "REVISION_REQUIRED"].includes(app.status)) {
+      throw new BadRequestException(
+        "Identitas badan usaha hanya dapat diubah saat status DRAFT atau REVISION_REQUIRED",
+      );
+    }
+
+    const { rows: bizRows } = await this.pool.query(
+      `SELECT * FROM business_entities WHERE id=$1`,
+      [app.business_id],
+    );
+    const before = bizRows[0];
+    if (!before) throw new NotFoundException("Business entity not found");
+
+    // Kolom yang boleh diubah lewat endpoint ini. *_other dikelola pasangan
+    // "Lainnya" di bawah; kolom nama provinsi/kota diturunkan dari dropdown code.
+    const UPDATABLE = [
+      "legal_name", "legal_form", "incorporation_place", "incorporation_date",
+      "business_license_number", "nib", "npwp", "address_line", "city",
+      "province", "postal_code", "business_activity", "industry_code", "phone",
+      "company_email", "pic_name", "pic_position", "pic_identity_number",
+      "pic_identity_type", "representative_signature_name",
+      "verification_officer", "supervisor", "source_of_funds",
+      "business_relationship_purpose", "distribution_channel",
+    ];
+    // Wajib di create — dikirim kosong berarti salah input, bukan "hapus nilai".
+    const REQUIRED = [
+      "legal_name", "legal_form", "incorporation_place", "incorporation_date",
+      "npwp", "address_line", "city", "province", "postal_code",
+      "business_activity", "phone",
+    ];
+
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(dto, k);
+    const trimOrNull = (v: unknown) =>
+      typeof v === "string" ? v.trim() || null : (v ?? null);
+
+    const patch: Record<string, any> = {};
+    for (const col of UPDATABLE) {
+      if (!has(col)) continue;
+      const v = trimOrNull(dto[col]);
+      if (v === null && REQUIRED.includes(col)) {
+        throw new BadRequestException(`${col} tidak boleh kosong.`);
+      }
+      patch[col] = v;
+    }
+
+    // ── Validasi yang sama dengan POST /applications/business ────────────────
+    if (has("npwp") && !/^\d{15}$/.test(String(patch.npwp))) {
+      throw new BadRequestException("NPWP Badan Usaha wajib 15 digit angka.");
+    }
+    if (patch.pic_identity_number && String(patch.pic_identity_number).length > 16) {
+      throw new BadRequestException("Nomor Identitas maksimal 16 karakter.");
+    }
+    if (
+      patch.pic_identity_type &&
+      !["KTP", "PASPOR"].includes(patch.pic_identity_type)
+    ) {
+      throw new BadRequestException(
+        `pic_identity_type tidak valid: ${patch.pic_identity_type}`,
+      );
+    }
+    if (
+      patch.distribution_channel &&
+      !["Aplikasi Digital", "Agen Pihak Ketiga", "Outlet Fisik"].includes(
+        patch.distribution_channel,
+      )
+    ) {
+      throw new BadRequestException(
+        `distribution_channel tidak valid: ${patch.distribution_channel}`,
+      );
+    }
+    if (has("director_share_percentage")) {
+      patch.director_share_percentage = this.normalizeSharePercentage(
+        dto.director_share_percentage,
+        "Porsi kepemilikan saham Direktur Utama",
+      );
+    }
+    if (has("commissioner_share_percentage")) {
+      patch.commissioner_share_percentage = this.normalizeSharePercentage(
+        dto.commissioner_share_percentage,
+        "Porsi kepemilikan saham Komisaris",
+      );
+    }
+
+    // ── Nomor akta (migration 0061) ──────────────────────────────────────────
+    // deed_number lama dipakai hanya bila field baru tidak dikirim/kosong, dan
+    // tetap di-mirror supaya pembaca lama dapat nilai yang benar.
+    if (has("deed_establishment_number") || has("deed_number")) {
+      patch.deed_establishment_number =
+        trimOrNull(dto.deed_establishment_number) ?? trimOrNull(dto.deed_number);
+      patch.deed_number = patch.deed_establishment_number;
+    }
+    if (has("deed_latest_amendment_number")) {
+      patch.deed_latest_amendment_number = trimOrNull(
+        dto.deed_latest_amendment_number,
+      );
+    }
+    const effLegalForm = String(
+      has("legal_form") ? patch.legal_form : (before.legal_form ?? ""),
+    )
+      .trim()
+      .replace(/\.$/, "")
+      .toUpperCase();
+    const effDeed =
+      "deed_establishment_number" in patch
+        ? patch.deed_establishment_number
+        : before.deed_establishment_number;
+    if (effLegalForm === "PT" && !effDeed) {
+      throw new BadRequestException(
+        "Nomor Akta Pendirian wajib diisi untuk badan usaha PT.",
+      );
+    }
+
+    // ── Alamat Kedudukan — dropdown provinsi/kota ────────────────────────────
+    if (has("business_province_code") || has("business_city_code")) {
+      Object.assign(
+        patch,
+        await this.validateAndResolveBusinessRegion({
+          business_province_code: has("business_province_code")
+            ? trimOrNull(dto.business_province_code)
+            : before.business_province_code,
+          business_city_code: has("business_city_code")
+            ? trimOrNull(dto.business_city_code)
+            : before.business_city_code,
+        }),
+      );
+    }
+
+    // ── "Lainnya" companions — dropdown value tidak pernah diganti (RBA V01) ──
+    for (const { main, other, label } of [
+      { main: "legal_form", other: "legal_form_other", label: "Bentuk Badan Usaha" },
+      { main: "business_activity", other: "business_activity_other", label: "Bidang Usaha" },
+      { main: "source_of_funds", other: "source_of_funds_other", label: "Sumber Dana" },
+      {
+        main: "business_relationship_purpose",
+        other: "business_relationship_purpose_other",
+        label: "Tujuan Hubungan Usaha",
+      },
+    ]) {
+      if (!has(main) && !has(other)) continue; // tidak disentuh → biarkan
+      const effMain = has(main) ? patch[main] : before[main];
+      if (this.isLainnya(effMain)) {
+        const v = has(other) ? this.cleanText(dto[other]) : before[other];
+        if (!v) {
+          throw new BadRequestException(
+            `Keterangan lainnya wajib diisi untuk ${label}.`,
+          );
+        }
+        patch[other] = v;
+      } else {
+        patch[other] = null;
+      }
+    }
+
+    const cols = Object.keys(patch);
+    if (cols.length) {
+      await this.pool.query(
+        `UPDATE business_entities SET ${cols
+          .map((c, i) => `${c}=$${i + 1}`)
+          .join(", ")} WHERE id=$${cols.length + 1}`,
+        [...cols.map((c) => patch[c]), app.business_id],
+      );
+    }
+
+    const changed = cols.filter(
+      (c) => String(before[c] ?? "") !== String(patch[c] ?? ""),
+    );
+    await this.pool.query(
+      `INSERT INTO audit_logs(actor_id, action, object_type, object_id, before_json, after_json, ip)
+       VALUES ($1,'APPLICATION_UPDATE_BUSINESS','APPLICATION',$2,$3,$4,$5)`,
+      [
+        userId,
+        String(appId),
+        JSON.stringify(
+          Object.fromEntries(changed.map((c) => [c, before[c] ?? null])),
+        ),
+        JSON.stringify({
+          changed_fields: changed,
+          ...Object.fromEntries(changed.map((c) => [c, patch[c]])),
+        }),
+        ip ?? null,
+      ],
+    );
 
     return this.getDetail(appId);
   }

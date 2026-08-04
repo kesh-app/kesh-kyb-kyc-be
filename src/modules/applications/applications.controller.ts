@@ -229,6 +229,18 @@ export class ApplicationsController {
   }
 
 
+  // Identitas Badan Usaha (KYB). Peran & status sama dengan PATCH :id
+  // (SystemAdmin/Director lewat bypass RolesGuard).
+  @Roles("FrontDesk", "ComplianceLead")
+  @Patch(":id/business")
+  async updateBusinessCdd(
+    @Param("id", ParseIntPipe) appId: number,
+    @Body() body: any,
+    @Req() req: any,
+  ) {
+    return this.svc.updateBusinessCdd(appId, body, req.user.sub, req.ip);
+  }
+
   @Roles("FrontDesk", "ComplianceLead")
   @Patch(":id")
   async updateCdd(
@@ -236,7 +248,7 @@ export class ApplicationsController {
     @Body() body: any,
     @Req() req: any,
   ) {
-    return this.svc.updateIndividualCdd(appId, body, req.user.sub);
+    return this.svc.updateIndividualCdd(appId, body, req.user.sub, req.ip);
   }
 
   // ── EDD endpoints ────────────────────────────────────────────────────────
