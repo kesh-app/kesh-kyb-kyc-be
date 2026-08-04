@@ -1640,6 +1640,231 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${auditorToken}`)
         .expect(200);
     });
+
+    // ── FinanceStaff "kembalikan transaksi" ────────────────────────────────
+    // Bawa transfer sampai tahap review FinanceStaff.
+    async function transferAtFinanceStage(tag: string): Promise<string> {
+      const senderAppId = await createApprovedSenderForTransfer(tag);
+      const txId = await createAndSubmitTransfer(senderAppId);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+      return txId;
+    }
+
+    it('FW-09: FinanceStaff dapat mengembalikan transaksi dengan alasan → REVISION_REQUIRED', async () => {
+      const txId = await transferAtFinanceStage(`FW09${SUFFIX}`);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'RETURN', notes: 'Nominal tidak sesuai bukti transfer' })
+        .expect(201);
+
+      expect(res.body.status).toBe('REVISION_REQUIRED');
+      expect(res.body.finance_notes).toBe('Nominal tidak sesuai bukti transfer');
+      expect(res.body.finance_reviewed_by).not.toBeNull();
+      // Dikembalikan ≠ ditolak: tidak boleh ikut terisi field penolakan.
+      expect(res.body.rejected_at).toBeNull();
+      expect(res.body.reject_reason).toBeNull();
+
+      const audit = await pgPool.query(
+        `SELECT 1 FROM audit_logs
+          WHERE object_type='TRANSFER' AND object_id=$1
+            AND action='TRANSFER_FINANCE_RETURN'`,
+        [String(txId)],
+      );
+      expect(audit.rowCount).toBe(1);
+    });
+
+    it('FW-10: FinanceStaff mengembalikan tanpa notes → 400', async () => {
+      const txId = await transferAtFinanceStage(`FW10${SUFFIX}`);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'RETURN' })
+        .expect(400);
+
+      // Whitespace saja juga bukan alasan.
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'RETURN', notes: '   ' })
+        .expect(400);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(res.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+    });
+
+    it('FW-11: FinanceManager tidak bisa approve transaksi yang dikembalikan → 400', async () => {
+      const txId = await transferAtFinanceStage(`FW11${SUFFIX}`);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'RETURN', notes: 'perlu koreksi rekening' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(400);
+    });
+
+    it('FW-12: FrontDesk dapat edit + submit ulang transaksi yang dikembalikan → alur normal dari awal', async () => {
+      const txId = await transferAtFinanceStage(`FW12${SUFFIX}`);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'RETURN', notes: 'nama penerima salah' })
+        .expect(201);
+
+      const edited = await request(app.getHttpServer())
+        .patch(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 150_000,
+          sender_application_id: 0, // diabaikan service; hanya field transfer yang di-update
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '9876543210',
+          beneficiaryAccountName: 'Penerima FW Revisi',
+          beneficiary_relationship_to_sender: 'Keluarga',
+        })
+        .expect(200);
+      expect(edited.body.beneficiary_account_name).toBe('Penerima FW Revisi');
+      expect(edited.body.status).toBe('REVISION_REQUIRED');
+
+      // Submit ulang → kembali ke awal alur (SUBMITTED), bukan langsung finance.
+      const resubmit = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(201);
+      expect(resubmit.body.status).toBe('SUBMITTED');
+
+      // Dan alur penuh masih bisa diselesaikan.
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/supervisor-review`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ action: 'APPROVE', notes: 'ok setelah revisi' })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'ok' })
+        .expect(201);
+      const done = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(201);
+      expect(done.body.status).toBe('COMPLETED');
+    });
+
+    it('FW-13: FinanceManager tidak bisa approve transaksi yang belum disubmit ulang setelah dikembalikan', async () => {
+      const txId = await transferAtFinanceStage(`FW13${SUFFIX}`);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'RETURN', notes: 'lengkapi keterangan' })
+        .expect(201);
+
+      // Diedit tapi belum disubmit ulang → tetap tidak bisa diputuskan.
+      await request(app.getHttpServer())
+        .patch(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 120_000,
+          sender_application_id: 0,
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '9876543210',
+          beneficiaryAccountName: 'Penerima FW',
+          beneficiary_relationship_to_sender: 'Keluarga',
+        })
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(400);
+    });
+
+    it('FW-14: action tidak dikenal pada finance-review → 400 (bukan diam-diam REJECT)', async () => {
+      const txId = await transferAtFinanceStage(`FW14${SUFFIX}`);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'KEMBALIKAN', notes: 'salah nama aksi' })
+        .expect(400);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(res.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+    });
+
+    it('FW-15: bulk child transfer mengikuti perilaku return yang sama (per transfer)', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW15${SUFFIX}`);
+      const item = (name: string) => ({
+        amount: 100_000,
+        beneficiaryBankName: 'Bank Test',
+        beneficiaryAccountNumber: '9876543210',
+        beneficiaryAccountName: name,
+        beneficiary_relationship_to_sender: 'Keluarga',
+      });
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(senderAppId),
+          bulk_reference_no: `FW15-${SUFFIX}`,
+          items: [item('Bulk Return A'), item('Bulk Return B')],
+        })
+        .expect(201);
+
+      const [childA, childB] = bulk.body.transfers.map((t: any) => String(t.id));
+
+      for (const id of [childA, childB]) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+      }
+
+      // Return hanya anak A — anak B tidak boleh ikut terpengaruh.
+      const returned = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${childA}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'RETURN', notes: 'rekening anak A salah' })
+        .expect(201);
+      expect(returned.body.status).toBe('REVISION_REQUIRED');
+
+      const other = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${childB}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(other.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+
+      // Ringkasan batch memuat REVISION_REQUIRED.
+      const batch = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches/${bulk.body.batch_id}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(batch.body.batch.status_summary.REVISION_REQUIRED).toBe(1);
+      expect(batch.body.batch.status_summary.PENDING_FINANCE_STAFF_REVIEW).toBe(1);
+    });
   });
 
   // ══════════════════════════════════════════════════════════
@@ -2720,6 +2945,109 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send(body)
         .expect(201);
       expect(res.body.status).toBe('DRAFT');
+    });
+
+    // ── B.1b Akta dipecah dua: pendirian (wajib PT) + perubahan terakhir (opsional)
+    const bizDetail = (appId: string) =>
+      request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+    it('GE-07a: Business PT tanpa deed_establishment_number (dan tanpa deed_number) → 400', async () => {
+      const body = baseBizBody();
+      delete (body as any).deed_number;
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ ...body, deed_latest_amendment_number: `AKTA-UBAH-${uniq()}` })
+        .expect(400);
+      expect(res.body.message).toBe('Nomor Akta Pendirian wajib diisi untuk badan usaha PT.');
+    });
+
+    it('GE-07b: create dengan kedua field akta → tersimpan & terbaca di detail', async () => {
+      const u = uniq();
+      const body = baseBizBody();
+      delete (body as any).deed_number;
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          ...body,
+          deed_establishment_number: `AKTA-PDR-${u}`,
+          deed_latest_amendment_number: `AKTA-UBAH-${u}`,
+        })
+        .expect(201);
+
+      const detail = await bizDetail(String(create.body.id));
+      expect(detail.body.business.deed_establishment_number).toBe(`AKTA-PDR-${u}`);
+      expect(detail.body.business.deed_latest_amendment_number).toBe(`AKTA-UBAH-${u}`);
+      // deed_number lama tetap ada sebagai mirror akta pendirian.
+      expect(detail.body.business.deed_number).toBe(`AKTA-PDR-${u}`);
+    });
+
+    it('GE-07c: akta perubahan terakhir opsional — kosong/absen → null', async () => {
+      const u = uniq();
+      const body = baseBizBody();
+      delete (body as any).deed_number;
+
+      const absent = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ ...body, deed_establishment_number: `AKTA-PDR-A${u}` })
+        .expect(201);
+      const d1 = await bizDetail(String(absent.body.id));
+      expect(d1.body.business.deed_establishment_number).toBe(`AKTA-PDR-A${u}`);
+      expect(d1.body.business.deed_latest_amendment_number).toBeNull();
+
+      // String kosong / whitespace → null, bukan "".
+      const u2 = uniq();
+      const blank = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          ...baseBizBody(),
+          deed_number: undefined,
+          deed_establishment_number: `  AKTA-PDR-B${u2}  `,
+          deed_latest_amendment_number: '   ',
+        })
+        .expect(201);
+      const d2 = await bizDetail(String(blank.body.id));
+      // Kedua field di-trim.
+      expect(d2.body.business.deed_establishment_number).toBe(`AKTA-PDR-B${u2}`);
+      expect(d2.body.business.deed_latest_amendment_number).toBeNull();
+    });
+
+    it('GE-07d: payload lama deed_number tetap dipetakan ke deed_establishment_number', async () => {
+      const u = uniq();
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(baseBizBody({ deed_number: `AKTA-LEGACY-${u}` }))
+        .expect(201);
+
+      const detail = await bizDetail(String(create.body.id));
+      expect(detail.body.business.deed_establishment_number).toBe(`AKTA-LEGACY-${u}`);
+      expect(detail.body.business.deed_number).toBe(`AKTA-LEGACY-${u}`);
+      expect(detail.body.business.deed_latest_amendment_number).toBeNull();
+    });
+
+    it('GE-07e: field baru menang atas deed_number lama bila keduanya dikirim', async () => {
+      const u = uniq();
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(
+          baseBizBody({
+            deed_number: `AKTA-OLD-${u}`,
+            deed_establishment_number: `AKTA-NEW-${u}`,
+          }),
+        )
+        .expect(201);
+
+      const detail = await bizDetail(String(create.body.id));
+      expect(detail.body.business.deed_establishment_number).toBe(`AKTA-NEW-${u}`);
+      expect(detail.body.business.deed_number).toBe(`AKTA-NEW-${u}`);
     });
 
     // ── B.5 NPWP wajib 15 digit angka ──────────────────────────────────────

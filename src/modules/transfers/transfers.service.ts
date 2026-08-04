@@ -28,6 +28,9 @@ import { SIMILARITY_THRESHOLD } from "../applications/applications.service";
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
 const FULL_ACCESS_ROLES = ["SystemAdmin", "Director"];
+// Status yang masih boleh diedit & (re)submit oleh FrontDesk. REVISION_REQUIRED
+// = dikembalikan FinanceStaff untuk diperbaiki, bukan status final.
+const EDITABLE_STATUSES = ["DRAFT", "REVISION_REQUIRED"];
 const WIC_TRANSFER_MAX_AMOUNT = 100_000_000;
 const WIC_LIMIT_ERROR = "Walk-In Customer (WIC) memiliki limit transaksi maksimal Rp100.000.000.";
 
@@ -420,8 +423,10 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
 
     const row = prev.rows[0];
-    if (row.status !== "DRAFT") {
-      throw new BadRequestException("Only DRAFT can be updated");
+    if (!EDITABLE_STATUSES.includes(row.status)) {
+      throw new BadRequestException(
+        "Only DRAFT or REVISION_REQUIRED can be updated",
+      );
     }
 
     // Hard guard: pengirim draft harus tetap APPROVED. Mencegah update draft
@@ -644,8 +649,13 @@ export class TransfersService {
       throw new ForbiddenException("Only FinanceStaff or FrontDesk can submit");
     }
 
-    if (row.status !== "DRAFT") {
-      throw new BadRequestException("Only DRAFT can be submitted");
+    // REVISION_REQUIRED = transfer yang dikembalikan FinanceStaff. Submit ulang
+    // mengulang alur normal dari awal: screening beneficiary → SUBMITTED /
+    // PENDING_COMPLIANCE_REVIEW → OperationSupervisor → FinanceStaff → FinanceManager.
+    if (!EDITABLE_STATUSES.includes(row.status)) {
+      throw new BadRequestException(
+        "Only DRAFT or REVISION_REQUIRED can be submitted",
+      );
     }
 
     // Hard guard: pengirim wajib tetap APPROVED saat submit. Mencegah draft
@@ -1024,7 +1034,11 @@ export class TransfersService {
   async financeReview(
     id: number,
     user: AuthedUser,
-    dto: { action: "APPROVE" | "REJECT"; notes?: string; reject_reason?: string },
+    dto: {
+      action: "APPROVE" | "REJECT" | "RETURN";
+      notes?: string;
+      reject_reason?: string;
+    },
     ip?: string,
   ) {
     const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [id]);
@@ -1038,9 +1052,12 @@ export class TransfersService {
     }
 
     const actorId = resolveUserId(user);
+    const notes = (dto.notes ?? "").trim() || null;
 
     let next;
+    let action: string;
     if (dto.action === "APPROVE") {
+      action = "TRANSFER_FINANCE_REVIEW";
       next = await this.pool.query(
         `UPDATE transfers SET
           status='PENDING_FINANCE_MANAGER_APPROVAL',
@@ -1050,9 +1067,30 @@ export class TransfersService {
           updated_at=now()
         WHERE id=$1
         RETURNING *`,
-        [id, actorId, dto.notes ?? null],
+        [id, actorId, notes],
+      );
+    } else if (dto.action === "RETURN") {
+      // Dikembalikan untuk diperbaiki — BUKAN final. Alasan wajib supaya
+      // FrontDesk tahu apa yang harus dikoreksi.
+      if (!notes) {
+        throw new BadRequestException(
+          "notes wajib diisi sebagai alasan pengembalian transaksi.",
+        );
+      }
+      action = "TRANSFER_FINANCE_RETURN";
+      next = await this.pool.query(
+        `UPDATE transfers SET
+          status='REVISION_REQUIRED',
+          finance_reviewed_by=$2,
+          finance_reviewed_at=now(),
+          finance_notes=$3,
+          updated_at=now()
+        WHERE id=$1
+        RETURNING *`,
+        [id, actorId, notes],
       );
     } else {
+      action = "TRANSFER_FINANCE_REVIEW";
       next = await this.pool.query(
         `UPDATE transfers SET
           status='REJECTED',
@@ -1065,11 +1103,11 @@ export class TransfersService {
           updated_at=now()
         WHERE id=$1
         RETURNING *`,
-        [id, actorId, dto.reject_reason ?? null, dto.notes ?? null],
+        [id, actorId, dto.reject_reason ?? null, notes],
       );
     }
 
-    await this.audit(actorId, "TRANSFER_FINANCE_REVIEW", String(id), row, next.rows[0], ip);
+    await this.audit(actorId, action, String(id), row, next.rows[0], ip);
     return next.rows[0];
   }
 
@@ -1342,6 +1380,7 @@ export class TransfersService {
     "PENDING_COMPLIANCE_REVIEW",
     "PENDING_FINANCE_STAFF_REVIEW",
     "PENDING_FINANCE_MANAGER_APPROVAL",
+    "REVISION_REQUIRED",
     "COMPLETED",
     "REJECTED",
   ];

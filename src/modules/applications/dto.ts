@@ -296,8 +296,20 @@ export class CreateBusinessDto {
   phone!: string;
 
   // ── Form terbaru — Informasi Identitas Badan Usaha ──────────────────
-  // deed_number / nomor_akta_pendirian_perubahan_terakhir (menggantikan label
-  // lama "Nomor Lisensi"). Terpisah dari business_license_number (nomor izin usaha).
+  // Nomor akta dipecah dua. Terpisah dari business_license_number (nomor izin usaha).
+  //   deed_establishment_number    = No. Akta Pendirian (wajib bila PT)
+  //   deed_latest_amendment_number = No. Akta Perubahan Terakhir (selalu opsional)
+  @IsOptional()
+  @IsString()
+  deed_establishment_number?: string;
+
+  @IsOptional()
+  @IsString()
+  deed_latest_amendment_number?: string;
+
+  // DEPRECATED — field gabungan lama. Masih diterima: bila
+  // deed_establishment_number tidak dikirim, nilainya dipakai sebagai
+  // No. Akta Pendirian.
   @IsOptional()
   @IsString()
   deed_number?: string;

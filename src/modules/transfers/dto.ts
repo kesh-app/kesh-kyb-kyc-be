@@ -199,9 +199,27 @@ export class DecideTransferDto {
 }
 
 export class ReviewTransferDto {
-  @IsString()
+  // @IsIn wajib: tanpa ini action yang tidak dikenal jatuh ke cabang else
+  // service dan diam-diam menjadi REJECT.
+  @IsIn(['APPROVE', 'REJECT'], { message: 'action harus APPROVE atau REJECT' })
   action!: 'APPROVE' | 'REJECT';
 
+  @IsOptional() @IsString()
+  notes?: string;
+
+  @IsOptional() @IsString()
+  reject_reason?: string;
+}
+
+// FinanceStaff punya satu aksi tambahan: RETURN (kembalikan untuk diperbaiki).
+// OperationSupervisor sengaja tidak diberi aksi ini — di luar cakupan.
+export class FinanceReviewTransferDto {
+  @IsIn(['APPROVE', 'REJECT', 'RETURN'], {
+    message: 'action harus APPROVE, REJECT, atau RETURN',
+  })
+  action!: 'APPROVE' | 'REJECT' | 'RETURN';
+
+  // Wajib diisi bila action = RETURN (dicek di service, agar pesannya spesifik).
   @IsOptional() @IsString()
   notes?: string;
 

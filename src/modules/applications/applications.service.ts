@@ -1188,9 +1188,16 @@ export class ApplicationsService {
       .trim()
       .replace(/\.$/, "")
       .toUpperCase();
-    const deedProvided =
-      typeof dto.deed_number === "string" && dto.deed_number.trim().length > 0;
-    if (legalFormNorm === "PT" && !deedProvided) {
+    // Nomor akta dipecah dua (migration 0061). deed_number lama tetap diterima
+    // dan dipetakan ke No. Akta Pendirian bila field baru tidak dikirim.
+    const trimOrNull = (v: unknown) =>
+      typeof v === "string" && v.trim() ? v.trim() : null;
+    const deedEstablishment =
+      trimOrNull(dto.deed_establishment_number) ?? trimOrNull(dto.deed_number);
+    // Akta perubahan terakhir selalu opsional; string kosong → null.
+    const deedAmendment = trimOrNull(dto.deed_latest_amendment_number);
+
+    if (legalFormNorm === "PT" && !deedEstablishment) {
       throw new BadRequestException(
         "Nomor Akta Pendirian wajib diisi untuk badan usaha PT.",
       );
@@ -1251,9 +1258,10 @@ export class ApplicationsService {
           source_of_funds, business_relationship_purpose, distribution_channel,
           legal_form_other, business_activity_other, source_of_funds_other, business_relationship_purpose_other,
           business_province_code, business_province_name, business_city_code, business_city_name,
-          director_share_percentage, commissioner_share_percentage)
+          director_share_percentage, commissioner_share_percentage,
+          deed_establishment_number, deed_latest_amendment_number)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-          $27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
+          $27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
          RETURNING id`,
         [
           dto.legal_name,
@@ -1270,7 +1278,9 @@ export class ApplicationsService {
           dto.business_activity,
           dto.industry_code || null,
           dto.phone,
-          dto.deed_number ?? dto.business_license_number ?? null,
+          // deed_number (deprecated) di-mirror dari No. Akta Pendirian supaya
+          // pembaca lama tetap dapat nilai yang benar.
+          deedEstablishment ?? dto.business_license_number ?? null,
           dto.company_email ?? null,
           dto.pic_name ?? null,
           dto.pic_position ?? null,
@@ -1292,6 +1302,8 @@ export class ApplicationsService {
           bizRegion.business_city_name,
           directorShare,
           commissionerShare,
+          deedEstablishment,
+          deedAmendment,
         ],
       );
       const businessId = q.rows[0].id;
@@ -1480,7 +1492,8 @@ export class ApplicationsService {
       const { rows: biz } = await this.pool.query(
         `SELECT id, legal_name, legal_form, legal_form_other,
                 incorporation_place, incorporation_date,
-                deed_number, business_license_number, company_email,
+                deed_number, deed_establishment_number, deed_latest_amendment_number,
+                business_license_number, company_email,
                 nib, npwp, address_line, city, province, postal_code,
                 business_province_code, business_province_name,
                 business_city_code, business_city_name,

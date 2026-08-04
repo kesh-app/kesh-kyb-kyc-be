@@ -20,6 +20,7 @@ import {
   CreateTransferDto,
   DecideTransferDto,
   ReviewTransferDto,
+  FinanceReviewTransferDto,
   SetTransferResultDto,
   SubmitComplianceReviewDto,
   UpdateTransferDto,
@@ -111,13 +112,13 @@ export class TransfersController {
     return this.svc.supervisorReview(id, req.user, dto, req.ip);
   }
 
-  // FINANCE STAFF REVIEW (layer 2)
+  // FINANCE STAFF REVIEW (layer 2) — APPROVE / REJECT / RETURN
   @Post(":id/finance-review")
   @Roles("FinanceStaff")
   async financeReview(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
-    @Body() dto: ReviewTransferDto
+    @Body() dto: FinanceReviewTransferDto
   ) {
     return this.svc.financeReview(id, req.user, dto, req.ip);
   }
