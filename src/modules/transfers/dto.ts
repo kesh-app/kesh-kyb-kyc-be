@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
+  IsBoolean,
   IsDateString,
   IsEmail,
   IsIn,
@@ -275,6 +276,14 @@ export class ComplianceReviewDecisionDto {
 
   @IsOptional() @IsString() @MaxLength(1000)
   decision_notes?: string;
+}
+
+export class RescreenTransferDto {
+  // Transfer COMPLETED/REJECTED hanya di-preview (read-only) secara default —
+  // force=true wajib untuk benar-benar mengganti transfer_watchlist_hits milik
+  // transfer yang sudah settled.
+  @IsOptional() @IsBoolean()
+  force?: boolean;
 }
 
 export class SetTransferResultDto {

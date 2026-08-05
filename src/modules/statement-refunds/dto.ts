@@ -30,8 +30,14 @@ export class CreateStatementRefundDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1)
   complaint_id?: number;
 
+  @IsOptional() @trim() @IsString() @MaxLength(50)
+  complaint_no?: string;
+
   @IsOptional() @Type(() => Number) @IsInt() @Min(1)
   original_transfer_id?: number;
+
+  @IsOptional() @trim() @IsString() @MaxLength(64)
+  original_transfer_reference_no?: string;
 
   @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "statement_date must be YYYY-MM-DD" })
   statement_date!: string;
@@ -83,14 +89,23 @@ export class UpdateStatementRefundDto {
 
   @IsOptional() @Type(() => Number) @IsInt() @Min(1)
   complaint_id?: number;
+
+  @IsOptional() @trim() @IsString() @MaxLength(50)
+  complaint_no?: string;
 }
 
 export class MatchStatementRefundDto {
-  @Type(() => Number) @IsInt() @Min(1)
-  original_transfer_id!: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1)
+  original_transfer_id?: number;
+
+  @IsOptional() @trim() @IsString() @MaxLength(64)
+  original_transfer_reference_no?: string;
 
   @IsOptional() @Type(() => Number) @IsInt() @Min(1)
   complaint_id?: number;
+
+  @IsOptional() @trim() @IsString() @MaxLength(50)
+  complaint_no?: string;
 
   @IsOptional() @IsIn(["MANUAL", "AUTO_SUGGESTED"])
   match_method?: "MANUAL" | "AUTO_SUGGESTED";

@@ -1592,6 +1592,18 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
       expect(res.body.status).toBe('COMPLETED');
       expect(res.body.result).toBe('SUCCESS');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      expect(detail.body.created_by_name).toBeTruthy();
+      expect(detail.body.submitted_by_name).toBeTruthy();
+      expect(detail.body.supervisor_reviewed_by_name).toBeTruthy();
+      expect(detail.body.finance_reviewed_by_name).toBeTruthy();
+      expect(detail.body.approved_by_name).toBeTruthy();
+      // ID numerik tetap ada (backward compatibility)
+      expect(detail.body.created_by).not.toBeNull();
     });
 
     it('FW-05: OperationSupervisor dapat reject transfer layer 1 → REJECTED', async () => {
@@ -1938,6 +1950,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(review.status).toBe('OPEN');
       expect(review.red_flags).toEqual(['AMOUNT_NOT_MATCH_PROFILE', 'UNUSUAL_VOLUME']);
       expect(review.reported_by).toBeTruthy();
+      expect(review.reported_by_name).toBeTruthy();
       expect(review.reported_at).toBeTruthy();
       expect(review.reviewed_by).toBeNull();
       expect(review.reviewed_at).toBeNull();
@@ -1987,6 +2000,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('SUBMITTED');
       expect(res.body.compliance_review_status).toBe('APPROVED_TO_CONTINUE');
       expect(res.body.latest_compliance_review.reviewed_by).toBeTruthy();
+      expect(res.body.latest_compliance_review.reviewed_by_name).toBeTruthy();
       expect(res.body.latest_compliance_review.reviewed_at).toBeTruthy();
     });
 
@@ -8665,6 +8679,38 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         ),
       ).toBe(true);
     });
+
+    // ── T-29: actor name fields pada detail/list/aksi workflow monitoring ──
+    it('T-29: GET case detail/list & staff/manager-review response memuat actor name fields', async () => {
+      const caseId = await setupLtkmCase(`70029${SUFFIX}`, `07029${SUFFIX}`);
+
+      const staff = await staffReview(caseId, 'ESCALATE_TO_MANAGER', 'eskalasi untuk cek nama aktor');
+      expect(staff.status).toBe(200);
+      expect(staff.body.created_by_name).toBeTruthy();
+      expect(staff.body.staff_reviewed_by_name).toBeTruthy();
+
+      const manager = await managerReview(caseId, 'APPROVE_REPORT', 'approve untuk cek nama aktor');
+      expect(manager.status).toBe(200);
+      expect(manager.body.manager_reviewed_by_name).toBeTruthy();
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases/${caseId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.staff_reviewed_by_name).toBeTruthy();
+      expect(detail.body.manager_reviewed_by_name).toBeTruthy();
+      // ID numerik tetap ada (backward compatibility)
+      expect(detail.body.staff_reviewed_by).not.toBeNull();
+
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/monitoring/cases?limit=100`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const row = list.body.data.find((c: any) => String(c.id) === String(caseId));
+      expect(row).toBeTruthy();
+      expect(row.staff_reviewed_by_name).toBeTruthy();
+      expect(row.manager_reviewed_by_name).toBeTruthy();
+    });
   });
 
   // ══════════════════════════════════════════════════════════
@@ -10316,6 +10362,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
 
       const dirId = await newComplaint({ transaction_reference: `TRX-${SUFFIX}-DIR` }, directorToken);
+      // Director bypass = lolos @Roles, bukan lolos tahapan bisnis — tetap harus
+      // verify-data dulu sebelum operation-investigation (guard stage berlaku untuk semua role).
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${dirId}/verify-data`)
+        .set('Authorization', `Bearer ${directorToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(201);
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints/${dirId}/operation-investigation`)
         .set('Authorization', `Bearer ${directorToken}`)
@@ -10494,6 +10547,98 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(400);
     });
 
+    it('Y-30c: setelah complaint pindah ke AML_REVIEW, operation-investigation ulang → 400 (stage terkunci)', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'SUCCESS', notes: 'Tidak boleh mengubah hasil investigasi lagi.' })
+        .expect(400);
+      expect(res.body.message).toMatch(/Tahap investigasi operasional sudah selesai/);
+    });
+
+    it('Y-30d: setelah complaint pindah ke FINANCE_REVIEW, operation-investigation ulang → 400 (stage terkunci)', async () => {
+      const id = await complaintAt('FINANCE_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'SUCCESS', notes: 'Tidak boleh, sudah di finance review.' })
+        .expect(400);
+    });
+
+    it('Y-30e: verify-data hanya untuk OPEN/WAITING_CUSTOMER_DATA — setelah OPERATION_INVESTIGATION → 400', async () => {
+      const id = await complaintAt('OPERATION_INVESTIGATION');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(400);
+    });
+
+    it('Y-36c: finance-review di luar stage FINANCE_REVIEW/REFUND_PROCESS → 400', async () => {
+      const id = await complaintAt('AML_REVIEW');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'NO_REFUND', notes: 'Belum waktunya finance review.' })
+        .expect(400);
+    });
+
+    it('Y-47: GET /complaints/:id mengembalikan actor name fields', async () => {
+      const id = await complaintAt('FINANCE_REVIEW');
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .expect(200);
+      expect(detail.body.created_by_name).toBeTruthy();
+      expect(detail.body.data_verified_by_name).toBeTruthy();
+      expect(detail.body.operation_investigated_by_name).toBeTruthy();
+      // ID numerik tetap ada (backward compatibility)
+      expect(detail.body.created_by).not.toBeNull();
+    });
+
+    it('Y-48: response aksi workflow complaint (bukan hanya GET detail) sudah memuat actor name fields', async () => {
+      const id = await newComplaint();
+
+      const verify = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/verify-data`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ data_verification_status: 'COMPLETE' })
+        .expect(201);
+      expect(verify.body.data_verified_by_name).toBeTruthy();
+
+      const invest = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/operation-investigation`)
+        .set('Authorization', `Bearer ${operationSupervisorToken}`)
+        .send({ result: 'NEED_AML_REVIEW', notes: 'Perlu review AML untuk cek nama aktor.' })
+        .expect(201);
+      expect(invest.body.operation_investigated_by_name).toBeTruthy();
+
+      const aml = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/aml-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVE', notes: 'Kembali ke investigasi operasional.' })
+        .expect(201);
+      expect(aml.body.aml_reviewed_by_name).toBeTruthy();
+      expect(aml.body.status).toBe('OPERATION_INVESTIGATION');
+
+      const resolve = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/resolve`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ resolution_notes: 'Selesai untuk cek nama aktor.' })
+        .expect(201);
+      expect(resolve.body.resolved_by_name).toBeTruthy();
+
+      const close = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/close`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ closing_notes: 'Ditutup untuk cek nama aktor.' })
+        .expect(201);
+      expect(close.body.closed_by_name).toBeTruthy();
+      // ID numerik tetap ada (backward compatibility)
+      expect(close.body.closed_by).not.toBeNull();
+    });
+
     // ── AML / Compliance review ──────────────────────────────
 
     it('Y-31: ComplianceLead APPROVE saat AML_REVIEW → kembali ke OPERATION_INVESTIGATION', async () => {
@@ -10578,6 +10723,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.finance_decision).toBe('NO_REFUND');
       expect(res.body.status).toBe('RESOLVED');
       expect(res.body.finance_reviewed_by).not.toBeNull();
+      expect(res.body.finance_reviewed_by_name).toBeTruthy();
       expect(res.body.finance_reviewed_at).not.toBeNull();
     });
 
@@ -10894,6 +11040,63 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(String(res.body.transfer_id)).toBe(String(tx.transfer_id));
       expect(res.body.transaction_reference).toBe(tx.transaction_reference);
+    });
+
+    it('Y-49: GET /complaints/:id → customer_contact terisi dari phone applicant', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${complaintId}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .expect(200);
+
+      // indivAppIdOk dibuat dengan phone: `0813${SUFFIX}` (lihat blok D-01)
+      expect(res.body.customer_contact).toBe(`0813${SUFFIX}`);
+    });
+
+    it('Y-50: GET /complaints/:id → transaction_amount/date/status/reference terisi saat transaction_reference cocok dengan transfer', async () => {
+      const trx = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount: 250000,
+          sender_application_id: Number(indivAppIdOk),
+          beneficiaryBankName: 'Bank Receipt Test',
+          beneficiaryAccountNumber: '1112223334',
+          beneficiaryAccountName: 'Penerima Receipt',
+          beneficiary_relationship_to_sender: 'Keluarga',
+          transaction_date: '2026-07-29T10:00:00.000Z',
+        })
+        .expect(201);
+
+      const id = await newComplaint({
+        transfer_id: Number(trx.body.id),
+        transaction_reference: trx.body.partner_reference_no,
+      });
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .expect(200);
+
+      expect(Number(res.body.transaction_amount)).toBe(250000);
+      expect(new Date(res.body.transaction_date).toISOString()).toBe('2026-07-29T10:00:00.000Z');
+      expect(res.body.transaction_status).toBe('DRAFT');
+      expect(res.body.transaction_partner_reference_no).toBe(trx.body.partner_reference_no);
+      // Internal transfer id tidak boleh jadi field utama pengganti reference user-facing.
+      expect(res.body.transaction_partner_reference_no).not.toBe(String(trx.body.id));
+    });
+
+    it('Y-51: GET /complaints/:id → transaction_* null saat transaction_reference tidak cocok transfer manapun', async () => {
+      const id = await newComplaint({ transaction_reference: `TRX-${SUFFIX}-NOMATCH` });
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .expect(200);
+
+      expect(res.body.transaction_amount).toBeNull();
+      expect(res.body.transaction_date).toBeNull();
+      expect(res.body.transaction_status).toBeNull();
+      expect(res.body.transaction_partner_reference_no).toBeNull();
     });
   });
 
@@ -13218,6 +13421,102 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.match_confidence).toBe('LOW');
     });
 
+    // ── Reference number resolution (original_transfer_reference_no) ─────────
+    async function createTransferFull(tag: string, amount = 250_000): Promise<{ id: string; ref: string }> {
+      const senderAppId = await createApprovedSender(tag);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount,
+          sender_application_id: Number(senderAppId),
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '1122334455',
+          beneficiaryAccountName: `Penerima SR ${tag}`,
+          beneficiary_relationship_to_sender: 'Keluarga',
+        })
+        .expect(201);
+      return { id: String(res.body.id), ref: res.body.partner_reference_no as string };
+    }
+
+    it('SR-22: create dengan original_transfer_reference_no meresolusi ke original_transfer_id & muncul di detail', async () => {
+      const tx = await createTransferFull('R22');
+      expect(tx.ref).toMatch(/^KESH-TRF-/);
+
+      const created = await createRefund(
+        refundPayload({ original_transfer_reference_no: tx.ref }),
+      ).expect(201);
+      expect(String(created.body.original_transfer_id)).toBe(tx.id);
+      expect(created.body.status).toBe('MATCHED');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${created.body.id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(detail.body.original_transfer_reference_no).toBe(tx.ref);
+      expect(Number(detail.body.original_transfer_amount)).toBe(250_000);
+    });
+
+    it('SR-23: original_transfer_reference_no di-trim sebelum resolusi', async () => {
+      const tx = await createTransferFull('R23');
+      const created = await createRefund(
+        refundPayload({ original_transfer_reference_no: `  ${tx.ref}  ` }),
+      ).expect(201);
+      expect(String(created.body.original_transfer_id)).toBe(tx.id);
+    });
+
+    it('SR-24: original_transfer_reference_no tidak ditemukan → 400 dengan pesan jelas', async () => {
+      const res = await createRefund(
+        refundPayload({ original_transfer_reference_no: 'KESH-TRF-NOTFOUND-XXXX' }),
+      ).expect(400);
+      expect(res.body.message).toMatch(/Nomor referensi transaksi awal tidak ditemukan/);
+    });
+
+    it('SR-25: original_transfer_id + original_transfer_reference_no merujuk transfer yang sama → sukses', async () => {
+      const tx = await createTransferFull('R25');
+      const created = await createRefund(
+        refundPayload({
+          original_transfer_id: Number(tx.id),
+          original_transfer_reference_no: tx.ref,
+        }),
+      ).expect(201);
+      expect(String(created.body.original_transfer_id)).toBe(tx.id);
+      expect(created.body.status).toBe('MATCHED');
+    });
+
+    it('SR-26: original_transfer_id & original_transfer_reference_no merujuk transfer berbeda → 409', async () => {
+      const txA = await createTransferFull('R26A');
+      const txB = await createTransferFull('R26B');
+      const res = await createRefund(
+        refundPayload({
+          original_transfer_id: Number(txA.id),
+          original_transfer_reference_no: txB.ref,
+        }),
+      ).expect(409);
+      expect(res.body.message).toMatch(/merujuk ke transaksi yang berbeda/);
+    });
+
+    it('SR-27: match dapat memakai original_transfer_reference_no', async () => {
+      const tx = await createTransferFull('R27');
+      const created = await createRefund(refundPayload()).expect(201);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${created.body.id}/match`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ original_transfer_reference_no: tx.ref })
+        .expect(201);
+      expect(res.body.status).toBe('MATCHED');
+      expect(String(res.body.original_transfer_id)).toBe(tx.id);
+    });
+
+    it('SR-28: match tanpa original_transfer_id maupun original_transfer_reference_no → 400', async () => {
+      const created = await createRefund(refundPayload()).expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${created.body.id}/match`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({})
+        .expect(400);
+    });
+
     // ── Submit ──────────────────────────────────────────────────────────────
     async function matchedRefund(tag: string) {
       const txId = await createTransfer(tag);
@@ -13512,6 +13811,97 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(cDetail.body.status).toBe('OPEN');
       expect(cDetail.body.resolved_at).toBeNull();
       expect(cDetail.body.statement_refunds[0].status).toBe('APPROVED');
+    });
+
+    // ── complaint_no resolution ────────────────────────────────────────────
+    async function createComplaint(tag: string): Promise<{ id: string; no: string }> {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-RFDCN-${tag}-${SUFFIX}`,
+          category: 'TRANSFER',
+          channel: 'WALK_IN',
+          priority: 'HIGH',
+          complaint_level: 'LEVEL_2',
+          complaint_notes: `Nasabah melapor dana transfer belum masuk (${tag}).`,
+        })
+        .expect(201);
+      return { id: String(res.body.id), no: res.body.complaint_no as string };
+    }
+
+    it('SR-29: create dengan complaint_no meresolusi ke complaint_id & muncul di detail', async () => {
+      const complaint = await createComplaint('R29');
+      expect(complaint.no).toMatch(/^KESH-CMP-/);
+
+      const created = await createRefund(
+        refundPayload({ complaint_no: complaint.no }),
+      ).expect(201);
+      expect(String(created.body.complaint_id)).toBe(complaint.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${created.body.id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(detail.body.complaint_no).toBe(complaint.no);
+      expect(detail.body.complaint_status).toBe('OPEN');
+      expect(detail.body.complaint_customer_name).toBeTruthy();
+    });
+
+    it('SR-30: complaint_no tidak ditemukan → 400 dengan pesan jelas', async () => {
+      const res = await createRefund(
+        refundPayload({ complaint_no: 'KESH-CMP-NOTFOUND-XXXX' }),
+      ).expect(400);
+      expect(res.body.message).toMatch(/Nomor pengaduan tidak ditemukan/);
+    });
+
+    it('SR-31: complaint_id + complaint_no merujuk complaint yang sama → sukses', async () => {
+      const complaint = await createComplaint('R31');
+      const created = await createRefund(
+        refundPayload({
+          complaint_id: Number(complaint.id),
+          complaint_no: complaint.no,
+        }),
+      ).expect(201);
+      expect(String(created.body.complaint_id)).toBe(complaint.id);
+    });
+
+    it('SR-32: complaint_id + complaint_no merujuk complaint berbeda → 409', async () => {
+      const complaintA = await createComplaint('R32A');
+      const complaintB = await createComplaint('R32B');
+      const res = await createRefund(
+        refundPayload({
+          complaint_id: Number(complaintA.id),
+          complaint_no: complaintB.no,
+        }),
+      ).expect(409);
+      expect(res.body.message).toMatch(/merujuk ke pengaduan yang berbeda/);
+    });
+
+    // ── Actor name fields ───────────────────────────────────────────────────
+    it('SR-33: detail refund mengembalikan actor name fields', async () => {
+      const { id } = await matchedRefund('R33');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED' })
+        .expect(201);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(200);
+      expect(detail.body.created_by_name).toBeTruthy();
+      expect(detail.body.matched_by_name).toBeTruthy();
+      expect(detail.body.submitted_by_name).toBeTruthy();
+      expect(detail.body.approved_by_name).toBeTruthy();
+      // Field masih ada (numeric id tetap dikirim untuk backward compatibility)
+      expect(detail.body.created_by).not.toBeNull();
     });
   });
 
@@ -13871,6 +14261,333 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.compliance_review_status).toBe('APPROVED_TO_CONTINUE');
       // Jejak audit hit tidak hilang setelah keputusan.
       expect(res.body.watchlist_hits.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // ── TW-12: false positive trigram tidak boleh blocking ──
+    it('TW-12: "MARIA ANIRA" vs DTTOT "MIRA ARIANI" (skor rendah) → IGNORE, tidak PENDING_COMPLIANCE_REVIEW', async () => {
+      // Dokumentasi hidup untuk laporan bug: similarity aktual harus di bawah
+      // NEAR_MATCH_THRESHOLD (0.75), bukan sekadar "rendah" secara kualitatif.
+      const { rows: simRows } = await pgPool.query(
+        `SELECT similarity(upper($1), upper($2)) AS score`,
+        ['MARIA ANIRA', DTTOT_NAME],
+      );
+      expect(Number(simRows[0].score)).toBeLessThan(0.75);
+
+      const txId = await createDraft('MARIA ANIRA');
+      const res = await submitTransfer(txId).expect(201);
+
+      // Bukan hit DTTOT: transfer lolos ke alur normal, bukan compliance review.
+      expect(res.body.status).toBe('SUBMITTED');
+
+      const { rows: hitRows } = await pgPool.query(
+        `SELECT * FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+        [txId],
+      );
+      expect(hitRows.length).toBe(0);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.watchlist_hits).toEqual([]);
+      expect(detail.body.compliance_review_status).toBeNull();
+      expect(detail.body.latest_compliance_review).toBeNull();
+    });
+
+    // ── TW-13: alias tetap harus hit ──
+    it('TW-13: alias "UMM ZAHRA" pada entri DTTOT → tetap terdeteksi sebagai DTTOT hit', async () => {
+      const aliasCsv = [
+        'Unique_ID,Watchlist_Type,Full_Name,Alias_Name,Nationality,Subject_Type',
+        `WLALIAS${SUFFIX},DTTOT,Legal Name Alias Test ${SUFFIX},UMM ZAHRA,ID,Orang`,
+      ].join('\n');
+      await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(aliasCsv), {
+          filename: `tw_alias_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'DTTOT')
+        .field('list_source', `E2E TW ALIAS ${SUFFIX}`)
+        .expect(201);
+
+      const txId = await createDraft('UMM ZAHRA');
+      const res = await submitTransfer(txId).expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.latest_compliance_review.red_flags).toEqual(
+        expect.arrayContaining(['WATCHLIST_HIT', 'DTTOT_HIT']),
+      );
+      const aliasHit = detail.body.watchlist_hits.find(
+        (h: any) => h.matched_field === 'ALIAS_NAME',
+      );
+      expect(aliasHit).toBeDefined();
+      expect(aliasHit.status).toBe('MATCH');
+    });
+
+    // ── TW-14: dedup subjek yang sama tersimpan sebagai beberapa baris watchlist ──
+    it('TW-14: 2 baris watchlist_entries untuk subjek nyata yang sama → tetap 1 baris hit (dedup)', async () => {
+      // Nama sengaja tidak berbagi kata dengan fixture AW-13 — dua nama yang
+      // hanya berbagi digit SUFFIX panjang saja bisa saling trigram-match di
+      // sekitar 0.3-0.4 (lihat catatan di TW-06), tapi kata yang sama sekali
+      // beririsan (mis. "Subjek Duplikat" dua-duanya) bisa mendorong skor
+      // hingga ~0.8 dan mencemari test lain.
+      const dupName = `Zelda Marentino Transfer ${SUFFIX}`;
+      const dupNameNorm = dupName.toUpperCase();
+      // Simulasikan bug yang dilaporkan: subjek nyata yang sama ter-upload dari
+      // 2 sumber berbeda tanpa unique_id (skenario sebelum auto-generate id ada)
+      // → 2 baris watchlist_entries terpisah untuk satu orang.
+      await pgPool.query(
+        `INSERT INTO watchlist_entries
+           (list_type, list_source, full_name, name, name_norm, nationality, subject_type)
+         VALUES ($1,'E2E TW DUP',$2,$2,$3,'ID','PERSON'),
+                ($1,'E2E TW DUP',$2,$2,$3,'ID','PERSON')`,
+        ['DTTOT', dupName, dupNameNorm],
+      );
+
+      const txId = await createDraft(dupName);
+      const res = await submitTransfer(txId).expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+
+      const { rows: hitRows } = await pgPool.query(
+        `SELECT list_type FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+        [txId],
+      );
+      expect(hitRows.length).toBe(1);
+      expect(hitRows[0].list_type).toBe('DTTOT');
+    });
+
+    // ── Rescreen watchlist — historical false-positive cleanup ──────────────
+    describe('TW-Rescreen: POST /transfers/:id/rescreen-watchlist', () => {
+      // Baris review OPEN dengan red_flags watchlist saja, meniru transfer yang
+      // sempat diblokir sebelum ambang klasifikasi dinaikkan (skor 0.412 dulu
+      // dianggap hit — lihat SIMILARITY_THRESHOLD lama).
+      async function seedHistoricalFalsePositive(beneficiaryName: string) {
+        const txId = await createDraft(beneficiaryName);
+        await pgPool.query(
+          `UPDATE transfers SET status='PENDING_COMPLIANCE_REVIEW' WHERE id=$1`,
+          [txId],
+        );
+        const { rows: reporter } = await pgPool.query(
+          `SELECT id FROM users WHERE role='ComplianceLead' LIMIT 1`,
+        );
+        await pgPool.query(
+          `INSERT INTO transfer_watchlist_hits
+             (transfer_id, list_type, input_name, matched_name, matched_field, match_score)
+           VALUES ($1,'DTTOT',$2,$3,'FULL_NAME',0.412)`,
+          [txId, beneficiaryName, DTTOT_NAME],
+        );
+        await pgPool.query(
+          `INSERT INTO transfer_compliance_reviews
+             (transfer_id, status, red_flags, report_notes, reported_by, reported_at)
+           VALUES ($1,'OPEN','["WATCHLIST_HIT","DTTOT_HIT"]'::jsonb,$2,$3,now())`,
+          [txId, `Screening otomatis: nama penerima cocok dengan watchlist — DTTOT "${DTTOT_NAME}".`, reporter[0].id],
+        );
+        return txId;
+      }
+
+      function rescreen(txId: string, token: string, force = false) {
+        return request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/rescreen-watchlist`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(force ? { force: true } : {});
+      }
+
+      // 1) Histori false positive di-bersihkan.
+      it('RS-01: histori false positive "MARIA ANIRA" (skor 0.412) → hit lama hilang, red flags watchlist bersih, can_continue true', async () => {
+        const txId = await seedHistoricalFalsePositive('MARIA ANIRA');
+
+        const res = await rescreen(txId, complianceToken).expect(201);
+        expect(res.body.rescreen.read_only).toBe(false);
+        expect(res.body.rescreen.old_hit_count).toBe(1);
+        expect(res.body.rescreen.new_hit_count).toBe(0);
+        expect(res.body.rescreen.can_continue).toBe(true);
+        expect(res.body.watchlist_hits).toEqual([]);
+
+        const { rows: hitRows } = await pgPool.query(
+          `SELECT * FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+          [txId],
+        );
+        expect(hitRows.length).toBe(0);
+
+        const { rows: reviewRows } = await pgPool.query(
+          `SELECT red_flags FROM transfer_compliance_reviews WHERE transfer_id=$1 ORDER BY id DESC LIMIT 1`,
+          [txId],
+        );
+        expect(reviewRows[0].red_flags).toEqual([]);
+
+        // Status transfer TIDAK diubah otomatis — tetap PENDING_COMPLIANCE_REVIEW,
+        // keputusan lanjut tetap lewat ComplianceLead APPROVE_TO_CONTINUE.
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${txId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+        expect(detail.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+
+        // ComplianceLead sekarang bisa APPROVE_TO_CONTINUE dengan aman.
+        const approved = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/compliance-review`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ action: 'APPROVE_TO_CONTINUE', decision_notes: 'Dibersihkan rescreen.' })
+          .expect(201);
+        expect(approved.body.status).toBe('SUBMITTED');
+      });
+
+      // 2) Exact match tetap DTTOT_HIT setelah rescreen.
+      it('RS-02: exact MIRA ARIANI tetap DTTOT_HIT setelah rescreen, can_continue false', async () => {
+        const txId = await createDraft(DTTOT_NAME);
+        await submitTransfer(txId).expect(201);
+
+        const res = await rescreen(txId, complianceToken).expect(201);
+        expect(res.body.rescreen.read_only).toBe(false);
+        expect(res.body.rescreen.new_hit_count).toBeGreaterThanOrEqual(1);
+        expect(res.body.rescreen.can_continue).toBe(false);
+        expect(res.body.watchlist_hits.some((h: any) => h.list_type === 'DTTOT')).toBe(true);
+
+        const { rows: reviewRows } = await pgPool.query(
+          `SELECT red_flags FROM transfer_compliance_reviews WHERE transfer_id=$1 ORDER BY id DESC LIMIT 1`,
+          [txId],
+        );
+        expect(reviewRows[0].red_flags).toEqual(
+          expect.arrayContaining(['WATCHLIST_HIT', 'DTTOT_HIT']),
+        );
+      });
+
+      // 3) Red flag manual non-watchlist dipertahankan.
+      it('RS-03: red flag manual (RBA_HIGH) tidak ikut terhapus, can_continue tetap false', async () => {
+        // Beneficiary bersih tapi FrontDesk sudah flag manual RBA_HIGH — lalu
+        // simulasikan histori: watchlist flag ikut nempel dari screening lama.
+        const cleanName = `Bersih Manual Flag ${SUFFIX}`;
+        const txId = await createDraft(cleanName);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/submit-compliance-review`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ red_flags: ['RBA_HIGH'], report_notes: 'Skor RBA tinggi.' })
+          .expect(201);
+
+        const { rows: reviewBefore } = await pgPool.query(
+          `SELECT id FROM transfer_compliance_reviews WHERE transfer_id=$1 ORDER BY id DESC LIMIT 1`,
+          [txId],
+        );
+        await pgPool.query(
+          `UPDATE transfer_compliance_reviews
+              SET red_flags = red_flags || '["WATCHLIST_HIT","DTTOT_HIT"]'::jsonb
+            WHERE id=$1`,
+          [reviewBefore[0].id],
+        );
+        await pgPool.query(
+          `INSERT INTO transfer_watchlist_hits
+             (transfer_id, list_type, input_name, matched_name, matched_field, match_score)
+           VALUES ($1,'DTTOT',$2,$3,'FULL_NAME',0.412)`,
+          [txId, cleanName, DTTOT_NAME],
+        );
+
+        const res = await rescreen(txId, complianceToken).expect(201);
+        expect(res.body.rescreen.new_hit_count).toBe(0);
+        // RBA_HIGH manual tetap ada, watchlist flags hilang.
+        expect(res.body.rescreen.can_continue).toBe(false);
+
+        const { rows: reviewAfter } = await pgPool.query(
+          `SELECT red_flags FROM transfer_compliance_reviews WHERE transfer_id=$1 ORDER BY id DESC LIMIT 1`,
+          [txId],
+        );
+        expect(reviewAfter[0].red_flags).toEqual(['RBA_HIGH']);
+      });
+
+      // 4/5) RBAC.
+      it('RS-04: hanya ComplianceLead/SystemAdmin/Director yang boleh rescreen', async () => {
+        const okTokens = [complianceToken, sysAdminToken, directorToken];
+        for (const token of okTokens) {
+          const txId = await createDraft(`RBAC OK ${SUFFIX}`);
+          await rescreen(txId, token).expect(201);
+        }
+      });
+
+      it('RS-05: Auditor/FrontDesk/OperationSupervisor/FinanceStaff/FinanceManager tidak boleh rescreen → 403', async () => {
+        const forbiddenTokens = [
+          auditorToken,
+          frontDeskToken,
+          operationSupervisorToken,
+          financeStaffToken,
+          financeManagerToken,
+        ];
+        const txId = await createDraft(`RBAC Forbidden ${SUFFIX}`);
+        for (const token of forbiddenTokens) {
+          await rescreen(txId, token).expect(403);
+        }
+      });
+
+      // 6) Audit log.
+      it('RS-06: audit log TRANSFER_RES_SCREEN_WATCHLIST tertulis', async () => {
+        const txId = await createDraft(`Audit Rescreen ${SUFFIX}`);
+        await rescreen(txId, complianceToken).expect(201);
+
+        const { rows } = await pgPool.query(
+          `SELECT id, actor_id FROM audit_logs
+            WHERE action='TRANSFER_RES_SCREEN_WATCHLIST' AND object_id=$1`,
+          [String(txId)],
+        );
+        expect(rows.length).toBeGreaterThanOrEqual(1);
+      });
+
+      // Read-only gating untuk transfer settled (COMPLETED/REJECTED).
+      it('RS-07: transfer COMPLETED → rescreen read-only tanpa force, force=true baru benar-benar mengganti hit', async () => {
+        const cleanName = `Selesai Rescreen ${SUFFIX}`;
+        const txId = await createDraft(cleanName);
+        await submitTransfer(txId).expect(201); // clean → SUBMITTED langsung
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        const decided = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/decision`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .send({ decision: 'APPROVE' })
+          .expect(201);
+        expect(decided.body.status).toBe('COMPLETED');
+
+        // Suntik histori hit lama langsung ke transfer yang sudah COMPLETED.
+        await pgPool.query(
+          `INSERT INTO transfer_watchlist_hits
+             (transfer_id, list_type, input_name, matched_name, matched_field, match_score)
+           VALUES ($1,'DTTOT',$2,$3,'FULL_NAME',0.412)`,
+          [txId, cleanName, DTTOT_NAME],
+        );
+
+        // Tanpa force → read-only, tidak menyentuh DB.
+        const preview = await rescreen(txId, complianceToken).expect(201);
+        expect(preview.body.read_only).toBe(true);
+        expect(preview.body.old_hits.length).toBe(1);
+        expect(preview.body.new_hits.length).toBe(0);
+
+        const { rows: stillThere } = await pgPool.query(
+          `SELECT * FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+          [txId],
+        );
+        expect(stillThere.length).toBe(1);
+
+        // force=true → benar-benar mengganti.
+        const forced = await rescreen(txId, complianceToken, true).expect(201);
+        expect(forced.body.rescreen.read_only).toBe(false);
+        expect(forced.body.rescreen.old_hit_count).toBe(1);
+        expect(forced.body.rescreen.new_hit_count).toBe(0);
+
+        const { rows: afterForce } = await pgPool.query(
+          `SELECT * FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+          [txId],
+        );
+        expect(afterForce.length).toBe(0);
+      });
     });
   });
 
@@ -14237,6 +14954,53 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.results[0].unique_id).toBeDefined();
       expect(res.body.results[0].status).toBe('MATCH');
       expect(res.body.risk).not.toBeNull();
+    });
+
+    // ── AW-12: false positive trigram tidak boleh blocking di sisi aplikasi ──
+    it('AW-12: "Maria Anira" vs DTTOT "Mira Ariani" (skor rendah) → bukan MATCH, tidak blocking', async () => {
+      const { rows: simRows } = await pgPool.query(
+        `SELECT similarity(upper($1), upper($2)) AS score`,
+        ['Maria Anira', AW_DTTOT_NAME],
+      );
+      expect(Number(simRows[0].score)).toBeLessThan(0.75);
+
+      const appId = await createIndividual('Maria Anira', '20');
+      await submitApp(appId).expect(200);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      // Skor terlalu rendah untuk dicatat sebagai screening_results sama sekali
+      // (IGNORE), apalagi diklasifikasikan MATCH/blocking.
+      expect(res.body.screening.some((h: any) => h.list_type === 'DTTOT')).toBe(false);
+      expect(res.body.watchlist_summary.compliance_blocking).toBe(false);
+      expect(res.body.watchlist_summary.status).not.toBe('MATCH');
+    });
+
+    // ── AW-13: dedup subjek yang sama tersimpan sebagai beberapa baris watchlist ──
+    it('AW-13: 2 baris watchlist_entries untuk subjek nyata yang sama → tetap 1 baris screening_results (dedup)', async () => {
+      // Nama sengaja tidak berbagi kata dengan fixture TW-14 — lihat catatan di sana.
+      const dupName = `Boas Halomoan Berkas ${SUFFIX}`;
+      const dupNameNorm = dupName.toUpperCase();
+      await pgPool.query(
+        `INSERT INTO watchlist_entries
+           (list_type, list_source, full_name, name, name_norm, nationality, subject_type)
+         VALUES ($1,'E2E AW DUP',$2,$2,$3,'ID','PERSON'),
+                ($1,'E2E AW DUP',$2,$2,$3,'ID','PERSON')`,
+        ['DTTOT', dupName, dupNameNorm],
+      );
+
+      const appId = await createIndividual(dupName, '21');
+      await submitApp(appId).expect(200);
+
+      const { rows } = await pgPool.query(
+        `SELECT list_type FROM screening_results WHERE application_id=$1`,
+        [appId],
+      );
+      expect(rows.length).toBe(1);
+      expect(rows[0].list_type).toBe('DTTOT');
     });
   });
 });

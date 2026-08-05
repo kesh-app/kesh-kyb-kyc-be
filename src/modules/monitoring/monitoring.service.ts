@@ -15,6 +15,7 @@ import {
   StaffReviewDto,
   UpdateReportDto,
 } from "./dto";
+import { MATCH_THRESHOLD } from "../applications/applications.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
@@ -839,9 +840,13 @@ export class MonitoringService {
     // Memakai rule_code yang sudah ada agar dedup case & rendering alert existing
     // langsung berlaku. Guard `some(...)`: bila trigger dari risk factor pengirim
     // sudah menyala dengan kode yang sama, jangan tambahkan duplikat di satu array.
+    // Hanya hit bertingkat MATCH (skor ≥ MATCH_THRESHOLD) yang boleh membuka
+    // monitoring case CRITICAL — hit NEAR_MATCH bukan konfirmasi DTTOT/PPPSPM/PEP.
     const { rows: wlHits } = await this.pool.query(
-      `SELECT DISTINCT list_type, matched_name FROM transfer_watchlist_hits WHERE transfer_id=$1`,
-      [ctx.id],
+      `SELECT DISTINCT list_type, matched_name
+         FROM transfer_watchlist_hits
+        WHERE transfer_id=$1 AND match_score >= $2`,
+      [ctx.id, MATCH_THRESHOLD],
     );
     if (wlHits.length) {
       const byList = (types: string[]) =>
@@ -1208,7 +1213,17 @@ export class MonitoringService {
 
   private async getCaseWithTriggers(id: number) {
     const { rows } = await this.pool.query(
-      `SELECT * FROM monitoring_cases WHERE id=$1`,
+      `SELECT mc.*,
+              COALESCE(u_created.name, u_created.email) AS created_by_name,
+              COALESCE(u_reported.name, u_reported.email) AS reported_by_name,
+              COALESCE(u_staff.name, u_staff.email) AS staff_reviewed_by_name,
+              COALESCE(u_manager.name, u_manager.email) AS manager_reviewed_by_name
+         FROM monitoring_cases mc
+         LEFT JOIN users u_created ON u_created.id = mc.created_by
+         LEFT JOIN users u_reported ON u_reported.id = mc.reported_by
+         LEFT JOIN users u_staff ON u_staff.id = mc.staff_reviewed_by
+         LEFT JOIN users u_manager ON u_manager.id = mc.manager_reviewed_by
+        WHERE mc.id=$1`,
       [id],
     );
     const c = rows[0];
@@ -1302,6 +1317,10 @@ export class MonitoringService {
     params.push(offset);
     const { rows: data } = await this.pool.query(
       `SELECT mc.*,
+         COALESCE(u_created.name, u_created.email) AS created_by_name,
+         COALESCE(u_reported.name, u_reported.email) AS reported_by_name,
+         COALESCE(u_staff.name, u_staff.email) AS staff_reviewed_by_name,
+         COALESCE(u_manager.name, u_manager.email) AS manager_reviewed_by_name,
          COALESCE(
            (SELECT array_agg(DISTINCT t.alert_name ORDER BY t.alert_name)
             FROM monitoring_case_triggers t
@@ -1312,6 +1331,10 @@ export class MonitoringService {
           FROM monitoring_case_triggers t
           WHERE t.case_id = mc.id AND t.alert_code IS NOT NULL) AS alert_count
        FROM monitoring_cases mc
+       LEFT JOIN users u_created ON u_created.id = mc.created_by
+       LEFT JOIN users u_reported ON u_reported.id = mc.reported_by
+       LEFT JOIN users u_staff ON u_staff.id = mc.staff_reviewed_by
+       LEFT JOIN users u_manager ON u_manager.id = mc.manager_reviewed_by
        WHERE ${whereSql}
        ORDER BY mc.id DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -1353,10 +1376,19 @@ export class MonitoringService {
     params.push(limit);
     params.push(offset);
     const { rows: data } = await this.pool.query(
-      `SELECT * FROM monitoring_cases
-       WHERE ${whereSql}
-       ORDER BY id DESC
-       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      `SELECT mc.*,
+              COALESCE(u_created.name, u_created.email) AS created_by_name,
+              COALESCE(u_reported.name, u_reported.email) AS reported_by_name,
+              COALESCE(u_staff.name, u_staff.email) AS staff_reviewed_by_name,
+              COALESCE(u_manager.name, u_manager.email) AS manager_reviewed_by_name
+         FROM monitoring_cases mc
+         LEFT JOIN users u_created ON u_created.id = mc.created_by
+         LEFT JOIN users u_reported ON u_reported.id = mc.reported_by
+         LEFT JOIN users u_staff ON u_staff.id = mc.staff_reviewed_by
+         LEFT JOIN users u_manager ON u_manager.id = mc.manager_reviewed_by
+        WHERE ${whereSql}
+        ORDER BY mc.id DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     );
 

@@ -12,21 +12,29 @@ import { computeRbaV01, INDUSTRY_MAP, type RbaInput } from "./rba-v01.engine";
 // ─── Internal Preliminary Risk Scoring — RBA v2 ────────────────────────────
 // Bukan formula resmi BI. Dipakai sebagai dasar review compliance internal.
 
-// Di-export agar screening beneficiary transfer memakai ambang yang sama
-// (satu kebijakan matching untuk aplikasi & transfer).
-export const SIMILARITY_THRESHOLD = 0.35;
+// pg_trgm dipakai untuk KANDIDAT retrieval saja (GIN index, ambang default GUC
+// ~0.3). Skor di bawah NEAR_MATCH_THRESHOLD adalah noise trigram (mis. "MARIA
+// ANIRA" vs "MIRA ARIANI" = 0.412) dan TIDAK dicatat sebagai hit sama sekali —
+// bukan cuma "tidak blocking". Di-export agar screening beneficiary transfer
+// memakai kebijakan yang sama (satu kebijakan matching untuk aplikasi & transfer).
+export const NEAR_MATCH_THRESHOLD = 0.75;
 
-// Di atas ambang ini similarity dianggap match pasti (exact/high-confidence),
-// bukan sekadar "mirip". Di bawahnya hit masih perlu review manual → NEAR_MATCH.
-export const EXACT_MATCH_THRESHOLD = 0.95;
+// Di atas ambang ini similarity dianggap match pasti (exact/high-confidence) →
+// blocking. Skor di [NEAR_MATCH_THRESHOLD, MATCH_THRESHOLD) = mirip, perlu
+// review manual, TIDAK memblokir & TIDAK dilabeli hit DTTOT terkonfirmasi.
+export const MATCH_THRESHOLD = 0.9;
 
 /**
  * Klasifikasi satu hit screening menjadi status name screening.
- *   CLEAR      → sudah di-clear reviewer (FALSE_POSITIVE / DISMISSED)
- *   MATCH      → CONFIRMED reviewer, ATAU similarity ≥ EXACT_MATCH_THRESHOLD
- *   NEAR_MATCH → mirip tapi belum pasti, perlu review
+ *   CLEAR      → sudah di-clear reviewer (FALSE_POSITIVE / DISMISSED), ATAU
+ *                similarity < NEAR_MATCH_THRESHOLD (noise trigram, IGNORE)
+ *   MATCH      → CONFIRMED reviewer, ATAU similarity ≥ MATCH_THRESHOLD
+ *   NEAR_MATCH → mirip tapi belum pasti (di antara kedua ambang), perlu review
  * Dipakai bersama oleh RBA name screening, ringkasan watchlist Business,
- * dan blocking approval agar tidak ada dua definisi "match" yang berbeda.
+ * blocking approval, DAN screening beneficiary transfer — satu definisi
+ * "match" untuk semua konsumen, termasuk baris screening lama yang tersimpan
+ * dengan skor rendah sebelum ambang ini dinaikkan (otomatis jadi CLEAR tanpa
+ * perlu migrasi/backfill).
  */
 export function classifyScreeningHit(
   reviewStatus: string | null | undefined,
@@ -35,7 +43,62 @@ export function classifyScreeningHit(
   const rs = reviewStatus ?? "UNREVIEWED";
   if (["FALSE_POSITIVE", "DISMISSED"].includes(rs)) return "CLEAR";
   if (rs === "CONFIRMED") return "MATCH";
-  return Number(topScore ?? 0) >= EXACT_MATCH_THRESHOLD ? "MATCH" : "NEAR_MATCH";
+  const score = Number(topScore ?? 0);
+  if (score >= MATCH_THRESHOLD) return "MATCH";
+  if (score >= NEAR_MATCH_THRESHOLD) return "NEAR_MATCH";
+  return "CLEAR";
+}
+
+/**
+ * Dedup kandidat watchlist yang merujuk subjek nyata yang sama tapi tersimpan
+ * sebagai beberapa baris watchlist_entries berbeda (mis. unique_id auto-generate
+ * beda karena diupload ulang dari sumber/file berbeda — lihat
+ * WatchlistService.generateWatchlistUniqueId, hash-nya ikut source_url sehingga
+ * upload ulang dari file lain menghasilkan id baru untuk orang yang sama).
+ * Kunci dedup, urutan prioritas:
+ *   1) list_type + unique_id — hanya bila unique_id BUKAN hasil auto-generate
+ *      ("KESH-WL-AUTO-" prefix), karena auto-id dijamin unik per baris sehingga
+ *      tidak pernah menggabungkan duplikat nyata.
+ *   2) list_type + nama + DOB + nationality ternormalisasi (fallback ini yang
+ *      menangkap kasus 8 baris DTTOT duplikat untuk subjek yang sama).
+ * Skor tertinggi per subjek yang dipertahankan.
+ */
+export function dedupWatchlistCandidates<
+  T extends {
+    list_type: string;
+    unique_id?: string | null;
+    date_of_birth?: string | null;
+    nationality?: string | null;
+    name?: string | null;
+    full_name?: string | null;
+    entity_name?: string | null;
+    score?: number | null;
+    name_score?: number | null;
+    alias_score?: number | null;
+  },
+>(candidates: T[]): T[] {
+  const scoreOf = (c: T) =>
+    Number(
+      c.score ?? Math.max(Number(c.name_score) || 0, Number(c.alias_score) || 0),
+    );
+  const isAutoId = (uid: string) => uid.toUpperCase().startsWith("KESH-WL-AUTO-");
+  const keyOf = (c: T) => {
+    const list = String(c.list_type).toUpperCase();
+    const uid = c.unique_id?.trim();
+    if (uid && !isAutoId(uid)) return `${list}:UID:${uid.toUpperCase()}`;
+    const name = String(c.name ?? c.full_name ?? c.entity_name ?? "")
+      .trim()
+      .toUpperCase();
+    return `${list}:NAME:${name}:${c.date_of_birth ?? ""}:${(c.nationality ?? "").toUpperCase()}`;
+  };
+
+  const best = new Map<string, T>();
+  for (const c of candidates) {
+    const key = keyOf(c);
+    const existing = best.get(key);
+    if (!existing || scoreOf(c) > scoreOf(existing)) best.set(key, c);
+  }
+  return [...best.values()];
 }
 
 // Bobot per faktor (satuan poin, cap total 100)
@@ -1579,7 +1642,7 @@ export class ApplicationsService {
    * Ringkasan status watchlist Business per kategori: perusahaan, pengurus,
    * pemegang saham. Murni baca dari screening_results yang sudah ada (tidak
    * mengubah perhitungan risk). Default CLEAR bila belum ada screening.
-   *   MATCH      → hit CONFIRMED atau exact (skor ≥ EXACT_MATCH_THRESHOLD)
+   *   MATCH      → hit CONFIRMED atau exact (skor ≥ MATCH_THRESHOLD)
    *   NEAR_MATCH → hit mirip yang belum di-clear & belum pasti
    *   CLEAR      → tidak ada hit relevan
    */
@@ -2108,8 +2171,8 @@ export class ApplicationsService {
 
       for (const s of subjects) {
         const expr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
-        const { rows: candidates } = await client.query(
-          `SELECT id, list_type, name, date_of_birth, nationality,
+        const { rows: rawCandidates } = await client.query(
+          `SELECT id, list_type, name, unique_id, date_of_birth, nationality,
                   similarity(name_norm, ${expr}) AS score
            FROM watchlist_entries
            WHERE name_norm % ${expr}
@@ -2117,8 +2180,12 @@ export class ApplicationsService {
            ORDER BY score DESC LIMIT 30`,
           [s.name],
         );
+        // Kandidat dari trigram (ambang GUC ~0.3) di-dedup dulu per subjek nyata,
+        // baru difilter ke ambang klasifikasi final NEAR_MATCH_THRESHOLD — jangan
+        // catat noise trigram (mis. skor 0.412) sebagai screening_results sama sekali.
+        const candidates = dedupWatchlistCandidates(rawCandidates);
         for (const c of candidates) {
-          if (Number(c.score) < SIMILARITY_THRESHOLD) continue;
+          if (Number(c.score) < NEAR_MATCH_THRESHOLD) continue;
           // entity_ref CHECK constraint: 'PERSON' | 'BUSINESS' | 'BO'
           const entityRef =
             s.subject_type === "BUSINESS" ? "BUSINESS" : "PERSON";
@@ -2519,7 +2586,7 @@ export class ApplicationsService {
       score_breakdown: riskFactors
         .filter((f) => f.score > 0)
         .map((f) => ({ code: f.code, score: f.score })),
-      threshold: SIMILARITY_THRESHOLD,
+      threshold: NEAR_MATCH_THRESHOLD,
     };
 
     // ── 12. RBA V01 strict calculation ───────────────────────────────────────
@@ -3607,7 +3674,7 @@ export class ApplicationsService {
 
     if (decision === "APPROVED") {
       // Blokir jika ada hit sanksi DTTOT/PPPSPM berstatus MATCH — CONFIRMED oleh
-      // reviewer ATAU exact match dari sistem (skor ≥ EXACT_MATCH_THRESHOLD).
+      // reviewer ATAU exact match dari sistem (skor ≥ MATCH_THRESHOLD).
       // Reviewer tetap bisa membuka jalan dengan FALSE_POSITIVE/DISMISSED.
       // Dicek sebelum EDD: sanksi memblokir approval terlepas dari status EDD.
       const { rows: blockers } = await this.pool.query(
@@ -3618,7 +3685,7 @@ export class ApplicationsService {
                NOT IN ('FALSE_POSITIVE','DISMISSED')
            AND (review_status = 'CONFIRMED' OR score >= $2)
          LIMIT 1`,
-        [appId, EXACT_MATCH_THRESHOLD],
+        [appId, MATCH_THRESHOLD],
       );
       if (blockers.length) {
         throw new BadRequestException(

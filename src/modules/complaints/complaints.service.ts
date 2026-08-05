@@ -272,7 +272,36 @@ export class ComplaintsService {
   // DETAIL
   // ---------------------------------------------------------------------------
   async getById(id: number, _user?: AuthedUser) {
-    const q = await this.pool.query(`SELECT * FROM complaints WHERE id = $1`, [id]);
+    const q = await this.pool.query(
+      `SELECT c.*,
+              COALESCE(u_created.name, u_created.email) AS created_by_name,
+              COALESCE(u_verified.name, u_verified.email) AS data_verified_by_name,
+              COALESCE(u_invest.name, u_invest.email) AS operation_investigated_by_name,
+              COALESCE(u_aml.name, u_aml.email) AS aml_reviewed_by_name,
+              COALESCE(u_finance.name, u_finance.email) AS finance_reviewed_by_name,
+              COALESCE(u_resolved.name, u_resolved.email) AS resolved_by_name,
+              COALESCE(u_closed.name, u_closed.email) AS closed_by_name,
+              COALESCE(p.phone, be.phone) AS customer_contact,
+              t.amount AS transaction_amount,
+              t.transaction_date AS transaction_date,
+              t.status AS transaction_status,
+              t.partner_reference_no AS transaction_partner_reference_no
+         FROM complaints c
+         LEFT JOIN users u_created ON u_created.id = c.created_by
+         LEFT JOIN users u_verified ON u_verified.id = c.data_verified_by
+         LEFT JOIN users u_invest ON u_invest.id = c.operation_investigated_by
+         LEFT JOIN users u_aml ON u_aml.id = c.aml_reviewed_by
+         LEFT JOIN users u_finance ON u_finance.id = c.finance_reviewed_by
+         LEFT JOIN users u_resolved ON u_resolved.id = c.resolved_by
+         LEFT JOIN users u_closed ON u_closed.id = c.closed_by
+         LEFT JOIN applications app ON app.id = c.customer_application_id
+         LEFT JOIN persons p ON p.id = app.person_id
+         LEFT JOIN business_entities be ON be.id = app.business_id
+         LEFT JOIN transfers t ON t.id = c.transfer_id
+              OR (c.transfer_id IS NULL AND t.partner_reference_no = c.transaction_reference)
+        WHERE c.id = $1`,
+      [id],
+    );
 
     if (!q.rows[0]) throw new NotFoundException("Complaint not found");
     const row = q.rows[0];
@@ -364,16 +393,23 @@ export class ComplaintsService {
   }
 
   private async applyWorkflow(id: number, sets: string[], params: any[]) {
-    const result = await this.pool.query(
-      `UPDATE complaints SET ${["updated_at = now()", ...sets].join(", ")} WHERE id = $1 RETURNING *`,
+    await this.pool.query(
+      `UPDATE complaints SET ${["updated_at = now()", ...sets].join(", ")} WHERE id = $1`,
       params,
     );
-    return result.rows[0];
+    // getById() sudah mengembalikan bentuk actor-name-enriched — pakai ulang
+    // supaya aksi workflow tidak perlu di-refetch terpisah oleh FE.
+    return this.getById(id);
   }
 
   // Verifikasi kelengkapan data nasabah — ComplaintHandling
   async verifyData(id: number, user: AuthedUser, dto: VerifyComplaintDataDto) {
-    await this.loadOpen(id);
+    const existing = await this.loadOpen(id);
+    if (!["OPEN", "WAITING_CUSTOMER_DATA"].includes(existing.status)) {
+      throw new BadRequestException(
+        "Verifikasi data hanya untuk complaint berstatus OPEN atau WAITING_CUSTOMER_DATA.",
+      );
+    }
     const actorId = resolveUserId(user);
     const nextStatus =
       dto.data_verification_status === "COMPLETE"
@@ -401,6 +437,11 @@ export class ComplaintsService {
     dto: OperationInvestigationDto,
   ) {
     const existing = await this.loadOpen(id);
+    if (existing.status !== "OPERATION_INVESTIGATION") {
+      throw new BadRequestException(
+        "Tahap investigasi operasional sudah selesai atau tidak tersedia.",
+      );
+    }
     const actorId = resolveUserId(user);
 
     const routing: Record<string, string | null> = {

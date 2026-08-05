@@ -62,6 +62,84 @@ export class StatementRefundsService {
   }
 
   /**
+   * Resolusi transfer asal dari original_transfer_id dan/atau
+   * original_transfer_reference_no. partner_reference_no adalah kolom yang
+   * ditampilkan FE sebagai "Nomor Referensi Partner" (unique, format
+   * KESH-TRF-...) — bukan reference_no yang jarang terisi. Dipakai bersama
+   * oleh create() dan match() supaya perilaku keduanya tidak pernah menyimpang.
+   */
+  private async resolveTransfer(
+    transferId?: number | null,
+    referenceNo?: string | null,
+  ) {
+    const ref = referenceNo?.trim() || null;
+    if (!transferId && !ref) return null;
+
+    const byId = transferId ? await this.fetchTransfer(transferId) : null;
+    if (transferId && !byId) throw new BadRequestException("Transfer not found");
+
+    let byRef: any = null;
+    if (ref) {
+      const { rows } = await this.pool.query(
+        `SELECT id FROM transfers WHERE partner_reference_no = $1`,
+        [ref],
+      );
+      if (!rows[0]) {
+        throw new BadRequestException(
+          "Nomor referensi transaksi awal tidak ditemukan.",
+        );
+      }
+      byRef = rows[0].id === byId?.id ? byId : await this.fetchTransfer(rows[0].id);
+    }
+
+    if (byId && byRef && byId.id !== byRef.id) {
+      throw new ConflictException(
+        "original_transfer_id dan original_transfer_reference_no merujuk ke transaksi yang berbeda.",
+      );
+    }
+    return byId ?? byRef;
+  }
+
+  /**
+   * Resolusi complaint dari complaint_id dan/atau complaint_no (Nomor Pengaduan,
+   * format KESH-CMP-...). Dipakai bersama oleh create(), update(), dan match()
+   * supaya perilakunya tidak pernah menyimpang.
+   */
+  private async resolveComplaint(
+    complaintId?: number | null,
+    complaintNo?: string | null,
+  ) {
+    const no = complaintNo?.trim() || null;
+    if (!complaintId && !no) return null;
+
+    const fetchOne = async (where: string, param: number | string) => {
+      const { rows } = await this.pool.query(
+        `SELECT id, complaint_no, status, customer_name FROM complaints WHERE ${where} LIMIT 1`,
+        [param],
+      );
+      return rows[0] ?? null;
+    };
+
+    const byId = complaintId ? await fetchOne("id = $1", complaintId) : null;
+    if (complaintId && !byId) throw new BadRequestException("Complaint not found");
+
+    let byNo: any = null;
+    if (no) {
+      byNo = byId?.complaint_no === no ? byId : await fetchOne("complaint_no = $1", no);
+      if (!byNo) {
+        throw new BadRequestException("Nomor pengaduan tidak ditemukan.");
+      }
+    }
+
+    if (byId && byNo && byId.id !== byNo.id) {
+      throw new ConflictException(
+        "complaint_id dan complaint_no merujuk ke pengaduan yang berbeda.",
+      );
+    }
+    return byId ?? byNo;
+  }
+
+  /**
    * Duplikat = mutasi bank yang sama (rekening + referensi + nominal + waktu terima).
    * Referensi bank kosong tetap dicek di sini karena unique index hanya aktif
    * saat bank_reference_no terisi.
@@ -112,13 +190,7 @@ export class StatementRefundsService {
       throw new BadRequestException("amount must be greater than 0");
     }
 
-    if (dto.complaint_id) {
-      const c = await this.pool.query(
-        `SELECT id FROM complaints WHERE id = $1 LIMIT 1`,
-        [dto.complaint_id],
-      );
-      if (!c.rows[0]) throw new BadRequestException("Complaint not found");
-    }
+    const complaint = await this.resolveComplaint(dto.complaint_id, dto.complaint_no);
 
     const dup = await this.findDuplicate({
       bank_account_no: dto.bank_account_no ?? null,
@@ -133,11 +205,10 @@ export class StatementRefundsService {
     }
 
     // Transfer asal opsional saat create — refund bisa ditemukan dari rekonsiliasi.
-    let transfer: any = null;
-    if (dto.original_transfer_id) {
-      transfer = await this.fetchTransfer(dto.original_transfer_id);
-      if (!transfer) throw new BadRequestException("Transfer not found");
-    }
+    const transfer = await this.resolveTransfer(
+      dto.original_transfer_id,
+      dto.original_transfer_reference_no,
+    );
 
     const exactAmount =
       transfer && Number(transfer.amount) === Number(dto.amount);
@@ -154,8 +225,8 @@ export class StatementRefundsService {
        RETURNING *`,
       [
         await this.resolveRefundNo(),
-        dto.complaint_id ?? null,
-        dto.original_transfer_id ?? null,
+        complaint?.id ?? null,
+        transfer?.id ?? null,
         transfer?.sender_application_id ?? null,
         dto.statement_date,
         dto.received_at,
@@ -238,8 +309,12 @@ export class StatementRefundsService {
 
     const [{ rows }, { rows: countRows }] = await Promise.all([
       this.pool.query(
-        `SELECT r.id, r.refund_no, c.complaint_no, r.original_transfer_id,
+        `SELECT r.id, r.refund_no, r.complaint_id, c.complaint_no,
+                c.status AS complaint_status, c.customer_name AS complaint_customer_name,
+                r.original_transfer_id,
                 COALESCE(t.reference_no, t.partner_reference_no) AS transfer_reference_no,
+                t.partner_reference_no AS original_transfer_reference_no,
+                t.amount AS original_transfer_amount,
                 COALESCE(p_.full_name, b.legal_name) AS partner_name,
                 r.partner_application_id,
                 r.statement_date, r.received_at, r.amount, r.currency,
@@ -260,7 +335,24 @@ export class StatementRefundsService {
   // DETAIL
   // ---------------------------------------------------------------------------
   async getById(id: number) {
-    const row = await this.fetchRefund(id);
+    const { rows } = await this.pool.query(
+      `SELECT r.*,
+              COALESCE(u_created.name, u_created.email) AS created_by_name,
+              COALESCE(u_matched.name, u_matched.email) AS matched_by_name,
+              COALESCE(u_submitted.name, u_submitted.email) AS submitted_by_name,
+              COALESCE(u_approved.name, u_approved.email) AS approved_by_name,
+              COALESCE(u_rejected.name, u_rejected.email) AS rejected_by_name
+         FROM statement_refunds r
+         LEFT JOIN users u_created ON u_created.id = r.created_by
+         LEFT JOIN users u_matched ON u_matched.id = r.matched_by
+         LEFT JOIN users u_submitted ON u_submitted.id = r.submitted_by
+         LEFT JOIN users u_approved ON u_approved.id = r.approved_by
+         LEFT JOIN users u_rejected ON u_rejected.id = r.rejected_by
+        WHERE r.id = $1`,
+      [id],
+    );
+    const row = rows[0];
+    if (!row) throw new NotFoundException("Statement refund not found");
 
     const complaint = row.complaint_id
       ? (
@@ -297,6 +389,11 @@ export class StatementRefundsService {
       complaint,
       transfer,
       partner,
+      complaint_no: complaint?.complaint_no ?? null,
+      complaint_status: complaint?.status ?? null,
+      complaint_customer_name: complaint?.customer_name ?? null,
+      original_transfer_reference_no: transfer?.partner_reference_no ?? null,
+      original_transfer_amount: transfer ? Number(transfer.amount) : null,
       // Modul balance belum ada di repo ini — lihat balanceCreditStatus().
       balance_event: null,
       balance_credit_status: this.balanceCreditStatus(row),
@@ -314,13 +411,7 @@ export class StatementRefundsService {
       );
     }
 
-    if (dto.complaint_id) {
-      const c = await this.pool.query(
-        `SELECT id FROM complaints WHERE id = $1 LIMIT 1`,
-        [dto.complaint_id],
-      );
-      if (!c.rows[0]) throw new BadRequestException("Complaint not found");
-    }
+    const complaint = await this.resolveComplaint(dto.complaint_id, dto.complaint_no);
 
     const params: any[] = [id];
     const sets = ["updated_at = now()"];
@@ -334,9 +425,11 @@ export class StatementRefundsService {
       "statement_description",
       "investigation_notes",
       "evidence_uri",
-      "complaint_id",
     ] as const) {
       if (dto[f] !== undefined) sets.push(`${f} = ${add(dto[f])}`);
+    }
+    if (dto.complaint_id !== undefined || dto.complaint_no !== undefined) {
+      sets.push(`complaint_id = ${add(complaint?.id ?? null)}`);
     }
 
     const { rows } = await this.pool.query(
@@ -357,16 +450,18 @@ export class StatementRefundsService {
       );
     }
 
-    const transfer = await this.fetchTransfer(dto.original_transfer_id);
+    if (!dto.original_transfer_id && !dto.original_transfer_reference_no) {
+      throw new BadRequestException(
+        "original_transfer_id atau original_transfer_reference_no wajib diisi.",
+      );
+    }
+    const transfer = await this.resolveTransfer(
+      dto.original_transfer_id,
+      dto.original_transfer_reference_no,
+    );
     if (!transfer) throw new BadRequestException("Transfer not found");
 
-    if (dto.complaint_id) {
-      const c = await this.pool.query(
-        `SELECT id FROM complaints WHERE id = $1 LIMIT 1`,
-        [dto.complaint_id],
-      );
-      if (!c.rows[0]) throw new BadRequestException("Complaint not found");
-    }
+    const complaint = await this.resolveComplaint(dto.complaint_id, dto.complaint_no);
 
     // Nominal persis = keyakinan tinggi. Selisih nominal wajib disertai catatan
     // investigasi dan masuk antrean NEED_INVESTIGATION, bukan langsung MATCHED.
@@ -396,7 +491,7 @@ export class StatementRefundsService {
         id,
         transfer.id,
         transfer.sender_application_id ?? null,
-        dto.complaint_id ?? null,
+        complaint?.id ?? null,
         dto.match_method ?? "MANUAL",
         exact ? "HIGH" : "LOW",
         exact ? "MATCHED" : "NEED_INVESTIGATION",

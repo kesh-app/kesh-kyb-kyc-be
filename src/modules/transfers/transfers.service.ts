@@ -23,7 +23,11 @@ import {
   normalizeCurrency,
 } from "./snap.util";
 import { MonitoringService } from "../monitoring/monitoring.service";
-import { SIMILARITY_THRESHOLD } from "../applications/applications.service";
+import {
+  NEAR_MATCH_THRESHOLD,
+  classifyScreeningHit,
+  dedupWatchlistCandidates,
+} from "../applications/applications.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
@@ -519,22 +523,30 @@ export class TransfersService {
    *
    * Algoritma & ambang SENGAJA identik dengan ApplicationsService.screenAndComputeRisk():
    * trigram similarity pg_trgm terhadap `name_norm` (berisi Full_Name atau Entity_Name)
-   * dan `aliases_concat` (Alias_Name), threshold SIMILARITY_THRESHOLD.
+   * dan `aliases_concat` (Alias_Name), threshold NEAR_MATCH_THRESHOLD. Kandidat di
+   * bawah ambang ini adalah noise trigram (mis. "MARIA ANIRA" vs "MIRA ARIANI" =
+   * 0.412) dan TIDAK disimpan sebagai transfer_watchlist_hits sama sekali — bukan
+   * cuma "tidak blocking". Hanya hit skor ≥ MATCH_THRESHOLD (classifyScreeningHit
+   * === "MATCH") yang boleh memblokir/mendapat flag DTTOT_HIT; lihat submit().
    *
    * Delete-then-insert per transfer (konvensi sama dengan screening aplikasi) →
-   * submit ulang tidak pernah menduplikasi baris hit.
+   * submit ulang tidak pernah menduplikasi baris hit. Kandidat juga di-dedup per
+   * subjek nyata (lihat dedupWatchlistCandidates) agar satu orang yang ter-upload
+   * berulang dengan unique_id auto-generate berbeda tidak muncul sebagai banyak
+   * baris hit terpisah untuk skor yang sama.
    */
-  private async screenBeneficiary(transferId: number | string, name?: string | null) {
-    await this.pool.query(
-      `DELETE FROM transfer_watchlist_hits WHERE transfer_id=$1`,
-      [transferId],
-    );
-
+  /**
+   * Hitung kandidat hit watchlist untuk sebuah nama, TANPA efek samping DB (tidak
+   * DELETE/INSERT). Dipakai oleh screenBeneficiary() (yang lalu menyimpannya) dan
+   * oleh rescreenWatchlist() untuk mode read-only (preview transfer COMPLETED/
+   * REJECTED tanpa force — lihat requirement "jangan sentuh transfer settled").
+   */
+  private async computeBeneficiaryCandidates(name?: string | null) {
     const inputName = (name ?? "").trim();
-    if (!inputName) return [];
+    if (!inputName) return [] as any[];
 
     const expr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
-    const { rows: candidates } = await this.pool.query(
+    const { rows: rawCandidates } = await this.pool.query(
       `SELECT id, list_type, name, full_name, entity_name, unique_id, subject_type,
               date_of_birth, nationality,
               similarity(name_norm, ${expr})                       AS name_score,
@@ -547,13 +559,16 @@ export class TransfersService {
         LIMIT 30`,
       [inputName],
     );
+    // Kandidat trigram (ambang GUC ~0.3, hanya untuk retrieval) di-dedup dulu per
+    // subjek nyata sebelum difilter ke ambang klasifikasi final.
+    const candidates = dedupWatchlistCandidates(rawCandidates);
 
     const hits: any[] = [];
     for (const c of candidates) {
       const nameScore = Number(c.name_score) || 0;
       const aliasScore = Number(c.alias_score) || 0;
       const score = Math.max(nameScore, aliasScore);
-      if (score < SIMILARITY_THRESHOLD) continue;
+      if (score < NEAR_MATCH_THRESHOLD) continue;
 
       // matched_field: alias menang hanya bila skornya lebih tinggi dari nama.
       // name_norm diisi dari full_name bila ada, selain itu dari entity_name.
@@ -564,6 +579,34 @@ export class TransfersService {
             ? "FULL_NAME"
             : "ENTITY_NAME";
 
+      hits.push({
+        watchlist_entry_id: c.id,
+        list_type: c.list_type,
+        input_name: inputName,
+        matched_name: c.name ?? c.full_name ?? c.entity_name ?? null,
+        matched_field: matchedField,
+        match_score: score,
+        unique_id: c.unique_id ?? null,
+        subject_type: c.subject_type ?? null,
+        name_score: nameScore,
+        alias_score: aliasScore,
+        date_of_birth: c.date_of_birth ?? null,
+        nationality: c.nationality ?? null,
+      });
+    }
+    return hits;
+  }
+
+  private async screenBeneficiary(transferId: number | string, name?: string | null) {
+    await this.pool.query(
+      `DELETE FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+      [transferId],
+    );
+
+    const candidates = await this.computeBeneficiaryCandidates(name);
+
+    const hits: any[] = [];
+    for (const c of candidates) {
       const { rows } = await this.pool.query(
         `INSERT INTO transfer_watchlist_hits
            (transfer_id, watchlist_entry_id, list_type, input_name, matched_name,
@@ -573,20 +616,20 @@ export class TransfersService {
                    match_score, unique_id, subject_type, created_at`,
         [
           transferId,
-          c.id,
+          c.watchlist_entry_id,
           c.list_type,
-          inputName,
-          c.name ?? c.full_name ?? c.entity_name ?? null,
-          matchedField,
-          score,
-          c.unique_id ?? null,
-          c.subject_type ?? null,
+          c.input_name,
+          c.matched_name,
+          c.matched_field,
+          c.match_score,
+          c.unique_id,
+          c.subject_type,
           JSON.stringify({
-            watchlist_entry_id: c.id,
-            name_score: nameScore,
-            alias_score: aliasScore,
-            date_of_birth: c.date_of_birth ?? null,
-            nationality: c.nationality ?? null,
+            watchlist_entry_id: c.watchlist_entry_id,
+            name_score: c.name_score,
+            alias_score: c.alias_score,
+            date_of_birth: c.date_of_birth,
+            nationality: c.nationality,
           }),
         ],
       );
@@ -595,7 +638,13 @@ export class TransfersService {
     return hits;
   }
 
-  /** Baca hit watchlist tersimpan untuk sebuah transfer (bentuk siap response). */
+  /**
+   * Baca hit watchlist tersimpan untuk sebuah transfer (bentuk siap response).
+   * `status` dihitung dengan classifyScreeningHit yang sama dengan aplikasi
+   * (tanpa review_status — transfer_watchlist_hits tidak punya alur review
+   * FALSE_POSITIVE/CONFIRMED sendiri) sehingga FE bisa membedakan MATCH
+   * (blocking) dari NEAR_MATCH (informational, tidak memblokir).
+   */
   private async fetchWatchlistHits(transferId: number | string) {
     const { rows } = await this.pool.query(
       `SELECT list_type, input_name, matched_name, matched_field,
@@ -605,12 +654,16 @@ export class TransfersService {
         ORDER BY match_score DESC, id`,
       [transferId],
     );
-    return rows;
+    return rows.map((r) => ({
+      ...r,
+      status: classifyScreeningHit(null, r.match_score),
+    }));
   }
 
   /**
-   * Red flag dari hasil screening. WATCHLIST_HIT selalu ada; DTTOT_HIT ditambahkan
-   * bila ada hit bertipe DTTOT. Keduanya terdaftar di TRANSFER_RED_FLAG_CODES.
+   * Red flag dari hasil screening. Hanya dipanggil dengan hit bertingkat MATCH
+   * (lihat pemanggil) — WATCHLIST_HIT selalu ada; DTTOT_HIT ditambahkan bila ada
+   * hit bertipe DTTOT. Keduanya terdaftar di TRANSFER_RED_FLAG_CODES.
    */
   private buildWatchlistRedFlags(hits: any[]): string[] {
     const flags = ["WATCHLIST_HIT"];
@@ -678,12 +731,20 @@ export class TransfersService {
 
     const actorId = resolveUserId(user);
 
-    // Screening watchlist beneficiary. Hit → transfer TIDAK boleh masuk alur
-    // bersih; dialihkan ke compliance review (jalur yang sudah ada, migrasi 0050).
+    // Screening watchlist beneficiary. Hanya hit bertingkat MATCH (skor ≥
+    // MATCH_THRESHOLD) yang mengalihkan transfer ke compliance review (jalur yang
+    // sudah ada, migrasi 0050). Hit NEAR_MATCH tetap tersimpan di
+    // transfer_watchlist_hits untuk visibilitas/manual review, tapi TIDAK
+    // memblokir dan TIDAK dilabeli DTTOT_HIT — mencegah false positive trigram
+    // (mis. "MARIA ANIRA" vs "MIRA ARIANI" = 0.412, sudah difilter di
+    // screenBeneficiary sebelum baris ini) ikut memblokir transfer.
     const hits = await this.screenBeneficiary(id, row.beneficiary_account_name);
+    const matchHits = hits.filter(
+      (h) => classifyScreeningHit(null, Number(h.match_score)) === "MATCH",
+    );
 
-    if (hits.length > 0) {
-      const redFlags = this.buildWatchlistRedFlags(hits);
+    if (matchHits.length > 0) {
+      const redFlags = this.buildWatchlistRedFlags(matchHits);
 
       const flagged = await this.pool.query(
         `UPDATE transfers SET
@@ -700,7 +761,7 @@ export class TransfersService {
         `INSERT INTO transfer_compliance_reviews
            (transfer_id, status, red_flags, report_notes, reported_by, reported_at)
          VALUES ($1, 'OPEN', $2::jsonb, $3, $4, now())`,
-        [id, JSON.stringify(redFlags), this.buildWatchlistNotes(hits), actorId],
+        [id, JSON.stringify(redFlags), this.buildWatchlistNotes(matchHits), actorId],
       );
 
       await this.audit(
@@ -753,12 +814,16 @@ export class TransfersService {
    */
   private async fetchLatestComplianceReview(transferId: number | string) {
     const { rows } = await this.pool.query(
-      `SELECT id, transfer_id, status, red_flags, report_notes,
-              reported_by, reported_at, reviewed_by, reviewed_at,
-              decision_notes, created_at, updated_at
-         FROM transfer_compliance_reviews
-        WHERE transfer_id = $1
-        ORDER BY id DESC
+      `SELECT r.id, r.transfer_id, r.status, r.red_flags, r.report_notes,
+              r.reported_by, r.reported_at, r.reviewed_by, r.reviewed_at,
+              r.decision_notes, r.created_at, r.updated_at,
+              COALESCE(u_rep.name, u_rep.email) AS reported_by_name,
+              COALESCE(u_rev.name, u_rev.email) AS reviewed_by_name
+         FROM transfer_compliance_reviews r
+         LEFT JOIN users u_rep ON u_rep.id = r.reported_by
+         LEFT JOIN users u_rev ON u_rev.id = r.reviewed_by
+        WHERE r.transfer_id = $1
+        ORDER BY r.id DESC
         LIMIT 1`,
       [transferId],
     );
@@ -810,10 +875,15 @@ export class TransfersService {
     const actorId = resolveUserId(user);
 
     // Transfer yang di-flag manual tetap di-screen: hit harus tersimpan & red flag
-    // watchlist digabung ke red flag yang dilaporkan FrontDesk.
+    // watchlist digabung ke red flag yang dilaporkan FrontDesk. Hanya hit bertingkat
+    // MATCH yang boleh menyumbang WATCHLIST_HIT/DTTOT_HIT — NEAR_MATCH tetap
+    // tersimpan sebagai bukti screening tapi tidak dilabeli hit terkonfirmasi.
     const hits = await this.screenBeneficiary(id, row.beneficiary_account_name);
+    const matchHits = hits.filter(
+      (h) => classifyScreeningHit(null, Number(h.match_score)) === "MATCH",
+    );
     const mergedFlags = [
-      ...new Set([...redFlags, ...(hits.length ? this.buildWatchlistRedFlags(hits) : [])]),
+      ...new Set([...redFlags, ...(matchHits.length ? this.buildWatchlistRedFlags(matchHits) : [])]),
     ];
     const mergedNotes = hits.length
       ? [dto.report_notes?.trim(), this.buildWatchlistNotes(hits)]
@@ -971,6 +1041,137 @@ export class TransfersService {
     );
 
     return this.getById(id, user);
+  }
+
+  // ---------------------------------------------------------------------------
+  // RESCREEN WATCHLIST (historical false-positive cleanup) — ComplianceLead
+  // ---------------------------------------------------------------------------
+  /**
+   * Re-screen ulang beneficiary transfer yang SUDAH ADA memakai classifier final
+   * terkini (NEAR_MATCH_THRESHOLD/MATCH_THRESHOLD) — untuk membersihkan
+   * transfer_watchlist_hits & red flag lama yang tersimpan sebelum ambang
+   * klasifikasi dinaikkan (mis. false positive "MARIA ANIRA" vs "MIRA ARIANI"
+   * skor 0.412 yang dulu ikut memblokir sebagai DTTOT_HIT).
+   *
+   * - Transfer COMPLETED/REJECTED (sudah settled) hanya di-preview (read_only:
+   *   true, TIDAK ada write) kecuali force=true — rescreen tidak boleh diam-diam
+   *   mengubah histori transaksi final tanpa keputusan eksplisit operator.
+   * - transfer_watchlist_hits selalu diganti total dengan hasil baru (delete-then-
+   *   insert, sama seperti screenBeneficiary saat submit).
+   * - Red flag watchlist (WATCHLIST_HIT/DTTOT_HIT/WATCHLIST_NEAR_MATCH) pada baris
+   *   transfer_compliance_reviews yang MASIH OPEN di-recompute dari hasil baru;
+   *   red flag manual lain (mis. RBA_HIGH, OTHER dari FrontDesk) TIDAK disentuh.
+   *   Baris review yang SUDAH diputuskan (APPROVED_TO_CONTINUE/REJECTED/dst)
+   *   TIDAK diubah sama sekali — itu histori keputusan ComplianceLead, bukan
+   *   sesuatu yang boleh ditimpa oleh rescreen otomatis.
+   * - Status transfer TIDAK PERNAH diubah otomatis oleh endpoint ini, walau hasil
+   *   baru sudah bersih dari MATCH/NEAR_MATCH — transisi
+   *   PENDING_COMPLIANCE_REVIEW → SUBMITTED tetap lewat keputusan eksplisit
+   *   ComplianceLead (POST :id/compliance-review action=APPROVE_TO_CONTINUE).
+   *   Endpoint ini hanya melaporkan `can_continue` di response supaya
+   *   ComplianceLead tahu aksi itu sekarang aman untuk diambil.
+   */
+  async rescreenWatchlist(
+    id: number,
+    user: AuthedUser,
+    force: boolean,
+    ip?: string,
+  ) {
+    const prev = await this.pool.query(`SELECT * FROM transfers WHERE id=$1`, [id]);
+    if ((prev.rowCount ?? 0) === 0) throw new NotFoundException("Transfer not found");
+    const row = prev.rows[0];
+
+    const oldHits = await this.fetchWatchlistHits(id);
+    const oldReview = await this.fetchLatestComplianceReview(id);
+
+    const SETTLED_STATUSES = ["COMPLETED", "REJECTED"];
+    const readOnly = SETTLED_STATUSES.includes(row.status) && !force;
+
+    if (readOnly) {
+      const preview = (
+        await this.computeBeneficiaryCandidates(row.beneficiary_account_name)
+      ).map((c) => ({
+        list_type: c.list_type,
+        input_name: c.input_name,
+        matched_name: c.matched_name,
+        matched_field: c.matched_field,
+        match_score: c.match_score,
+        unique_id: c.unique_id,
+        subject_type: c.subject_type,
+        status: classifyScreeningHit(null, c.match_score),
+      }));
+      return {
+        transfer_id: id,
+        transfer_status: row.status,
+        read_only: true,
+        reason: `Transfer berstatus ${row.status} (settled) — kirim { "force": true } untuk benar-benar mengganti transfer_watchlist_hits.`,
+        old_hits: oldHits,
+        new_hits: preview,
+        old_match_count: oldHits.filter((h) => h.status === "MATCH").length,
+        new_match_count: preview.filter((h) => h.status === "MATCH").length,
+      };
+    }
+
+    const actorId = resolveUserId(user);
+    const newHits = await this.screenBeneficiary(id, row.beneficiary_account_name);
+    const newMatchHits = newHits.filter(
+      (h) => classifyScreeningHit(null, Number(h.match_score)) === "MATCH",
+    );
+    const newNearHits = newHits.filter(
+      (h) => classifyScreeningHit(null, Number(h.match_score)) === "NEAR_MATCH",
+    );
+
+    let canContinue = false;
+    if (oldReview && oldReview.status === "OPEN") {
+      const WATCHLIST_FLAG_CODES = ["WATCHLIST_HIT", "DTTOT_HIT", "WATCHLIST_NEAR_MATCH"];
+      const manualFlags = (oldReview.red_flags ?? []).filter(
+        (f: string) => !WATCHLIST_FLAG_CODES.includes(f),
+      );
+      const newWatchlistFlags = newMatchHits.length
+        ? this.buildWatchlistRedFlags(newMatchHits)
+        : newNearHits.length
+          ? ["WATCHLIST_NEAR_MATCH"]
+          : [];
+      const recomputedFlags = [...new Set([...manualFlags, ...newWatchlistFlags])];
+
+      await this.pool.query(
+        `UPDATE transfer_compliance_reviews SET red_flags=$2::jsonb, updated_at=now() WHERE id=$1`,
+        [oldReview.id, JSON.stringify(recomputedFlags)],
+      );
+
+      // "Bisa lanjut" hanya berarti sesuatu bila transfer sedang menunggu
+      // keputusan compliance MURNI karena watchlist (tidak ada red flag manual
+      // lain) dan hasil baru sudah bersih dari MATCH maupun NEAR_MATCH.
+      canContinue =
+        row.status === "PENDING_COMPLIANCE_REVIEW" &&
+        manualFlags.length === 0 &&
+        recomputedFlags.length === 0;
+    }
+
+    await this.audit(
+      actorId,
+      "TRANSFER_RES_SCREEN_WATCHLIST",
+      String(id),
+      { watchlist_hits: oldHits, compliance_review: oldReview },
+      {
+        watchlist_hits: newHits,
+        compliance_review: await this.fetchLatestComplianceReview(id),
+      },
+      ip,
+    );
+
+    const fresh = await this.getById(id, user);
+    return {
+      ...fresh,
+      rescreen: {
+        read_only: false,
+        old_hit_count: oldHits.length,
+        new_hit_count: newHits.length,
+        old_match_count: oldHits.filter((h) => h.status === "MATCH").length,
+        new_match_count: newMatchHits.length,
+        can_continue: canContinue,
+      },
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1522,12 +1723,26 @@ export class TransfersService {
               CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS sender_cif_no,
               p.cif_relationship_type AS sender_cif_relationship_type,
               a.type                              AS sender_type,
-              tb.batch_no, tb.bulk_reference_no
+              tb.batch_no, tb.bulk_reference_no,
+              COALESCE(u_created.name, u_created.email) AS created_by_name,
+              COALESCE(u_submitted.name, u_submitted.email) AS submitted_by_name,
+              COALESCE(u_approved.name, u_approved.email) AS approved_by_name,
+              COALESCE(u_rejected.name, u_rejected.email) AS rejected_by_name,
+              COALESCE(u_result.name, u_result.email) AS result_updated_by_name,
+              COALESCE(u_supervisor.name, u_supervisor.email) AS supervisor_reviewed_by_name,
+              COALESCE(u_finance.name, u_finance.email) AS finance_reviewed_by_name
        FROM transfers t
        LEFT JOIN applications a ON a.id = t.sender_application_id
        LEFT JOIN persons p ON p.id = a.person_id
        LEFT JOIN business_entities b ON b.id = a.business_id
        LEFT JOIN transfer_batches tb ON tb.id = t.batch_id
+       LEFT JOIN users u_created ON u_created.id = t.created_by
+       LEFT JOIN users u_submitted ON u_submitted.id = t.submitted_by
+       LEFT JOIN users u_approved ON u_approved.id = t.approved_by
+       LEFT JOIN users u_rejected ON u_rejected.id = t.rejected_by
+       LEFT JOIN users u_result ON u_result.id = t.result_updated_by
+       LEFT JOIN users u_supervisor ON u_supervisor.id = t.supervisor_reviewed_by
+       LEFT JOIN users u_finance ON u_finance.id = t.finance_reviewed_by
        WHERE t.id=$1`,
       [id],
     );
@@ -1561,8 +1776,10 @@ export class TransfersService {
           red_flags: latestReview.red_flags,
           report_notes: latestReview.report_notes,
           reported_by: latestReview.reported_by,
+          reported_by_name: latestReview.reported_by_name,
           reported_at: latestReview.reported_at,
           reviewed_by: latestReview.reviewed_by,
+          reviewed_by_name: latestReview.reviewed_by_name,
           reviewed_at: latestReview.reviewed_at,
           decision_notes: latestReview.decision_notes,
         }

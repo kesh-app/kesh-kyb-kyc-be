@@ -21,6 +21,7 @@ import {
   DecideTransferDto,
   ReviewTransferDto,
   FinanceReviewTransferDto,
+  RescreenTransferDto,
   SetTransferResultDto,
   SubmitComplianceReviewDto,
   UpdateTransferDto,
@@ -99,6 +100,19 @@ export class TransfersController {
     @Body() dto: ComplianceReviewDecisionDto
   ) {
     return this.svc.complianceReview(id, req.user, dto, req.ip);
+  }
+
+  // RESCREEN WATCHLIST — historical false-positive cleanup, ComplianceLead
+  // (+ SystemAdmin/Director via RolesGuard full access). Read-only preview untuk
+  // transfer COMPLETED/REJECTED kecuali force=true — lihat rescreenWatchlist().
+  @Post(":id/rescreen-watchlist")
+  @Roles("ComplianceLead", "SystemAdmin", "Director")
+  async rescreenWatchlist(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: RescreenTransferDto,
+  ) {
+    return this.svc.rescreenWatchlist(id, req.user, dto.force === true, req.ip);
   }
 
   // SUPERVISOR REVIEW (layer 1) — OperationSupervisor
