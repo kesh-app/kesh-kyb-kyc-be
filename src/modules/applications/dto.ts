@@ -535,3 +535,88 @@ export class CreatePartyDto {
   @IsString()
   source_of_wealth_other?: string;
 }
+
+/**
+ * PATCH /applications/:id/parties/:partyId — every field optional, only what
+ * the payload carries is written. Edit must never be faked as delete+create:
+ * that would drop the party's CIF and audit trail.
+ */
+export class UpdatePartyDto {
+  @IsOptional()
+  @IsIn([
+    "DIRECTOR",
+    "COMMISSIONER",
+    "MANAGER",
+    "BO",
+    "AUTHORIZED_REP",
+    "SHAREHOLDER",
+  ])
+  role?:
+    | "DIRECTOR"
+    | "COMMISSIONER"
+    | "MANAGER"
+    | "BO"
+    | "AUTHORIZED_REP"
+    | "SHAREHOLDER";
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  full_name?: string;
+
+  @IsOptional()
+  @IsIn(["KTP", "SIM", "PASPOR", "LAINNYA"])
+  identity_type?: "KTP" | "SIM" | "PASPOR" | "LAINNYA";
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  identity_number?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dob?: string;
+
+  @IsOptional()
+  @IsString()
+  nationality?: string;
+
+  @IsOptional()
+  @IsString()
+  phone?: string;
+
+  @IsOptional()
+  @IsEmail()
+  email?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  ownership_percentage?: number;
+
+  @IsOptional()
+  @IsString()
+  address?: string;
+
+  @IsOptional()
+  @IsString()
+  identity_document_type?: string;
+
+  @IsOptional()
+  @IsString()
+  source_of_funds?: string;
+
+  @IsOptional()
+  @IsString()
+  source_of_funds_other?: string;
+
+  @IsOptional()
+  @IsString()
+  source_of_wealth?: string;
+
+  @IsOptional()
+  @IsString()
+  source_of_wealth_other?: string;
+}

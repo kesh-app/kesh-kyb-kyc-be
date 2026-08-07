@@ -36,6 +36,21 @@ export const MATCH_THRESHOLD = 0.9;
  * dengan skor rendah sebelum ambang ini dinaikkan (otomatis jadi CLEAR tanpa
  * perlu migrasi/backfill).
  */
+/**
+ * Kolom satu baris party. Dipakai list & update supaya FE selalu menerima
+ * bentuk yang sama — termasuk kolom detail (kepemilikan/alamat/sumber dana)
+ * yang dibutuhkan tabel Step 2 dan form Edit Pihak.
+ */
+const PARTY_ROW_SELECT = `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
+              bp.cif_no, bp.cif_relationship_type,
+              bp.ownership_percentage, bp.address, bp.identity_document_type,
+              bp.source_of_funds, bp.source_of_funds_other,
+              bp.source_of_wealth, bp.source_of_wealth_other,
+              p.id AS person_id, p.full_name, p.identity_type, p.identity_number,
+              p.dob, p.nationality, p.phone, p.email
+       FROM business_parties bp
+       JOIN persons p ON p.id = bp.person_id`;
+
 export function classifyScreeningHit(
   reviewStatus: string | null | undefined,
   topScore: number | null | undefined,
@@ -2757,11 +2772,7 @@ export class ApplicationsService {
       );
 
     const { rows } = await this.pool.query(
-      `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
-              bp.cif_no, bp.cif_relationship_type,
-              p.id AS person_id, p.full_name, p.identity_type, p.identity_number, p.dob, p.nationality
-       FROM business_parties bp
-       JOIN persons p ON p.id = bp.person_id
+      `${PARTY_ROW_SELECT}
        WHERE bp.business_id = $1
        ORDER BY bp.created_at DESC`,
       [app.business_id],
@@ -2903,6 +2914,160 @@ export class ApplicationsService {
     );
 
     return party.rows[0];
+  }
+
+  /**
+   * Edit satu baris party. Sengaja BUKAN delete+create: baris yang sama
+   * dipertahankan supaya CIF, relasi dokumen, dan audit trail tidak hilang.
+   * Hanya field yang dikirim yang ditulis.
+   */
+  async updateParty(appId: number, partyId: number, dto: any) {
+    const { rows: appRows } = await this.pool.query(
+      `SELECT id, business_id, type FROM applications WHERE id=$1`,
+      [appId],
+    );
+    const app = appRows[0];
+    if (!app) throw new NotFoundException("Application not found");
+    if (app.type !== "BUSINESS" || !app.business_id)
+      throw new BadRequestException(
+        "Parties only apply to BUSINESS applications",
+      );
+
+    const { rows: partyRows } = await this.pool.query(
+      `SELECT bp.id, bp.person_id, bp.role, bp.cif_no,
+              p.identity_type, p.identity_number
+         FROM business_parties bp
+         JOIN persons p ON p.id = bp.person_id
+        WHERE bp.id=$1 AND bp.business_id=$2`,
+      [partyId, app.business_id],
+    );
+    const party = partyRows[0];
+    if (!party) throw new NotFoundException("Party not found");
+
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(dto, k);
+
+    const effIdentityType = has("identity_type")
+      ? dto.identity_type
+      : party.identity_type;
+    if (has("identity_number") && effIdentityType === "KTP") {
+      dto.identity_number = String(dto.identity_number || "")
+        .replace(/\D+/g, "")
+        .trim();
+    }
+    if (dto.identity_number && String(dto.identity_number).length > 16) {
+      throw new BadRequestException("Nomor Identitas maksimal 16 karakter.");
+    }
+    const effIdentityNumber = has("identity_number")
+      ? dto.identity_number
+      : party.identity_number;
+
+    // Identitas berubah → kalau nomor itu sudah dimiliki person lain, arahkan
+    // party ke person tersebut (jangan tabrak unique index identitas persons).
+    let personId: number = party.person_id;
+    const identityChanged =
+      effIdentityType !== party.identity_type ||
+      effIdentityNumber !== party.identity_number;
+    if (identityChanged) {
+      const { rows: existing } = await this.pool.query(
+        `SELECT id FROM persons WHERE identity_type=$1 AND identity_number=$2 LIMIT 1`,
+        [effIdentityType, effIdentityNumber],
+      );
+      if (existing[0] && existing[0].id !== personId) personId = existing[0].id;
+    }
+    const retargeted = personId !== party.person_id;
+
+    await this.pool.query(
+      `UPDATE persons
+          SET full_name = COALESCE($1, full_name),
+              identity_type = COALESCE($2, identity_type),
+              identity_number = COALESCE($3, identity_number),
+              dob = COALESCE($4::date, dob),
+              nationality = COALESCE($5, nationality),
+              phone = COALESCE($6, phone),
+              email = COALESCE($7, email)
+        WHERE id=$8`,
+      [
+        dto.full_name ?? null,
+        retargeted ? null : (has("identity_type") ? effIdentityType : null),
+        retargeted ? null : (has("identity_number") ? effIdentityNumber : null),
+        dto.dob ?? null,
+        dto.nationality ?? null,
+        dto.phone ?? null,
+        dto.email ?? null,
+        personId,
+      ],
+    );
+
+    // *_other hanya direkonsiliasi saat field utamanya ikut dikirim.
+    const otherPairs = [
+      {
+        main: "source_of_funds",
+        other: "source_of_funds_other",
+        label: "Sumber Dana",
+      },
+      {
+        main: "source_of_wealth",
+        other: "source_of_wealth_other",
+        label: "Sumber Kekayaan",
+      },
+    ].filter((p) => has(p.main));
+    const partyOther = this.resolveOtherFieldsCreate(dto, otherPairs);
+
+    const sets: string[] = ["updated_at = now()"];
+    const vals: any[] = [];
+    const push = (col: string, value: any) => {
+      vals.push(value);
+      sets.push(`${col} = $${vals.length}`);
+    };
+    if (retargeted) push("person_id", personId);
+    for (const col of [
+      "role",
+      "ownership_percentage",
+      "address",
+      "identity_document_type",
+      "source_of_funds",
+      "source_of_wealth",
+    ]) {
+      if (has(col)) push(col, dto[col] ?? null);
+    }
+    for (const p of otherPairs) push(p.other, partyOther[p.other]);
+
+    // Ganti peran menjadi BO → butuh CIF seperti jalur tambah pihak.
+    const newRole = has("role") ? dto.role : party.role;
+    if (newRole === "BO" && !party.cif_no) {
+      const cif =
+        (await this.resolveCifForIdentity(effIdentityNumber)) ??
+        (await this.generateIndividualCif(effIdentityNumber));
+      push("cif_no", cif);
+      push("cif_relationship_type", "BO");
+      await this.pool.query(
+        `UPDATE persons SET cif_no = COALESCE(cif_no, $1) WHERE id = $2`,
+        [cif, personId],
+      );
+    }
+
+    vals.push(partyId, app.business_id);
+    try {
+      await this.pool.query(
+        `UPDATE business_parties SET ${sets.join(", ")}
+          WHERE id=$${vals.length - 1} AND business_id=$${vals.length}`,
+        vals,
+      );
+    } catch (e: any) {
+      // unique (business_id, person_id, role)
+      if (e?.code === "23505") {
+        throw new BadRequestException(
+          "Pihak dengan peran tersebut sudah terdaftar untuk badan usaha ini.",
+        );
+      }
+      throw e;
+    }
+
+    const { rows } = await this.pool.query(
+      `${PARTY_ROW_SELECT} WHERE bp.id=$1`,
+      [partyId],
+    );
+    return rows[0];
   }
 
   async deleteParty(appId: number, partyId: number) {

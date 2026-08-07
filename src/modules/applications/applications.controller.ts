@@ -23,6 +23,7 @@ import {
   CreateBusinessDto,
   AddDocumentDto,
   CreatePartyDto,
+  UpdatePartyDto,
   DecisionDto,
   ListApplicationsQueryDto,
 } from "./dto";
@@ -101,6 +102,16 @@ export class ApplicationsController {
     @Body(new ValidationPipe({ whitelist: true })) dto: CreatePartyDto
   ) {
     return this.svc.addParty(appId, dto);
+  }
+
+  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Patch(":id/parties/:partyId")
+  async updateParty(
+    @Param("id", ParseIntPipe) appId: number,
+    @Param("partyId", ParseIntPipe) partyId: number,
+    @Body(new ValidationPipe({ whitelist: true })) dto: UpdatePartyDto
+  ) {
+    return this.svc.updateParty(appId, partyId, dto);
   }
 
   @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
