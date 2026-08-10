@@ -309,7 +309,7 @@ export class StatementRefundsService {
 
     const [{ rows }, { rows: countRows }] = await Promise.all([
       this.pool.query(
-        `SELECT r.id, r.refund_no, r.complaint_id, c.complaint_no,
+        `SELECT r.id, r.public_id, r.refund_no, r.complaint_id, c.complaint_no,
                 c.status AS complaint_status, c.customer_name AS complaint_customer_name,
                 r.original_transfer_id,
                 COALESCE(t.reference_no, t.partner_reference_no) AS transfer_reference_no,

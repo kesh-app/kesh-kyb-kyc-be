@@ -656,7 +656,7 @@ export class WatchlistService {
     const whereSql = wh.length ? `WHERE ${wh.join(" AND ")}` : "";
 
     const sql = `
-      SELECT id, unique_id, list_type, list_source, watchlist_type, subject_type,
+      SELECT id, public_id, unique_id, list_type, list_source, watchlist_type, subject_type,
              full_name, aliases_concat AS alias_name, entity_name,
              date_of_birth, raw_date_of_birth, place_of_birth, nationality,
              national_id_number, position_title, institution_name, address,

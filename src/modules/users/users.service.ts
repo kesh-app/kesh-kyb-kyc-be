@@ -65,6 +65,7 @@ export class UsersService {
     const res = await this.pool.query(
       `SELECT
        id,
+       public_id,
        email,
        name AS full_name,      -- ✅ pakai kolom name, alias jadi full_name
        role,

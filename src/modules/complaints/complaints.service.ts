@@ -246,7 +246,7 @@ export class ComplaintsService {
     );
 
     const dataQ = await this.pool.query(
-      `SELECT c.id, c.complaint_no, c.customer_application_id, c.customer_cif_no,
+      `SELECT c.id, c.public_id, c.complaint_no, c.customer_application_id, c.customer_cif_no,
               c.customer_name, c.customer_type, c.transfer_id, c.transaction_reference,
               c.category, c.channel, c.priority, c.status,
               c.complaint_level, c.level_3_risk_category,

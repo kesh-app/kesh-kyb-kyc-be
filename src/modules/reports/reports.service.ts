@@ -110,7 +110,7 @@ export class ReportsService {
       params,
     );
     const dataQ = await this.pool.query(
-      `SELECT id, report_no, report_type, generation_mode, format, status,
+      `SELECT id, public_id, report_no, report_type, generation_mode, format, status,
               period_start, period_end, cutoff_at, as_of, row_counts,
               file_name, file_size, generated_by, generated_at, completed_at, error_message
        FROM generated_reports ${whereSql}

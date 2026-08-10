@@ -3138,9 +3138,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
       const b = detail.body.business;
       expect(b.business_province_code).toBe('31');
-      expect(b.business_province_name).toBe('DKI Jakarta');
+      expect(b.business_province_name).toBe('Daerah Khusus Ibukota Jakarta');
       expect(b.business_city_code).toBe('3171');
-      expect(b.business_city_name).toBe('Kota Jakarta Pusat');
+      expect(b.business_city_name).toBe('Kota Administrasi Jakarta Pusat');
     });
 
     it('GE-14: Business city_code bukan bagian province_code → 400', async () => {
@@ -9477,8 +9477,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .send(baseBody({
             province_code: '31',
             city_code: '3171',
-            district_code: '3171010',
-            village_code: '3171010001',
+            district_code: '317101',
+            village_code: '3171011001',
             identity_number: `322001${SUFFIX}`,
           }))
           .expect(201);
@@ -9489,12 +9489,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(200);
 
         expect(detail.body.person.province_code).toBe('31');
-        expect(detail.body.person.province_name).toBe('DKI Jakarta');
+        expect(detail.body.person.province_name).toBe('Daerah Khusus Ibukota Jakarta');
         expect(detail.body.person.city_code).toBe('3171');
-        expect(detail.body.person.city_name).toBe('Kota Jakarta Pusat');
-        expect(detail.body.person.district_code).toBe('3171010');
+        expect(detail.body.person.city_name).toBe('Kota Administrasi Jakarta Pusat');
+        expect(detail.body.person.district_code).toBe('317101');
         expect(detail.body.person.district_name).toBe('Gambir');
-        expect(detail.body.person.village_code).toBe('3171010001');
+        expect(detail.body.person.village_code).toBe('3171011001');
         expect(detail.body.person.village_name).toBe('Gambir');
       });
 
@@ -9513,14 +9513,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       it('V2-03: district_code tidak di bawah city_code → 400', async () => {
-        // 3273010 = Astana Anyar, milik kota 3273 (Bandung), bukan 3171 (Jakarta Pusat)
+        // 327310 = Astanaanyar, milik kota 3273 (Bandung), bukan 3171 (Jakarta Pusat)
         const res = await request(app.getHttpServer())
           .post(`${BASE}/applications/individual`)
           .set('Authorization', `Bearer ${complianceToken}`)
           .send(baseBody({
             province_code: '31',
             city_code: '3171',
-            district_code: '3273010',
+            district_code: '327310',
             identity_number: `322003${SUFFIX}`,
           }))
           .expect(400);
@@ -9528,15 +9528,15 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       it('V2-04: village_code tidak di bawah district_code → 400', async () => {
-        // 3273010001 = milik district 3273010 (Bandung), bukan 3171010 (Gambir)
+        // 3273101003 = milik district 327310 (Bandung), bukan 317101 (Gambir)
         const res = await request(app.getHttpServer())
           .post(`${BASE}/applications/individual`)
           .set('Authorization', `Bearer ${complianceToken}`)
           .send(baseBody({
             province_code: '31',
             city_code: '3171',
-            district_code: '3171010',
-            village_code: '3273010001',
+            district_code: '317101',
+            village_code: '3273101003',
             identity_number: `322004${SUFFIX}`,
           }))
           .expect(400);
@@ -9750,8 +9750,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           // no address_identity — use structured fields
           province_code: '31',
           city_code: '3171',
-          district_code: '3171010',
-          village_code: '3171010001',
+          district_code: '317101',
+          village_code: '3171011001',
           street_address: 'Jl. Gambir Raya',
           house_number: '12A',
           rt_rw: '003/007',
@@ -9779,8 +9779,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           identity_number: `317600X2${SUFFIX}`,
           province_code: '31',
           city_code: '3171',
-          district_code: '3171010',
-          village_code: '3171010001',
+          district_code: '317101',
+          village_code: '3171011001',
           street_address: 'Jl. Medan Merdeka',
           house_number: '5',
           rt_rw: '001/002',
@@ -9854,7 +9854,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.data.length).toBeGreaterThanOrEqual(38);
       const jakarta = res.body.data.find((p: any) => p.code === '31');
       expect(jakarta).toBeDefined();
-      expect(jakarta.name).toBe('DKI Jakarta');
+      // Nama resmi Kepmendagri 300.2.2-2138/2025 — bentuk panjang, bukan
+      // singkatan "DKI Jakarta" yang dipakai seed lama.
+      expect(jakarta.name).toBe('Daerah Khusus Ibukota Jakarta');
     });
 
     it('W-02: GET /references/provinces?q=Jakarta → filter by name', async () => {
@@ -9885,20 +9887,20 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.data.length).toBeGreaterThan(0);
-      const gambir = res.body.data.find((d: any) => d.code === '3171010');
+      const gambir = res.body.data.find((d: any) => d.code === '317101');
       expect(gambir).toBeDefined();
       expect(gambir.name).toBe('Gambir');
     });
 
-    it('W-05: GET /references/villages?district_code=3171010 → kelurahan di Gambir', async () => {
+    it('W-05: GET /references/villages?district_code=317101 → kelurahan di Gambir', async () => {
       const res = await request(app.getHttpServer())
-        .get(`${BASE}/references/villages?district_code=3171010`)
+        .get(`${BASE}/references/villages?district_code=317101`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.data.length).toBeGreaterThan(0);
-      const gambir = res.body.data.find((v: any) => v.code === '3171010001');
+      const gambir = res.body.data.find((v: any) => v.code === '3171011001');
       expect(gambir).toBeDefined();
       expect(gambir.name).toBe('Gambir');
     });
@@ -10016,11 +10018,14 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
 
       const provinces = res.body.data as Array<{ code: string; name: string }>;
+      // Kode resmi Kepmendagri 300.2.2-2138/2025. Seed lama memakai kode lain
+      // (92=Papua Barat Daya, 95=Papua Selatan, 96=Papua Tengah, 97=Papua
+      // Pegunungan) yang tidak ada di dataset resmi.
       const expected = [
-        { code: '92', name: 'Papua Barat Daya' },
-        { code: '95', name: 'Papua Selatan' },
-        { code: '96', name: 'Papua Tengah' },
-        { code: '97', name: 'Papua Pegunungan' },
+        { code: '93', name: 'Papua Selatan' },
+        { code: '94', name: 'Papua Tengah' },
+        { code: '95', name: 'Papua Pegunungan' },
+        { code: '96', name: 'Papua Barat Daya' },
       ];
       for (const exp of expected) {
         const found = provinces.find((p) => p.code === exp.code);
@@ -10037,7 +10042,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.data.length).toBeGreaterThanOrEqual(1);
-      const pbd = res.body.data.find((p: any) => p.code === '92');
+      const pbd = res.body.data.find((p: any) => p.code === '96');
       expect(pbd).toBeDefined();
       expect(pbd.name).toBe('Papua Barat Daya');
     });
@@ -10075,20 +10080,20 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.data.length).toBeGreaterThanOrEqual(20);
-      const enggal = res.body.data.find((d: any) => d.code === '1871170');
+      const enggal = res.body.data.find((d: any) => d.code === '187117');
       expect(enggal).toBeDefined();
       expect(enggal.name).toBe('Enggal');
     });
 
-    it('W-15: GET /references/villages?district_code=1871170 → kelurahan Kec. Enggal', async () => {
+    it('W-15: GET /references/villages?district_code=187117 → kelurahan Kec. Enggal', async () => {
       const res = await request(app.getHttpServer())
-        .get(`${BASE}/references/villages?district_code=1871170`)
+        .get(`${BASE}/references/villages?district_code=187117`)
         .set('Authorization', `Bearer ${complianceToken}`)
         .expect(200);
 
       expect(Array.isArray(res.body.data)).toBe(true);
       expect(res.body.data.length).toBeGreaterThanOrEqual(6);
-      const enggalKel = res.body.data.find((v: any) => v.code === '1871170001');
+      const enggalKel = res.body.data.find((v: any) => v.code === '1871171001');
       expect(enggalKel).toBeDefined();
       expect(enggalKel.name).toBe('Enggal');
     });
@@ -15234,6 +15239,272 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(200);
         expect(res.body.status).toBe('REVISION_REQUIRED');
       });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // WL. Wilayah referensi + Alamat Kedudukan KYB sampai kelurahan
+  // PB. public_id UUIDv4 sebagai identifier publik (numeric id tetap utuh)
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('WL. Referensi wilayah & alamat KYB kecamatan/kelurahan', () => {
+    // Rantai valid dari dataset Kepmendagri 300.2.2-2138/2025.
+    // Kode kecamatan = 6 digit (prov 2 + kab 2 + kec 2), desa/kel = 10 digit.
+    const PROV = '18';          // Lampung
+    const KAB = '1871';         // Kota Bandar Lampung
+    const KEC = '187117';       // Enggal
+    const KEL = '1871171001';   // Kelurahan Enggal
+    const KAB_LAIN = '1872';    // Kota Metro
+    const KEC_LAIN = '187201';  // Metro Pusat — anak dari 1872, bukan 1871
+
+    let wlBizAppId: string;
+
+    function ref(pathname: string) {
+      return request(app.getHttpServer())
+        .get(`${BASE}/references/${pathname}`)
+        .set('Authorization', `Bearer ${complianceToken}`);
+    }
+
+    /** Payload KYB minimal; address override dipakai per test. */
+    function businessPayload(seq: string, address: Record<string, unknown> = {}) {
+      return {
+        legal_name: `PT Wilayah ${seq} ${SUFFIX}`,
+        legal_form: 'PT',
+        incorporation_place: 'Bandar Lampung',
+        incorporation_date: '2021-05-05',
+        deed_number: `AKTA-WL${seq}-${SUFFIX}`,
+        deed_establishment_number: `AKTA-WL${seq}-${SUFFIX}`,
+        business_license_number: `BLWL${seq}${SUFFIX}`,
+        nib: `NIBWL${seq}${SUFFIX}`,
+        npwp: npwp15(`9${seq}`),
+        address_line: 'Jl. Wilayah Raya No. 7',
+        city: 'Bandar Lampung',
+        province: 'Lampung',
+        postal_code: '35213',
+        business_activity: 'Perdagangan Umum',
+        phone: `0721${seq}${SUFFIX}`,
+        ...address,
+      };
+    }
+
+    function createBusiness(seq: string, address: Record<string, unknown> = {}) {
+      return request(app.getHttpServer())
+        .post(`${BASE}/applications/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send(businessPayload(seq, address));
+    }
+
+    // ── F1: endpoint referensi ────────────────────────────────────────────
+    it('WL-01: GET /references/{provinces,regencies,districts,villages} mengembalikan hierarki', async () => {
+      const provinces = await ref('provinces').expect(200);
+      const provRows = provinces.body.data ?? provinces.body;
+      expect(Array.isArray(provRows)).toBe(true);
+      expect(provRows.some((p: any) => p.code === PROV)).toBe(true);
+
+      const regencies = await ref(`regencies?province_code=${PROV}`).expect(200);
+      const regRows = regencies.body.data ?? regencies.body;
+      expect(regRows.length).toBeGreaterThan(0);
+      expect(regRows.every((r: any) => String(r.code).startsWith(PROV))).toBe(true);
+      expect(regRows.some((r: any) => r.code === KAB)).toBe(true);
+
+      const districts = await ref(`districts?regency_code=${KAB}`).expect(200);
+      const disRows = districts.body.data ?? districts.body;
+      expect(disRows.length).toBeGreaterThan(0);
+      expect(disRows.some((d: any) => d.code === KEC)).toBe(true);
+
+      const villages = await ref(`villages?district_code=${KEC}`).expect(200);
+      const vilRows = villages.body.data ?? villages.body;
+      expect(vilRows.length).toBeGreaterThan(0);
+      expect(vilRows.some((v: any) => v.code === KEL)).toBe(true);
+    });
+
+    // ── F2 + F3: create menerima 4 level, detail mengembalikannya ─────────
+    it('WL-02: KYB create menerima provinsi/kota/kecamatan/kelurahan, detail mengembalikan semuanya', async () => {
+      const res = await createBusiness('01', {
+        business_province_code: PROV,
+        business_city_code: KAB,
+        business_district_code: KEC,
+        business_village_code: KEL,
+      }).expect(201);
+      wlBizAppId = String(res.body.id);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${wlBizAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const b = detail.body.business;
+      expect(b.business_province_code).toBe(PROV);
+      expect(b.business_city_code).toBe(KAB);
+      expect(b.business_district_code).toBe(KEC);
+      expect(b.business_village_code).toBe(KEL);
+      // Nama kanonik diisi dari tabel referensi, bukan dari input client.
+      expect(b.business_province_name).toBe('Lampung');
+      expect(b.business_city_name).toBe('Kota Bandar Lampung');
+      expect(b.business_district_name).toBe('Enggal');
+      expect(b.business_village_name).toBe('Enggal');
+    });
+
+    // ── F4: PATCH bisa mengubah kecamatan/kelurahan ───────────────────────
+    it('WL-03: PATCH /applications/:id/business dapat mengubah kecamatan & kelurahan', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${wlBizAppId}/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ business_village_code: '1871171002' })
+        .expect(200);
+      expect(res.status).toBe(200);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${wlBizAppId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.business.business_village_code).toBe('1871171002');
+      expect(detail.body.business.business_village_name).toBe('Pelita');
+      // Level di atasnya tidak ikut hilang saat patch parsial.
+      expect(detail.body.business.business_district_code).toBe(KEC);
+      expect(detail.body.business.business_city_code).toBe(KAB);
+    });
+
+    // ── F5: kecamatan di bawah kota yang salah ditolak ────────────────────
+    it('WL-04: kecamatan bukan bagian dari kota → 400', async () => {
+      const res = await createBusiness('02', {
+        business_province_code: PROV,
+        business_city_code: KAB,
+        business_district_code: KEC_LAIN, // anak dari 1872, bukan 1871
+      }).expect(400);
+      expect(String(res.body.message)).toContain('business_district_code');
+
+      // Patch pun ditolak dengan aturan yang sama.
+      const patched = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${wlBizAppId}/business`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ business_district_code: KEC_LAIN })
+        .expect(400);
+      expect(String(patched.body.message)).toContain('business_district_code');
+    });
+
+    // ── F6: kelurahan di bawah kecamatan yang salah ditolak ───────────────
+    it('WL-05: kelurahan bukan bagian dari kecamatan → 400', async () => {
+      const res = await createBusiness('03', {
+        business_province_code: '18',
+        business_city_code: KAB_LAIN,
+        business_district_code: KEC_LAIN,
+        business_village_code: KEL, // anak dari 187117, bukan 1872010
+      }).expect(400);
+      expect(String(res.body.message)).toContain('business_village_code');
+    });
+
+    it('WL-06: kode yang tidak ada di tabel referensi → 400', async () => {
+      const res = await createBusiness('04', {
+        business_province_code: PROV,
+        business_city_code: KAB,
+        business_district_code: '9999999',
+      }).expect(400);
+      expect(String(res.body.message)).toContain('tidak ditemukan');
+    });
+
+    // ── F7: baris lama tanpa kecamatan/kelurahan tetap bisa dibuka ────────
+    it('WL-07: KYB legacy tanpa kecamatan/kelurahan tetap load dengan nilai null', async () => {
+      const res = await createBusiness('05').expect(201); // tanpa kode wilayah sama sekali
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${res.body.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      const b = detail.body.business;
+      expect(b.business_district_code).toBeNull();
+      expect(b.business_district_name).toBeNull();
+      expect(b.business_village_code).toBeNull();
+      expect(b.business_village_name).toBeNull();
+      // Alamat teks bebas legacy tetap terisi.
+      expect(b.address_line).toBe('Jl. Wilayah Raya No. 7');
+    });
+  });
+
+  describe('PB. public_id UUIDv4 pada entitas utama', () => {
+    // UUIDv4: digit versi '4' di grup ke-3, varian 8/9/a/b di grup ke-4.
+    const UUID_V4 =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    it('PB-01: setiap tabel target punya public_id unik, NOT NULL, dan berformat UUIDv4', async () => {
+      const targets = [
+        'applications', 'persons', 'business_entities', 'documents',
+        'business_parties', 'transfers', 'transfer_batches', 'complaints',
+        'statement_refunds', 'monitoring_cases', 'generated_reports',
+        'application_data_reviews', 'watchlist_entries', 'users',
+      ];
+
+      for (const t of targets) {
+        const { rows } = await pgPool.query(
+          `SELECT COUNT(*)::int AS total,
+                  COUNT(public_id)::int AS terisi,
+                  COUNT(DISTINCT public_id)::int AS unik
+             FROM ${t}`,
+        );
+        expect(rows[0].terisi).toBe(rows[0].total);
+        expect(rows[0].unik).toBe(rows[0].total);
+
+        if (rows[0].total > 0) {
+          const { rows: sample } = await pgPool.query(
+            `SELECT public_id FROM ${t} LIMIT 1`,
+          );
+          expect(String(sample[0].public_id)).toMatch(UUID_V4);
+        }
+      }
+    });
+
+    it('PB-02: id numerik & FK TIDAK berubah — public_id murni tambahan', async () => {
+      // Kalau task ini diam-diam menyentuh PK, kolom id akan berubah tipe.
+      const { rows } = await pgPool.query(
+        `SELECT table_name, data_type FROM information_schema.columns
+          WHERE table_schema='public' AND column_name='id'
+            AND table_name IN ('applications','persons','business_entities','transfers','complaints')
+          ORDER BY table_name`,
+      );
+      expect(rows.length).toBe(5);
+      for (const r of rows) expect(r.data_type).toBe('bigint');
+
+      // FK aplikasi → person/business tetap numerik.
+      const { rows: fk } = await pgPool.query(
+        `SELECT data_type FROM information_schema.columns
+          WHERE table_name='applications' AND column_name IN ('person_id','business_id')`,
+      );
+      expect(fk.length).toBe(2);
+      for (const r of fk) expect(r.data_type).toBe('bigint');
+    });
+
+    it('PB-03: response detail & list membawa public_id (additive, id lama tetap ada)', async () => {
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/applications?limit=1`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const firstApp = (list.body.data ?? list.body)[0];
+      expect(firstApp.id).toBeDefined();
+      expect(String(firstApp.public_id)).toMatch(UUID_V4);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${firstApp.id}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(String(detail.body.application.public_id)).toMatch(UUID_V4);
+      const subject = detail.body.person ?? detail.body.business;
+      if (subject) expect(String(subject.public_id)).toMatch(UUID_V4);
+
+      const transfers = await request(app.getHttpServer())
+        .get(`${BASE}/transfers?limit=1`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const firstTransfer = (transfers.body.data ?? transfers.body)[0];
+      if (firstTransfer) {
+        expect(firstTransfer.id).toBeDefined();
+        expect(String(firstTransfer.public_id)).toMatch(UUID_V4);
+      }
+
+      const complaints = await request(app.getHttpServer())
+        .get(`${BASE}/complaints?limit=1`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const firstComplaint = (complaints.body.data ?? complaints.body)[0];
+      if (firstComplaint) expect(String(firstComplaint.public_id)).toMatch(UUID_V4);
     });
   });
 });

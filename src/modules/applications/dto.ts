@@ -264,8 +264,11 @@ export class CreateBusinessDto {
   @IsNotEmpty()
   province!: string;
 
-  // Alamat Kedudukan — dropdown provinsi/kota (mirror Individual CDD). Opsional;
-  // kolom bebas address_line/city/province tetap dipakai untuk teks alamat detail.
+  // Alamat Kedudukan — dropdown Provinsi / Kota-Kabupaten / Kecamatan /
+  // Kelurahan-Desa (mirror Individual CDD). Semua opsional; kolom bebas
+  // address_line/city/province tetap dipakai untuk teks alamat detail.
+  // Hanya KODE yang diterima — nama kanonik tiap level diisi service dari
+  // tabel ref_*, jadi client tidak bisa mengirim nama yang tidak cocok.
   @IsOptional()
   @IsString()
   business_province_code?: string;
@@ -273,6 +276,16 @@ export class CreateBusinessDto {
   @IsOptional()
   @IsString()
   business_city_code?: string;
+
+  /** Kecamatan */
+  @IsOptional()
+  @IsString()
+  business_district_code?: string;
+
+  /** Kelurahan/Desa */
+  @IsOptional()
+  @IsString()
+  business_village_code?: string;
 
   @IsString()
   @IsNotEmpty()

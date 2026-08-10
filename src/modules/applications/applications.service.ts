@@ -81,7 +81,7 @@ export const watchlistCandidateWhereSql = (normInput: string) =>
  * bentuk yang sama — termasuk kolom detail (kepemilikan/alamat/sumber dana)
  * yang dibutuhkan tabel Step 2 dan form Edit Pihak.
  */
-const PARTY_ROW_SELECT = `SELECT bp.id, bp.role, bp.is_active, bp.created_at,
+const PARTY_ROW_SELECT = `SELECT bp.id, bp.public_id, bp.role, bp.is_active, bp.created_at,
               bp.cif_no, bp.cif_relationship_type,
               bp.ownership_percentage, bp.address, bp.identity_document_type,
               bp.source_of_funds, bp.source_of_funds_other,
@@ -442,55 +442,70 @@ export class ApplicationsService {
     }
   }
 
-  // ── Business "Alamat Kedudukan" province/city dropdown helper ─────────────────
-  // Validates business_province_code / business_city_code against ref tables and
-  // resolves their display names. Mirrors the Individual CDD region behaviour.
+  // ── Business "Alamat Kedudukan" dropdown wilayah ──────────────────────────
+  // Validasi hierarki provinsi → kota/kabupaten → kecamatan → kelurahan/desa
+  // terhadap tabel ref_*, sekaligus mengisi nama kanonik tiap level. Mirror dari
+  // perilaku Individual CDD (validateRegionHierarchy + resolveRegionNames), tapi
+  // memakai nama kolom business_* milik tabel business_entities.
+  //
+  // KODE adalah sumber kebenaran: nama yang dikirim client diabaikan dan selalu
+  // ditimpa nama dari tabel referensi. Level yang kodenya tidak dikirim jadi null
+  // (baris KYB lama memang tidak punya kecamatan/kelurahan).
   private async validateAndResolveBusinessRegion(dto: any): Promise<{
     business_province_code: string | null;
     business_province_name: string | null;
     business_city_code: string | null;
     business_city_name: string | null;
+    business_district_code: string | null;
+    business_district_name: string | null;
+    business_village_code: string | null;
+    business_village_name: string | null;
   }> {
-    const out = {
-      business_province_code: dto.business_province_code || null,
-      business_province_name: null as string | null,
-      business_city_code: dto.business_city_code || null,
-      business_city_name: null as string | null,
-    };
+    // Tiap level: kolom DTO, tabel referensi, kolom induk di tabel itu, dan
+    // level induknya. Satu loop menggantikan empat blok yang isinya sama.
+    const LEVELS = [
+      { key: "province", table: "ref_provinces", parentCol: null, parentKey: null },
+      { key: "city", table: "ref_regencies", parentCol: "province_code", parentKey: "province" },
+      { key: "district", table: "ref_districts", parentCol: "regency_code", parentKey: "city" },
+      { key: "village", table: "ref_villages", parentCol: "district_code", parentKey: "district" },
+    ] as const;
 
-    if (dto.business_province_code) {
-      const { rows } = await this.pool.query(
-        `SELECT name FROM ref_provinces WHERE code=$1`,
-        [dto.business_province_code],
-      );
-      if (!rows[0])
-        throw new BadRequestException(
-          `business_province_code '${dto.business_province_code}' tidak ditemukan`,
-        );
-      out.business_province_name = rows[0].name;
+    const out: Record<string, string | null> = {};
+    for (const { key } of LEVELS) {
+      const raw = dto[`business_${key}_code`];
+      out[`business_${key}_code`] =
+        typeof raw === "string" ? raw.trim() || null : raw || null;
+      out[`business_${key}_name`] = null;
     }
 
-    if (dto.business_city_code) {
+    for (const { key, table, parentCol, parentKey } of LEVELS) {
+      const code = out[`business_${key}_code`];
+      if (!code) continue;
+
+      const cols = parentCol ? `name, ${parentCol}` : `name`;
       const { rows } = await this.pool.query(
-        `SELECT name, province_code FROM ref_regencies WHERE code=$1`,
-        [dto.business_city_code],
+        `SELECT ${cols} FROM ${table} WHERE code=$1`,
+        [code],
       );
       if (!rows[0])
         throw new BadRequestException(
-          `business_city_code '${dto.business_city_code}' tidak ditemukan`,
+          `business_${key}_code '${code}' tidak ditemukan`,
         );
-      if (
-        dto.business_province_code &&
-        rows[0].province_code !== dto.business_province_code
-      ) {
-        throw new BadRequestException(
-          `business_city_code '${dto.business_city_code}' bukan bagian dari business_province_code '${dto.business_province_code}'`,
-        );
+
+      // Hierarki hanya diperiksa bila kode induknya ikut dikirim — patch parsial
+      // yang cuma mengubah satu level tetap boleh lewat.
+      if (parentCol && parentKey) {
+        const parentCode = out[`business_${parentKey}_code`];
+        if (parentCode && rows[0][parentCol] !== parentCode) {
+          throw new BadRequestException(
+            `business_${key}_code '${code}' bukan bagian dari business_${parentKey}_code '${parentCode}'`,
+          );
+        }
       }
-      out.business_city_name = rows[0].name;
+      out[`business_${key}_name`] = rows[0].name;
     }
 
-    return out;
+    return out as any;
   }
 
   // ── CIF helpers ──────────────────────────────────────────────────────────────
@@ -1425,19 +1440,17 @@ export class ApplicationsService {
       );
     }
 
-    // ── Alamat Kedudukan — dropdown provinsi/kota ────────────────────────────
-    if (has("business_province_code") || has("business_city_code")) {
-      Object.assign(
-        patch,
-        await this.validateAndResolveBusinessRegion({
-          business_province_code: has("business_province_code")
-            ? trimOrNull(dto.business_province_code)
-            : before.business_province_code,
-          business_city_code: has("business_city_code")
-            ? trimOrNull(dto.business_city_code)
-            : before.business_city_code,
-        }),
-      );
+    // ── Alamat Kedudukan — dropdown provinsi/kota/kecamatan/kelurahan ────────
+    // Level yang tidak ikut dikirim diambil dari nilai tersimpan, supaya patch
+    // parsial (mis. hanya kelurahan) tetap divalidasi terhadap hierarki penuh.
+    const REGION_LEVELS = ["province", "city", "district", "village"] as const;
+    if (REGION_LEVELS.some((lv) => has(`business_${lv}_code`))) {
+      const merged: Record<string, string | null> = {};
+      for (const lv of REGION_LEVELS) {
+        const key = `business_${lv}_code`;
+        merged[key] = has(key) ? trimOrNull(dto[key]) : before[key];
+      }
+      Object.assign(patch, await this.validateAndResolveBusinessRegion(merged));
     }
 
     // ── "Lainnya" companions — dropdown value tidak pernah diganti (RBA V01) ──
@@ -1598,10 +1611,11 @@ export class ApplicationsService {
           source_of_funds, business_relationship_purpose, distribution_channel,
           legal_form_other, business_activity_other, source_of_funds_other, business_relationship_purpose_other,
           business_province_code, business_province_name, business_city_code, business_city_name,
+          business_district_code, business_district_name, business_village_code, business_village_name,
           director_share_percentage, commissioner_share_percentage,
           deed_establishment_number, deed_latest_amendment_number)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-          $27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)
+          $27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
          RETURNING id`,
         [
           dto.legal_name,
@@ -1640,6 +1654,10 @@ export class ApplicationsService {
           bizRegion.business_province_name,
           bizRegion.business_city_code,
           bizRegion.business_city_name,
+          bizRegion.business_district_code,
+          bizRegion.business_district_name,
+          bizRegion.business_village_code,
+          bizRegion.business_village_name,
           directorShare,
           commissionerShare,
           deedEstablishment,
@@ -1803,7 +1821,7 @@ export class ApplicationsService {
     let person: any = null;
     if (app.person_id) {
       const { rows: pr } = await this.pool.query(
-        `SELECT id, full_name, alias, identity_type, identity_number,
+        `SELECT id, public_id, full_name, alias, identity_type, identity_number,
                 ktp_number, sim_number, passport_number,
                 pob, dob, nationality, phone, email, gender,
                 occupation, occupation_other,
@@ -1830,13 +1848,15 @@ export class ApplicationsService {
     let business: any = null;
     if (app.business_id) {
       const { rows: biz } = await this.pool.query(
-        `SELECT id, legal_name, legal_form, legal_form_other,
+        `SELECT id, public_id, legal_name, legal_form, legal_form_other,
                 incorporation_place, incorporation_date,
                 deed_number, deed_establishment_number, deed_latest_amendment_number,
                 business_license_number, company_email,
                 nib, npwp, address_line, city, province, postal_code,
                 business_province_code, business_province_name,
                 business_city_code, business_city_name,
+                business_district_code, business_district_name,
+                business_village_code, business_village_name,
                 phone, industry_code, business_activity, business_activity_other, cif_no,
                 source_of_funds, source_of_funds_other,
                 business_relationship_purpose, business_relationship_purpose_other,
@@ -1871,7 +1891,7 @@ export class ApplicationsService {
 
     // documents
     const { rows: docs } = await this.pool.query(
-      `SELECT id, application_id, doc_type, file_uri, status, extracted_json, created_at
+      `SELECT id, public_id, application_id, doc_type, file_uri, status, extracted_json, created_at
        FROM documents WHERE application_id=$1 ORDER BY created_at DESC`,
       [appId],
     );
@@ -3336,6 +3356,7 @@ export class ApplicationsService {
       this.pool.query(
         `SELECT
           a.id,
+          a.public_id,
           a.type AS application_type,
           a.status,
           a.created_at,

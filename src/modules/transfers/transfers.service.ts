@@ -1536,7 +1536,7 @@ export class TransfersService {
 
     const q = await this.pool.query(
       `SELECT
-         t.id, t.partner_reference_no, t.reference_no, t.sender_application_id,
+         t.id, t.public_id, t.partner_reference_no, t.reference_no, t.sender_application_id,
          t.amount, t.currency, t.amount_value, t.amount_currency,
          t.beneficiary_account_name, t.beneficiary_account_number,
          t.beneficiary_bank_code, t.beneficiary_bank_name,
@@ -1601,7 +1601,7 @@ export class TransfersService {
   }
 
   private batchSelectSql(where: string, tail = "") {
-    return `SELECT tb.id, tb.batch_no, tb.bulk_reference_no, tb.sender_application_id,
+    return `SELECT tb.id, tb.public_id, tb.batch_no, tb.bulk_reference_no, tb.sender_application_id,
                    tb.total_count, tb.total_amount, tb.status, tb.created_by,
                    tb.created_at, tb.updated_at,
                    COALESCE(p.full_name, b.legal_name) AS sender_display_name,
