@@ -3886,8 +3886,23 @@ export class ApplicationsService {
         [appId, reviewerId, reason || null],
       );
       return res.rows[0];
+    } else if (decision === "REJECTED") {
+      // Penolakan final — status terminal, aplikasi tidak bisa diajukan ulang.
+      // Tidak diblokir oleh hit DTTOT/PPPSPM: justru itu alasan utama penolakan.
+      if (!reason?.trim()) {
+        throw new BadRequestException("Alasan penolakan wajib diisi.");
+      }
+
+      const res = await this.pool.query(
+        `UPDATE applications
+         SET status='REJECTED', decision_by=$2, decision_reason=$3, decision_at=now(), updated_at=now()
+         WHERE id=$1
+         RETURNING id, status, decision_reason, decision_at`,
+        [appId, reviewerId, reason.trim()],
+      );
+      return res.rows[0];
     } else {
-      // REJECTED or RETURN_FOR_REVISION → kembalikan ke Frontline untuk perbaikan data.
+      // RETURN_FOR_REVISION → kembalikan ke Frontline untuk perbaikan data.
       // Status menjadi REVISION_REQUIRED; alasan perbaikan wajib diisi.
       if (!reason?.trim()) {
         throw new BadRequestException("Alasan perbaikan wajib diisi.");

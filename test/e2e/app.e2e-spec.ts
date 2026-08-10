@@ -885,8 +885,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'REJECTED', reason: 'Data tidak sesuai' })
         .expect(200);
 
-      expect(res.body.status).toBe('REVISION_REQUIRED');
-      expect(res.body.revision_reason).toBe('Data tidak sesuai');
+      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.decision_reason).toBe('Data tidak sesuai');
     });
 
     // Helper: create → submit individual, return appId siap di-decide.
@@ -952,15 +952,15 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('APPROVED');
     });
 
-    it('E-07: OperationSupervisor reject KYC (LOW/MEDIUM risk) → 200 REVISION_REQUIRED', async () => {
+    it('E-07: OperationSupervisor reject KYC (LOW/MEDIUM risk) → 200 REJECTED', async () => {
       const appId = await createSubmittedIndividual(7);
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ decision: 'REJECTED', reason: 'tidak sesuai' })
         .expect(200);
-      expect(res.body.status).toBe('REVISION_REQUIRED');
-      expect(res.body.revision_reason).toBe('tidak sesuai');
+      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.decision_reason).toBe('tidak sesuai');
     });
 
     it('E-10: OperationSupervisor tidak bisa approve HIGH risk KYC → 403', async () => {
@@ -988,11 +988,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
          ON CONFLICT (application_id) DO UPDATE SET risk_level='HIGH'`,
         [Number(appId)],
       );
-      // HIGH risk butuh EDD sebelum approve — return untuk revisi via REJECTED action
+      // HIGH risk butuh EDD sebelum approve — return untuk revisi
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${appId}/decision`)
         .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ decision: 'REJECTED', reason: 'high risk - perlu perbaikan dokumen' })
+        .send({ decision: 'RETURN_FOR_REVISION', reason: 'high risk - perlu perbaikan dokumen' })
         .expect(200);
       expect(res.body.status).toBe('REVISION_REQUIRED');
       expect(res.body.revision_reason).toBe('high risk - perlu perbaikan dokumen');
@@ -1114,7 +1114,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.message).toContain('Alasan perbaikan wajib diisi');
     });
 
-    it('E-REV-02b: REJECTED tanpa reason → 400 alasan perbaikan wajib diisi', async () => {
+    it('E-REV-02b: REJECTED tanpa reason → 400 alasan penolakan wajib diisi', async () => {
       const appId = await createAndSubmitForRevision(22);
 
       const res = await request(app.getHttpServer())
@@ -1123,7 +1123,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'REJECTED' }) // tanpa reason
         .expect(400);
 
-      expect(res.body.message).toContain('Alasan perbaikan wajib diisi');
+      expect(res.body.message).toContain('Alasan penolakan wajib diisi');
     });
 
     it('E-REV-03: GET /applications/:id menampilkan revision_reason dan revision_requested_at', async () => {
@@ -5449,7 +5449,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.message).toContain('EDD');
     });
 
-    it('O-04: REJECT HIGH RISK tanpa EDD → 200 REVISION_REQUIRED (dikembalikan untuk perbaikan)', async () => {
+    // Gate EDD hanya menjaga approval — penolakan justru harus tetap terbuka
+    // saat EDD belum lengkap (lihat AW-15 untuk kasus hit sanksi).
+    it('O-04: REJECT HIGH RISK tanpa EDD → 200 REJECTED (tidak diblokir gate EDD)', async () => {
       eddRejectAppId = await createHighRiskIndividual(`31890001${SUFFIX}`, `088801${SUFFIX}`);
 
       await request(app.getHttpServer())
@@ -5463,8 +5465,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'REJECTED', reason: 'HIGH RISK - perlu perbaikan data sebelum EDD' })
         .expect(200);
 
-      expect(res.body.status).toBe('REVISION_REQUIRED');
-      expect(res.body.revision_reason).toBe('HIGH RISK - perlu perbaikan data sebelum EDD');
+      expect(res.body.status).toBe('REJECTED');
+      expect(res.body.decision_reason).toBe('HIGH RISK - perlu perbaikan data sebelum EDD');
     });
 
     it('O-05: GET /applications/:id/edd → 200, edd_required=true, applicant_snapshot terisi', async () => {
@@ -15001,6 +15003,49 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       );
       expect(rows.length).toBe(1);
       expect(rows[0].list_type).toBe('DTTOT');
+    });
+
+    // ── AW-14..16: keputusan ComplianceLead atas aplikasi dengan hit DTTOT aktif ──
+    // Approve diblokir; Tolak dan Kembalikan untuk Revisi tetap terbuka.
+    describe('AW-DEC. Decision pada aplikasi hit DTTOT', () => {
+      async function submittedHitApp(seq: string): Promise<string> {
+        const appId = await createIndividual('Mira Ariani', seq);
+        const res = await submitApp(appId).expect(200);
+        expect(res.body.status).toBe('IN_REVIEW');
+        expect(res.body.risk.risk_level).toBe('HIGH');
+        return appId;
+      }
+
+      it('AW-14: ComplianceLead approve aplikasi hit DTTOT aktif → 400 diblokir', async () => {
+        const appId = await submittedHitApp('30');
+        const res = await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}/decision`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ decision: 'APPROVED', reason: 'coba approve' })
+          .expect(400);
+        expect(res.body.message).toContain('DTTOT');
+      });
+
+      it('AW-15: ComplianceLead tolak aplikasi hit DTTOT aktif → 200 REJECTED', async () => {
+        const appId = await submittedHitApp('31');
+        const res = await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}/decision`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ decision: 'REJECTED', reason: 'Match DTTOT terkonfirmasi' })
+          .expect(200);
+        expect(res.body.status).toBe('REJECTED');
+        expect(res.body.decision_reason).toBe('Match DTTOT terkonfirmasi');
+      });
+
+      it('AW-16: ComplianceLead kembalikan aplikasi hit DTTOT untuk revisi → 200 REVISION_REQUIRED', async () => {
+        const appId = await submittedHitApp('32');
+        const res = await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}/decision`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ decision: 'RETURN_FOR_REVISION', reason: 'Konfirmasi ulang identitas' })
+          .expect(200);
+        expect(res.body.status).toBe('REVISION_REQUIRED');
+      });
     });
   });
 });
