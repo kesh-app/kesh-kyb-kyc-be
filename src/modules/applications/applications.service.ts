@@ -19,17 +19,57 @@ import { computeRbaV01, INDUSTRY_MAP, type RbaInput } from "./rba-v01.engine";
 // memakai kebijakan yang sama (satu kebijakan matching untuk aplikasi & transfer).
 export const NEAR_MATCH_THRESHOLD = 0.75;
 
-// Di atas ambang ini similarity dianggap match pasti (exact/high-confidence) →
-// blocking. Skor di [NEAR_MATCH_THRESHOLD, MATCH_THRESHOLD) = mirip, perlu
-// review manual, TIDAK memblokir & TIDAK dilabeli hit DTTOT terkonfirmasi.
-export const MATCH_THRESHOLD = 0.9;
+// HANYA cocok persis (similarity 1.000 = 100%) yang dianggap MATCH → boleh
+// memblokir. Skor fuzzy setinggi apapun di bawah 1.0 — 0.90, 0.95, 0.98 — tetap
+// NEAR_MATCH: muncul sebagai kandidat untuk review manual, tapi TIDAK pernah
+// dilabeli DTTOT_HIT/WATCHLIST_HIT dan TIDAK memblokir approval atau transfer.
+//
+// Karena nama input dan `name_norm` dinormalisasi dengan ekspresi yang sama,
+// cocok persis pada nama ⇒ similarity 1.000. Cocok persis pada alias juga 1.000
+// selama alias di-skor per alias (lihat watchlistAliasScoreSql) — bukan terhadap
+// `aliases_concat` yang menggabungkan semua alias jadi satu string.
+export const MATCH_THRESHOLD = 1.0;
+
+/** Nama input dinormalisasi sama persis dengan cara `name_norm` dibentuk (migrasi 0006). */
+const normNameSql = (expr: string) => `upper(regexp_replace(${expr}, '\\s+', ' ', 'g'))`;
+
+/** Skor nama utama (`name_norm` = Full_Name, atau Entity_Name bila badan usaha). */
+export const watchlistNameScoreSql = (normInput: string) =>
+  `similarity(name_norm, ${normInput})`;
+
+/**
+ * Skor alias, dihitung PER ALIAS lewat unnest — bukan terhadap `aliases_concat`.
+ * Cocok persis ke satu alias harus menghasilkan 1.000; similarity terhadap
+ * seluruh alias yang digabung selalu < 1 begitu entri punya lebih dari satu
+ * alias (terukur: alias eksak pada entri 8-alias hanya 0.400–0.600 via concat).
+ */
+export const watchlistAliasScoreSql = (normInput: string) =>
+  `COALESCE((SELECT max(similarity(${normNameSql("a")}, ${normInput}))
+               FROM unnest(aliases) a), 0)`;
+
+/**
+ * Prefilter kandidat. Dua klausa pertama memakai GIN trgm index (ambang GUC
+ * ~0.3); klausa ketiga menjamin alias yang cocok PERSIS tidak pernah lolos dari
+ * retrieval walau `aliases_concat` entri itu terlalu panjang untuk lolos `%`.
+ * ponytail: klausa EXISTS memaksa seq scan watchlist_entries (~2.5k baris, tidak
+ * terasa). Kalau watchlist tumbuh ke ratusan ribu, index alias yang ter-unnest
+ * (tabel alias terpisah atau GIN expression index) yang perlu ditambahkan.
+ */
+export const watchlistCandidateWhereSql = (normInput: string) =>
+  `name_norm % ${normInput}
+      OR (aliases_concat IS NOT NULL AND aliases_concat % ${normInput})
+      OR EXISTS (SELECT 1 FROM unnest(aliases) a
+                  WHERE ${normNameSql("a")} = ${normInput})`;
 
 /**
  * Klasifikasi satu hit screening menjadi status name screening.
  *   CLEAR      → sudah di-clear reviewer (FALSE_POSITIVE / DISMISSED), ATAU
  *                similarity < NEAR_MATCH_THRESHOLD (noise trigram, IGNORE)
- *   MATCH      → CONFIRMED reviewer, ATAU similarity ≥ MATCH_THRESHOLD
- *   NEAR_MATCH → mirip tapi belum pasti (di antara kedua ambang), perlu review
+ *   MATCH      → CONFIRMED reviewer, ATAU similarity = 1.000 (cocok persis pada
+ *                nama atau alias ternormalisasi) — satu-satunya tingkat yang
+ *                boleh memblokir
+ *   NEAR_MATCH → 0.75 ≤ similarity < 1.000, termasuk 0.90/0.95/0.98: kandidat
+ *                review manual, tidak pernah jadi hit DTTOT/PPPSPM terkonfirmasi
  * Dipakai bersama oleh RBA name screening, ringkasan watchlist Business,
  * blocking approval, DAN screening beneficiary transfer — satu definisi
  * "match" untuk semua konsumen, termasuk baris screening lama yang tersimpan
@@ -1728,8 +1768,8 @@ export class ApplicationsService {
        SELECT sr.id, sr.list_type, sr.input_name, sr.matched_name,
               CASE
                 WHEN w.id IS NULL THEN NULL
-                WHEN w.aliases_concat IS NOT NULL
-                     AND similarity(w.aliases_concat, ${norm})
+                WHEN COALESCE((SELECT max(similarity(upper(regexp_replace(a, '\\s+', ' ', 'g')), ${norm}))
+                                 FROM unnest(w.aliases) a), 0)
                        > similarity(w.name_norm, ${norm})      THEN 'ALIAS_NAME'
                 WHEN w.full_name IS NOT NULL                    THEN 'FULL_NAME'
                 WHEN w.entity_name IS NOT NULL                  THEN 'ENTITY_NAME'
@@ -2186,12 +2226,16 @@ export class ApplicationsService {
 
       for (const s of subjects) {
         const expr = `upper(regexp_replace($1, '\\s+', ' ', 'g'))`;
+        // Skor = yang tertinggi antara nama dan alias. Sebelumnya hanya
+        // `name_norm` yang di-skor padahal WHERE-nya ikut menarik kandidat lewat
+        // alias, sehingga entri yang cocok PERSIS pada alias selalu jatuh di
+        // bawah ambang dan hilang (589 entri DTTOT punya alias).
         const { rows: rawCandidates } = await client.query(
           `SELECT id, list_type, name, unique_id, date_of_birth, nationality,
-                  similarity(name_norm, ${expr}) AS score
+                  GREATEST(${watchlistNameScoreSql(expr)},
+                           ${watchlistAliasScoreSql(expr)}) AS score
            FROM watchlist_entries
-           WHERE name_norm % ${expr}
-              OR (aliases_concat IS NOT NULL AND aliases_concat % ${expr})
+           WHERE ${watchlistCandidateWhereSql(expr)}
            ORDER BY score DESC LIMIT 30`,
           [s.name],
         );
@@ -2280,57 +2324,64 @@ export class ApplicationsService {
     const riskFactors: RiskFactor[] = [];
     let score = 0;
 
-    for (const h of hitRows) {
-      if (["FALSE_POSITIVE", "DISMISSED"].includes(h.review_status)) continue;
-      const confirmed = h.review_status === "CONFIRMED";
-      const topPct = `${((h.top_score ?? 0) * 100).toFixed(0)}%`;
+    // Tingkat hit menentukan KODE faktor, dan kode itulah yang dibaca konsumen
+    // hilir: PEP_RISK_CODES di bawah (paksa HIGH) dan SANCTION_CODES/PEP_CODES di
+    // MonitoringService (buka case LTKM). Hit NEAR_MATCH memakai kode terpisah
+    // *_NEAR_MATCH supaya tetap terlihat sebagai kandidat review, tapi tidak
+    // pernah terbaca sebagai sanksi/PEP terkonfirmasi oleh konsumen manapun.
+    const WATCHLIST_FACTOR_SPEC: Record<
+      string,
+      { confirmedPts: number; candidatePts: number; severity: RiskFactor["severity"] }
+    > = {
+      DTTOT: {
+        confirmedPts: W.DTTOT_CONFIRMED,
+        candidatePts: W.DTTOT_CANDIDATE,
+        severity: "HIGH",
+      },
+      PPPSPM: {
+        confirmedPts: W.PPPSPM_CONFIRMED,
+        candidatePts: W.PPPSPM_CANDIDATE,
+        severity: "HIGH",
+      },
+      PEP: {
+        confirmedPts: W.PEP_CONFIRMED,
+        candidatePts: W.PEP_CANDIDATE,
+        severity: "MEDIUM",
+      },
+    };
 
-      if (h.list_type === "DTTOT") {
-        const pts = confirmed ? W.DTTOT_CONFIRMED : W.DTTOT_CANDIDATE;
-        score += pts;
-        riskFactors.push({
-          code: confirmed
-            ? "WATCHLIST_DTTOT_CONFIRMED"
-            : "WATCHLIST_DTTOT_CANDIDATE",
-          label: confirmed
-            ? "DTTOT confirmed match"
-            : "DTTOT candidate match (belum direview)",
-          score: pts,
-          severity: confirmed ? "CRITICAL" : "HIGH",
-          source: "screening",
-          details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}`,
-        });
-      } else if (h.list_type === "PPPSPM") {
-        const pts = confirmed ? W.PPPSPM_CONFIRMED : W.PPPSPM_CANDIDATE;
-        score += pts;
-        riskFactors.push({
-          code: confirmed
-            ? "WATCHLIST_PPPSPM_CONFIRMED"
-            : "WATCHLIST_PPPSPM_CANDIDATE",
-          label: confirmed
-            ? "PPPSPM confirmed match"
-            : "PPPSPM candidate match (belum direview)",
-          score: pts,
-          severity: confirmed ? "CRITICAL" : "HIGH",
-          source: "screening",
-          details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}`,
-        });
-      } else if (h.list_type === "PEP") {
-        const pts = confirmed ? W.PEP_CONFIRMED : W.PEP_CANDIDATE;
-        score += pts;
-        riskFactors.push({
-          code: confirmed
-            ? "WATCHLIST_PEP_CONFIRMED"
-            : "WATCHLIST_PEP_CANDIDATE",
-          label: confirmed
-            ? "PEP confirmed match"
-            : "PEP candidate match (belum direview)",
-          score: pts,
-          severity: confirmed ? "HIGH" : "MEDIUM",
-          source: "screening",
-          details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}`,
-        });
-      }
+    for (const h of hitRows) {
+      const spec = WATCHLIST_FACTOR_SPEC[h.list_type];
+      if (!spec) continue;
+      const tier = classifyScreeningHit(h.review_status, h.top_score);
+      if (tier === "CLEAR") continue;
+
+      const confirmed = h.review_status === "CONFIRMED";
+      const near = tier === "NEAR_MATCH";
+      const topPct = `${((h.top_score ?? 0) * 100).toFixed(0)}%`;
+      const pts = confirmed ? spec.confirmedPts : spec.candidatePts;
+      score += pts;
+
+      riskFactors.push({
+        code: confirmed
+          ? `WATCHLIST_${h.list_type}_CONFIRMED`
+          : near
+            ? `WATCHLIST_${h.list_type}_NEAR_MATCH`
+            : `WATCHLIST_${h.list_type}_CANDIDATE`,
+        label: confirmed
+          ? `${h.list_type} confirmed match`
+          : near
+            ? `${h.list_type} near match (perlu review manual, bukan hit terkonfirmasi)`
+            : `${h.list_type} candidate match (belum direview)`,
+        score: pts,
+        severity: confirmed
+          ? h.list_type === "PEP"
+            ? "HIGH"
+            : "CRITICAL"
+          : spec.severity,
+        source: "screening",
+        details: `${h.cnt} match, similarity tertinggi ${topPct}, nama: ${h.top_name}`,
+      });
     }
 
     // ── 6. Faktor: profil individu ──
@@ -3839,7 +3890,8 @@ export class ApplicationsService {
 
     if (decision === "APPROVED") {
       // Blokir jika ada hit sanksi DTTOT/PPPSPM berstatus MATCH — CONFIRMED oleh
-      // reviewer ATAU exact match dari sistem (skor ≥ MATCH_THRESHOLD).
+      // reviewer ATAU cocok persis dari sistem (skor 1.000 = MATCH_THRESHOLD).
+      // Hit fuzzy 0.98 = NEAR_MATCH dan TIDAK memblokir approval.
       // Reviewer tetap bisa membuka jalan dengan FALSE_POSITIVE/DISMISSED.
       // Dicek sebelum EDD: sanksi memblokir approval terlepas dari status EDD.
       const { rows: blockers } = await this.pool.query(

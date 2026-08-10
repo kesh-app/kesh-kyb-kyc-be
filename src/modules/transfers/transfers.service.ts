@@ -27,6 +27,9 @@ import {
   NEAR_MATCH_THRESHOLD,
   classifyScreeningHit,
   dedupWatchlistCandidates,
+  watchlistAliasScoreSql,
+  watchlistCandidateWhereSql,
+  watchlistNameScoreSql,
 } from "../applications/applications.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
@@ -523,11 +526,12 @@ export class TransfersService {
    *
    * Algoritma & ambang SENGAJA identik dengan ApplicationsService.screenAndComputeRisk():
    * trigram similarity pg_trgm terhadap `name_norm` (berisi Full_Name atau Entity_Name)
-   * dan `aliases_concat` (Alias_Name), threshold NEAR_MATCH_THRESHOLD. Kandidat di
+   * dan tiap alias (Alias_Name), threshold NEAR_MATCH_THRESHOLD. Kandidat di
    * bawah ambang ini adalah noise trigram (mis. "MARIA ANIRA" vs "MIRA ARIANI" =
    * 0.412) dan TIDAK disimpan sebagai transfer_watchlist_hits sama sekali — bukan
-   * cuma "tidak blocking". Hanya hit skor ≥ MATCH_THRESHOLD (classifyScreeningHit
-   * === "MATCH") yang boleh memblokir/mendapat flag DTTOT_HIT; lihat submit().
+   * cuma "tidak blocking". Hanya hit yang cocok PERSIS (skor 1.000 =
+   * MATCH_THRESHOLD, classifyScreeningHit === "MATCH") yang boleh memblokir /
+   * mendapat flag DTTOT_HIT; skor fuzzy 0.98 sekalipun tetap NEAR_MATCH — lihat submit().
    *
    * Delete-then-insert per transfer (konvensi sama dengan screening aplikasi) →
    * submit ulang tidak pernah menduplikasi baris hit. Kandidat juga di-dedup per
@@ -549,13 +553,12 @@ export class TransfersService {
     const { rows: rawCandidates } = await this.pool.query(
       `SELECT id, list_type, name, full_name, entity_name, unique_id, subject_type,
               date_of_birth, nationality,
-              similarity(name_norm, ${expr})                       AS name_score,
-              COALESCE(similarity(aliases_concat, ${expr}), 0)     AS alias_score
+              ${watchlistNameScoreSql(expr)}  AS name_score,
+              ${watchlistAliasScoreSql(expr)} AS alias_score
          FROM watchlist_entries
-        WHERE name_norm % ${expr}
-           OR (aliases_concat IS NOT NULL AND aliases_concat % ${expr})
-        ORDER BY GREATEST(similarity(name_norm, ${expr}),
-                          COALESCE(similarity(aliases_concat, ${expr}), 0)) DESC
+        WHERE ${watchlistCandidateWhereSql(expr)}
+        ORDER BY GREATEST(${watchlistNameScoreSql(expr)},
+                          ${watchlistAliasScoreSql(expr)}) DESC
         LIMIT 30`,
       [inputName],
     );
@@ -731,8 +734,8 @@ export class TransfersService {
 
     const actorId = resolveUserId(user);
 
-    // Screening watchlist beneficiary. Hanya hit bertingkat MATCH (skor ≥
-    // MATCH_THRESHOLD) yang mengalihkan transfer ke compliance review (jalur yang
+    // Screening watchlist beneficiary. Hanya hit bertingkat MATCH (cocok persis,
+    // skor 1.000) yang mengalihkan transfer ke compliance review (jalur yang
     // sudah ada, migrasi 0050). Hit NEAR_MATCH tetap tersimpan di
     // transfer_watchlist_hits untuk visibilitas/manual review, tapi TIDAK
     // memblokir dan TIDAK dilabeli DTTOT_HIT — mencegah false positive trigram

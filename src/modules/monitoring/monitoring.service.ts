@@ -840,8 +840,11 @@ export class MonitoringService {
     // Memakai rule_code yang sudah ada agar dedup case & rendering alert existing
     // langsung berlaku. Guard `some(...)`: bila trigger dari risk factor pengirim
     // sudah menyala dengan kode yang sama, jangan tambahkan duplikat di satu array.
-    // Hanya hit bertingkat MATCH (skor ≥ MATCH_THRESHOLD) yang boleh membuka
-    // monitoring case CRITICAL — hit NEAR_MATCH bukan konfirmasi DTTOT/PPPSPM/PEP.
+    // Hanya hit bertingkat MATCH (cocok persis, skor 1.000 = MATCH_THRESHOLD)
+    // yang boleh membuka monitoring case CRITICAL. Hit NEAR_MATCH — termasuk skor
+    // fuzzy setinggi 0.98 — bukan konfirmasi DTTOT/PPPSPM/PEP dan tidak menyalakan
+    // LTKM_SANCTION_RELATED. Sisi pengirim dijaga terpisah lewat SANCTION_CODES/
+    // PEP_CODES, yang sengaja tidak memuat kode WATCHLIST_*_NEAR_MATCH.
     const { rows: wlHits } = await this.pool.query(
       `SELECT DISTINCT list_type, matched_name
          FROM transfer_watchlist_hits

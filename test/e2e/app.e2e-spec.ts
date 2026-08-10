@@ -14363,6 +14363,93 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(hitRows[0].list_type).toBe('DTTOT');
     });
 
+    // ── TW-15: skor fuzzy tinggi (0.90–0.99) TETAP NEAR_MATCH, bukan blocking ──
+    // Ambang MATCH dinaikkan ke 1.000 (cocok persis): 0.90/0.95/0.98 tidak lagi
+    // otomatis jadi hit DTTOT. Nama fuzzy dipakai ulang oleh TW-16 dan RS-08.
+    const TW_FUZZY_WL_NAME = `Fuzzy Nearmatch Kusumawardhani ${SUFFIX}`;
+    const TW_FUZZY_INPUT = `${TW_FUZZY_WL_NAME} A`;
+
+    // Sekali saja: upload ulang unique_id yang sama akan kena duplicate guard
+    // (migrasi 0059) dan bisa menggandakan baris kandidat.
+    let fuzzyEntrySeeded = false;
+    async function seedFuzzyDttotEntry() {
+      if (fuzzyEntrySeeded) return;
+      fuzzyEntrySeeded = true;
+      const csv = [
+        'Unique_ID,Watchlist_Type,Full_Name,Nationality,Subject_Type',
+        `WLFZ${SUFFIX},DTTOT,${TW_FUZZY_WL_NAME},ID,Orang`,
+      ].join('\n');
+      await request(app.getHttpServer())
+        .post(`${BASE}/watchlist/upload`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .attach('file', Buffer.from(csv), {
+          filename: `tw_fuzzy_${SUFFIX}.csv`,
+          contentType: 'text/csv',
+        })
+        .field('list_type', 'DTTOT')
+        .field('list_source', `E2E TW FUZZY ${SUFFIX}`)
+        .expect(201);
+    }
+
+    it('TW-15: skor fuzzy 0.90–0.99 → NEAR_MATCH tersimpan, TIDAK DTTOT_HIT & tidak blocking', async () => {
+      await seedFuzzyDttotEntry();
+
+      // Dokumentasi hidup: fixture harus benar-benar jatuh di pita yang dulu
+      // dianggap MATCH (≥0.90) tapi sekarang NEAR_MATCH (<1.000).
+      const { rows: simRows } = await pgPool.query(
+        `SELECT similarity(upper(regexp_replace($1,'\\s+',' ','g')),
+                           upper(regexp_replace($2,'\\s+',' ','g'))) AS score`,
+        [TW_FUZZY_WL_NAME, TW_FUZZY_INPUT],
+      );
+      const sim = Number(simRows[0].score);
+      expect(sim).toBeGreaterThanOrEqual(0.9);
+      expect(sim).toBeLessThan(1.0);
+
+      const txId = await createDraft(TW_FUZZY_INPUT);
+      const res = await submitTransfer(txId).expect(201);
+
+      // Tidak memblokir: transfer lewat jalur normal, bukan compliance review.
+      expect(res.body.status).toBe('SUBMITTED');
+
+      // Tapi tetap tercatat sebagai kandidat review manual.
+      const { rows: hitRows } = await pgPool.query(
+        `SELECT list_type, match_score::float AS match_score
+           FROM transfer_watchlist_hits WHERE transfer_id=$1`,
+        [txId],
+      );
+      expect(hitRows.length).toBeGreaterThanOrEqual(1);
+      const fuzzyHit = hitRows.find((h: any) => h.list_type === 'DTTOT');
+      expect(fuzzyHit).toBeDefined();
+      expect(fuzzyHit.match_score).toBeGreaterThanOrEqual(0.9);
+      expect(fuzzyHit.match_score).toBeLessThan(1.0);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      const dttotHit = detail.body.watchlist_hits.find((h: any) => h.list_type === 'DTTOT');
+      expect(dttotHit.status).toBe('NEAR_MATCH');
+      // Tidak ada baris compliance review → tidak ada WATCHLIST_HIT/DTTOT_HIT.
+      expect(detail.body.compliance_review_status).toBeNull();
+      expect(detail.body.latest_compliance_review).toBeNull();
+    });
+
+    // ── TW-16: NEAR_MATCH tidak membuka monitoring case sanksi ──
+    it('TW-16: NEAR_MATCH 0.90–0.99 TIDAK membuka monitoring case LTKM_SANCTION_RELATED', async () => {
+      await seedFuzzyDttotEntry();
+      const txId = await createDraft(TW_FUZZY_INPUT);
+      await submitTransfer(txId).expect(201);
+
+      const { rows } = await pgPool.query(
+        `SELECT t.rule_code
+           FROM monitoring_cases mc
+           JOIN monitoring_case_triggers t ON t.case_id = mc.id
+          WHERE mc.transfer_id = $1 AND t.rule_code = 'LTKM_SANCTION_RELATED'`,
+        [txId],
+      );
+      expect(rows.length).toBe(0);
+    });
+
     // ── Rescreen watchlist — historical false-positive cleanup ──────────────
     describe('TW-Rescreen: POST /transfers/:id/rescreen-watchlist', () => {
       // Baris review OPEN dengan red_flags watchlist saja, meniru transfer yang
@@ -14457,6 +14544,54 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(reviewRows[0].red_flags).toEqual(
           expect.arrayContaining(['WATCHLIST_HIT', 'DTTOT_HIT']),
         );
+      });
+
+      // 2b) Histori skor fuzzy tinggi turun tingkat: dulu 0.98 = MATCH & blocking,
+      //     sekarang NEAR_MATCH → flag DTTOT_HIT dilepas, sisa WATCHLIST_NEAR_MATCH.
+      it('RS-08: histori skor 0.98 → turun ke NEAR_MATCH, DTTOT_HIT dilepas, tinggal WATCHLIST_NEAR_MATCH', async () => {
+        await seedFuzzyDttotEntry();
+
+        const txId = await createDraft(TW_FUZZY_INPUT);
+        await pgPool.query(
+          `UPDATE transfers SET status='PENDING_COMPLIANCE_REVIEW' WHERE id=$1`,
+          [txId],
+        );
+        const { rows: reporter } = await pgPool.query(
+          `SELECT id FROM users WHERE role='ComplianceLead' LIMIT 1`,
+        );
+        // Baris warisan: skor 0.98 dulu lolos ambang MATCH lama (0.90) sehingga
+        // ikut dilabeli DTTOT_HIT dan memblokir transfer.
+        await pgPool.query(
+          `INSERT INTO transfer_watchlist_hits
+             (transfer_id, list_type, input_name, matched_name, matched_field, match_score)
+           VALUES ($1,'DTTOT',$2,$3,'FULL_NAME',0.98)`,
+          [txId, TW_FUZZY_INPUT, TW_FUZZY_WL_NAME],
+        );
+        await pgPool.query(
+          `INSERT INTO transfer_compliance_reviews
+             (transfer_id, status, red_flags, report_notes, reported_by, reported_at)
+           VALUES ($1,'OPEN','["WATCHLIST_HIT","DTTOT_HIT"]'::jsonb,$2,$3,now())`,
+          [txId, 'Screening lama: skor 0.98 dianggap match.', reporter[0].id],
+        );
+
+        const res = await rescreen(txId, complianceToken).expect(201);
+        expect(res.body.rescreen.read_only).toBe(false);
+        // Masih ada baris hit (kandidat review), tapi tidak lagi bertingkat MATCH.
+        expect(res.body.rescreen.new_hit_count).toBeGreaterThanOrEqual(1);
+        expect(
+          res.body.watchlist_hits.every((h: any) => h.status !== 'MATCH'),
+        ).toBe(true);
+        expect(
+          res.body.watchlist_hits.some((h: any) => h.status === 'NEAR_MATCH'),
+        ).toBe(true);
+
+        const { rows: reviewRows } = await pgPool.query(
+          `SELECT red_flags FROM transfer_compliance_reviews WHERE transfer_id=$1 ORDER BY id DESC LIMIT 1`,
+          [txId],
+        );
+        expect(reviewRows[0].red_flags).toEqual(['WATCHLIST_NEAR_MATCH']);
+        expect(reviewRows[0].red_flags).not.toContain('DTTOT_HIT');
+        expect(reviewRows[0].red_flags).not.toContain('WATCHLIST_HIT');
       });
 
       // 3) Red flag manual non-watchlist dipertahankan.
@@ -14980,6 +15115,59 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.watchlist_summary.compliance_blocking).toBe(false);
       expect(res.body.watchlist_summary.status).not.toBe('MATCH');
     });
+
+    // ── AW-12b: skor fuzzy tinggi (0.90–0.99) → NEAR_MATCH, bukan blocking ──
+    // Pasangan AW-12 (0.412 = IGNORE) dan AW-05/AW-06 (1.000 = MATCH & blocking).
+    it('AW-12b: skor fuzzy 0.90–0.99 → NEAR_MATCH, tidak memblokir approval sebagai DTTOT terkonfirmasi', async () => {
+      const fuzzyWlName = `Aplikasi Fuzzy Prawirakusuma ${SUFFIX}`;
+      const fuzzyInput = `${fuzzyWlName} A`;
+      await uploadDttot(fuzzyWlName, `AWFZ${SUFFIX}`);
+
+      const { rows: simRows } = await pgPool.query(
+        `SELECT similarity(upper(regexp_replace($1,'\\s+',' ','g')),
+                           upper(regexp_replace($2,'\\s+',' ','g'))) AS score`,
+        [fuzzyWlName, fuzzyInput],
+      );
+      const sim = Number(simRows[0].score);
+      expect(sim).toBeGreaterThanOrEqual(0.9);
+      expect(sim).toBeLessThan(1.0);
+
+      const appId = await createIndividual(fuzzyInput, '22');
+      await submitApp(appId).expect(200);
+
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+
+      // Tercatat sebagai kandidat review — tapi NEAR_MATCH, bukan MATCH.
+      const hit = res.body.screening.find((h: any) => h.list_type === 'DTTOT');
+      expect(hit).toBeDefined();
+      expect(hit.match_score).toBeGreaterThanOrEqual(0.9);
+      expect(hit.match_score).toBeLessThan(1.0);
+      expect(hit.status).toBe('NEAR_MATCH');
+
+      expect(res.body.watchlist_summary.has_hit).toBe(true);
+      expect(res.body.watchlist_summary.status).toBe('NEAR_MATCH');
+      expect(res.body.watchlist_summary.compliance_blocking).toBe(false);
+
+      // Faktor risiko memakai kode NEAR_MATCH terpisah, sehingga konsumen hilir
+      // (MonitoringService SANCTION_CODES) tidak membacanya sebagai sanksi.
+      const codes: string[] = (res.body.risk.risk_factors ?? []).map((f: any) => f.code);
+      expect(codes).toContain('WATCHLIST_DTTOT_NEAR_MATCH');
+      expect(codes).not.toContain('WATCHLIST_DTTOT_CANDIDATE');
+      expect(codes).not.toContain('WATCHLIST_DTTOT_CONFIRMED');
+
+      // Approval tidak boleh gagal KARENA hit DTTOT. Guard lain (mis. EDD untuk
+      // HIGH risk) boleh tetap menolak — yang diuji di sini hanya blocker sanksi.
+      const decision = await request(app.getHttpServer())
+        .patch(`${BASE}/applications/${appId}/decision`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ decision: 'APPROVED' });
+      if (decision.status === 400) {
+        expect(String(decision.body.message)).not.toContain('DTTOT');
+      }
+    }, 30000);
 
     // ── AW-13: dedup subjek yang sama tersimpan sebagai beberapa baris watchlist ──
     it('AW-13: 2 baris watchlist_entries untuk subjek nyata yang sama → tetap 1 baris screening_results (dedup)', async () => {
