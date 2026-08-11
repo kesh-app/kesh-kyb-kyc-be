@@ -242,7 +242,9 @@ export class TransfersService {
         dto.beneficiary_customer_type ?? null,
         transferMethod,
         transferChannel,
-        dto.transaction_date ?? null,
+        // Draft selalu lahir tanpa tanggal transaksi — diisi backend saat submit.
+        // Berlaku untuk create tunggal maupun bulk (keduanya lewat helper ini).
+        null,
         dto.requested_execution_date ?? null,
         JSON.stringify(additionalInfo),
         dto.source_of_funds ?? null,
@@ -498,7 +500,9 @@ export class TransfersService {
         dto.beneficiary_customer_type ?? null,
         dto.transfer_method ?? null,
         dto.transfer_channel ?? null,
-        dto.transaction_date ?? null,
+        // null → COALESCE mempertahankan nilai yang ada. Edit draft tidak boleh
+        // menyentuh tanggal transaksi; itu wewenang submit.
+        null,
         dto.requested_execution_date ?? null,
         dto.additional_info ? JSON.stringify(dto.additional_info) : null,
         dto.source_of_funds ?? null,
@@ -754,6 +758,7 @@ export class TransfersService {
            status = 'PENDING_COMPLIANCE_REVIEW',
            submitted_by = $2,
            submitted_at = now(),
+           transaction_date = COALESCE(transaction_date, now()),
            updated_at = now()
          WHERE id = $1
          RETURNING *`,
@@ -782,11 +787,15 @@ export class TransfersService {
       return flagged.rows[0];
     }
 
+    // Tanggal transaksi lahir di sini, dari jam server, dalam UPDATE yang sama
+    // dengan perubahan status — bukan dari jam client. COALESCE membuat submit
+    // ulang dari REVISION_REQUIRED mempertahankan tanggal aslinya.
     const next = await this.pool.query(
       `UPDATE transfers SET
        status = 'SUBMITTED',
        submitted_by = $2,
        submitted_at = now(),
+       transaction_date = COALESCE(transaction_date, now()),
        updated_at = now()
      WHERE id = $1
      RETURNING *`,
@@ -894,9 +903,12 @@ export class TransfersService {
           .join(" ")
       : (dto.report_notes ?? null);
 
+    // Jalur submit ketiga (DRAFT → compliance review) ikut menstempel tanggal
+    // transaksi, supaya tidak ada cara meninggalkan DRAFT tanpa tanggal.
     const next = await this.pool.query(
       `UPDATE transfers SET
          status='PENDING_COMPLIANCE_REVIEW',
+         transaction_date = COALESCE(transaction_date, now()),
          updated_at=now()
        WHERE id=$1
        RETURNING *`,
@@ -1544,6 +1556,9 @@ export class TransfersService {
          t.batch_id, tb.batch_no, tb.bulk_reference_no,
          t.status, t.result, t.created_at, t.submitted_at, t.approved_at,
          t.completed_at, t.failed_at,
+         -- Tanggal transaksi kini dibuat backend saat submit; list ikut membawanya
+         -- supaya Pencatatan Transfer bisa menampilkannya tanpa panggil detail.
+         t.transaction_date,
          t.source_of_funds, t.transaction_purpose,
          COALESCE(p.full_name, b.legal_name) AS sender_name,
          CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS sender_cif_no,

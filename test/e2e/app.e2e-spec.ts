@@ -11146,6 +11146,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           beneficiaryAccountNumber: '1112223334',
           beneficiaryAccountName: 'Penerima Receipt',
           beneficiary_relationship_to_sender: 'Keluarga',
+          // Dikirim sengaja: FE lama masih mengirimkannya. Backend harus
+          // membuangnya (whitelist DTO), bukan menyimpannya.
           transaction_date: '2026-07-29T10:00:00.000Z',
         })
         .expect(201);
@@ -11161,7 +11163,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
 
       expect(Number(res.body.transaction_amount)).toBe(250000);
-      expect(new Date(res.body.transaction_date).toISOString()).toBe('2026-07-29T10:00:00.000Z');
+      // Transfer masih DRAFT dan tanggal transaksi baru lahir saat submit, jadi
+      // di sini null — sekaligus bukti tanggal kiriman client tidak dipakai.
+      expect(res.body.transaction_date).toBeNull();
       expect(res.body.transaction_status).toBe('DRAFT');
       expect(res.body.transaction_partner_reference_no).toBe(trx.body.partner_reference_no);
       // Internal transfer id tidak boleh jadi field utama pengganti reference user-facing.
@@ -12246,6 +12250,209 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     }
 
     let ztTransferId: string;
+
+    // ── Tanggal transaksi dibuat backend, bukan dipilih user ──────────────
+    // Draft lahir tanpa tanggal; tanggal distempel dari jam server (now()) di
+    // UPDATE yang sama dengan perubahan status saat submit. COALESCE menjaga
+    // submit ulang tidak menimpa tanggal asli.
+    describe('ZD. transaction_date di-generate backend saat submit', () => {
+      /** Ambil satu transfer lewat detail endpoint. */
+      async function detail(txId: string) {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${txId}`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        return res.body;
+      }
+
+      it('ZD-01: create tanpa transaction_date → 201 DRAFT, transaction_date null', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+
+        expect(res.body.status).toBe('DRAFT');
+        expect(res.body.transaction_date).toBeNull();
+      });
+
+      it('ZD-02: transaction_date kiriman client diabaikan, tidak tersimpan', async () => {
+        const clientDate = '2020-01-01T00:00:00.000Z';
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody({ transaction_date: clientDate }))
+          .expect(201);
+
+        // Tetap 201 (whitelist membuang field, bukan menolak request) tapi
+        // nilainya tidak pernah menyentuh DB.
+        expect(res.body.transaction_date).toBeNull();
+        expect(await detail(String(res.body.id))).toMatchObject({ transaction_date: null });
+      });
+
+      it('ZD-03: submit menstempel transaction_date otomatis, dekat waktu server', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody({ transaction_date: '2020-01-01T00:00:00.000Z' }))
+          .expect(201);
+        const txId = String(created.body.id);
+
+        const before = Date.now();
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        const after = Date.now();
+
+        expect(res.body.status).toBe('SUBMITTED');
+        expect(res.body.transaction_date).not.toBeNull();
+
+        // Jendela longgar: jam Postgres dan jam proses test bisa sedikit beda.
+        // Cukup ketat untuk menangkap tanggal client (2020) atau tanggal basi.
+        const SKEW_MS = 5 * 60_000;
+        const stamped = new Date(res.body.transaction_date).getTime();
+        expect(stamped).toBeGreaterThanOrEqual(before - SKEW_MS);
+        expect(stamped).toBeLessThanOrEqual(after + SKEW_MS);
+      });
+
+      it('ZD-04: submit ulang setelah dikembalikan TIDAK menimpa transaction_date', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const txId = String(created.body.id);
+
+        const submitted = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        const original = submitted.body.transaction_date;
+        expect(original).not.toBeNull();
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+
+        const returned = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'RETURN', notes: 'Mohon perbaiki nama penerima' })
+          .expect(201);
+        expect(returned.body.status).toBe('REVISION_REQUIRED');
+        // Dikembalikan tidak menghapus tanggal yang sudah ada.
+        expect(returned.body.transaction_date).toBe(original);
+
+        const resubmitted = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+
+        expect(resubmitted.body.status).toBe('SUBMITTED');
+        expect(resubmitted.body.transaction_date).toBe(original);
+      });
+
+      it('ZD-05: edit draft tidak dapat menyetel transaction_date', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const txId = String(created.body.id);
+
+        // UpdateTransferDto extends CreateTransferDto → field wajib create tetap
+        // wajib di PATCH, jadi kirim body utuh plus transaction_date.
+        await request(app.getHttpServer())
+          .patch(`${BASE}/transfers/${txId}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody({ transaction_date: '2020-01-01T00:00:00.000Z', description: 'edit' }))
+          .expect(200);
+
+        expect(await detail(txId)).toMatchObject({
+          transaction_date: null,
+          description: 'edit',
+        });
+      });
+
+      it('ZD-06: bulk create tanpa transaction_date → semua anak DRAFT tanpa tanggal', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/bulk`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            sender_application_id: Number(indivAppIdOk),
+            bulk_reference_no: bulkRef(),
+            items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Bulk Tanggal 2' })],
+          })
+          .expect(201);
+
+        expect(res.body.transfers).toHaveLength(2);
+        for (const t of res.body.transfers) {
+          expect(t.status).toBe('DRAFT');
+          expect(t.transaction_date).toBeNull();
+        }
+      });
+
+      it('ZD-07: anak bulk mendapat transaction_date saat di-submit sendiri', async () => {
+        const bulk = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/bulk`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            sender_application_id: Number(indivAppIdOk),
+            bulk_reference_no: bulkRef(),
+            items: [bulkItem({ beneficiaryAccountName: 'Bulk Submit Tanggal' })],
+          })
+          .expect(201);
+
+        const childId = String(bulk.body.transfers[0].id);
+        expect(bulk.body.transfers[0].transaction_date).toBeNull();
+
+        const submitted = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${childId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+
+        expect(submitted.body.status).toBe('SUBMITTED');
+        expect(submitted.body.transaction_date).not.toBeNull();
+      });
+
+      it('ZD-08: list & detail tetap membawa transaction_date (null untuk draft, terisi setelah submit)', async () => {
+        const draft = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const draftId = String(draft.body.id);
+
+        const submitted = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const submittedId = String(submitted.body.id);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${submittedId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+
+        expect(await detail(draftId)).toMatchObject({ transaction_date: null });
+        expect((await detail(submittedId)).transaction_date).not.toBeNull();
+
+        const list = await request(app.getHttpServer())
+          .get(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+
+        const draftRow = list.body.find((t: any) => String(t.id) === draftId);
+        const submittedRow = list.body.find((t: any) => String(t.id) === submittedId);
+        expect(draftRow).toBeDefined();
+        expect(submittedRow).toBeDefined();
+        expect(draftRow).toHaveProperty('transaction_date', null);
+        expect(submittedRow.transaction_date).not.toBeNull();
+      });
+    });
 
     it('ZT-01: create tanpa beneficiary_relationship_to_sender → 400', async () => {
       const body = txBody();

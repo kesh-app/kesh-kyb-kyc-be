@@ -101,8 +101,10 @@ export class CreateTransferDto {
   @IsOptional() @IsString() @MaxLength(32)
   transfer_channel?: string;
 
-  @IsOptional() @IsDateString()
-  transaction_date?: string;
+  // transaction_date sengaja TIDAK ada di sini: tanggal transaksi dibuat backend
+  // saat submit (COALESCE(transaction_date, now())), bukan dipilih user. Kalau FE
+  // lama masih mengirimnya, ValidationPipe `whitelist: true` membuangnya diam-diam
+  // — request tetap 200, nilainya diabaikan.
 
   @IsOptional() @IsDateString()
   requested_execution_date?: string;
