@@ -5060,7 +5060,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return id;
     }
 
-    it('N-01: create tanpa partner_reference_no → server generate KESH-TRF-...', async () => {
+    it('N-01: create tanpa partner_reference_no → server generate TRF-XXXXXXXX (12 char)', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -5075,8 +5075,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
 
       expect(res.body.status).toBe('DRAFT');
-      expect(res.body.partner_reference_no).toMatch(/^KESH-TRF-\d{8}-[0-9A-F]{16}$/);
-      expect(res.body.partner_reference_no.length).toBeLessThanOrEqual(64);
+      // Referensi baru dipendekkan jadi tepat 12 karakter (CMP/TRF-XXXXXXXX).
+      // Alfabet sengaja tanpa I, O, 0, 1 — nomor ini dibacakan lewat telepon.
+      expect(res.body.partner_reference_no).toMatch(/^TRF-[A-HJ-NP-Z2-9]{8}$/);
+      expect(res.body.partner_reference_no).toHaveLength(12);
       // amount derivation
       expect(res.body.amount_value).toBe('1000000.00');
       expect(res.body.amount_currency).toBe('IDR');
@@ -10256,7 +10258,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(notApproved).toBeUndefined();
     });
 
-    it('Y-03: ComplaintHandling POST /complaints → 201, complaint_no KESH-CMP-..., status OPEN', async () => {
+    it('Y-03: ComplaintHandling POST /complaints → 201, complaint_no CMP-XXXXXXXX (12 char), status OPEN', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints`)
         .set('Authorization', `Bearer ${complaintHandlingToken}`)
@@ -10273,7 +10275,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
 
       expect(res.body.id).toBeDefined();
-      expect(res.body.complaint_no).toMatch(/^KESH-CMP-\d{8}-[A-Z0-9]{5}$/);
+      expect(res.body.complaint_no).toMatch(/^CMP-[A-HJ-NP-Z2-9]{8}$/);
+      expect(res.body.complaint_no).toHaveLength(12);
       expect(res.body.status).toBe('OPEN');
       expect(res.body.complaint_level).toBe('LEVEL_3');
       expect(res.body.level_3_risk_category).toBe('FRAUD_SECURITY');
@@ -11185,6 +11188,189 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.transaction_status).toBeNull();
       expect(res.body.transaction_partner_reference_no).toBeNull();
     });
+
+    // ── Resi cetak: OPEN vs CLOSED ────────────────────────────
+    // receipt_state murni turunan dari status; workflow tidak berubah. Daftar
+    // putihnya ada di sisi CLOSED, jadi status baru default-nya OPEN.
+    describe('YR. receipt_state untuk resi pengaduan', () => {
+      it('YR-01: pengaduan yang masih berjalan → receipt_state OPEN', async () => {
+        for (const status of ['OPEN', 'OPERATION_INVESTIGATION', 'AML_REVIEW', 'FINANCE_REVIEW']) {
+          const id = await complaintAt(status);
+          const res = await request(app.getHttpServer())
+            .get(`${BASE}/complaints/${id}`)
+            .set('Authorization', `Bearer ${complaintHandlingToken}`)
+            .expect(200);
+
+          expect(res.body.status).toBe(status);
+          expect(res.body.receipt_state).toBe('OPEN');
+        }
+      });
+
+      it('YR-02: pengaduan RESOLVED lalu CLOSED → receipt_state CLOSED', async () => {
+        // operation-investigation dengan hasil SUCCESS sudah memindahkan status
+        // ke RESOLVED (routing di complaints.service), jadi tidak perlu memanggil
+        // /resolve lagi — panggilan kedua justru 400.
+        const id = await complaintAt('RESOLVED');
+
+        const afterResolve = await request(app.getHttpServer())
+          .get(`${BASE}/complaints/${id}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+        expect(afterResolve.body.status).toBe('RESOLVED');
+        expect(afterResolve.body.receipt_state).toBe('CLOSED');
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/complaints/${id}/close`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .send({ closing_notes: 'Nasabah sudah dikonfirmasi.' })
+          .expect(201);
+
+        const afterClose = await request(app.getHttpServer())
+          .get(`${BASE}/complaints/${id}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+        expect(afterClose.body.status).toBe('CLOSED');
+        expect(afterClose.body.receipt_state).toBe('CLOSED');
+      });
+    });
+
+    // ── Akses ter-scope ke data tertaut ───────────────────────
+    // ComplaintHandling mendapat ringkasan nasabah & transaksi DI DALAM detail
+    // pengaduan, bukan izin global membuka /applications/:id atau /transfers/:id.
+    describe('YL. ringkasan nasabah & transaksi tertaut', () => {
+      it('YL-01: detail memuat linked_customer & linked_transfer untuk ComplaintHandling', async () => {
+        const trx = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            amount: 320000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Tertaut',
+            beneficiaryAccountNumber: '9998887776',
+            beneficiaryAccountName: 'Penerima Tertaut',
+            beneficiary_relationship_to_sender: 'Keluarga',
+          })
+          .expect(201);
+
+        const id = await newComplaint({
+          transfer_id: Number(trx.body.id),
+          transaction_reference: trx.body.partner_reference_no,
+        });
+
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/complaints/${id}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+
+        expect(res.body.linked_customer).toMatchObject({
+          application_id: String(indivAppIdOk),
+          customer_status: 'APPROVED',
+        });
+        expect(res.body.linked_customer.customer_name).toBeTruthy();
+        expect(res.body.linked_customer.cif_no).toBeTruthy();
+        expect(res.body.linked_customer.application_public_id).toBeTruthy();
+
+        expect(res.body.linked_transfer).toMatchObject({
+          partner_reference_no: trx.body.partner_reference_no,
+          beneficiary_account_name: 'Penerima Tertaut',
+          beneficiary_account_number: '9998887776',
+          beneficiary_bank_name: 'Bank Tertaut',
+          status: 'DRAFT',
+        });
+        expect(res.body.linked_transfer.transfer_public_id).toBeTruthy();
+        expect(Number(res.body.linked_transfer.amount)).toBe(320000);
+      });
+
+      it('YL-02: pengaduan tanpa transaksi cocok → linked_transfer null, linked_customer tetap ada', async () => {
+        const id = await newComplaint({ transaction_reference: `TRX-${SUFFIX}-YLNOMATCH` });
+
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/complaints/${id}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+
+        expect(res.body.linked_transfer).toBeNull();
+        expect(res.body.linked_customer).not.toBeNull();
+      });
+
+      it('YL-03: ComplaintHandling tetap TIDAK boleh membuka detail aplikasi/transfer langsung', async () => {
+        const trx = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            amount: 150000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank Tak Terkait',
+            beneficiaryAccountNumber: '1231231234',
+            beneficiaryAccountName: 'Penerima Tak Terkait',
+            beneficiary_relationship_to_sender: 'Keluarga',
+          })
+          .expect(201);
+
+        // Detail transfer tetap tertutup untuk ComplaintHandling — itulah
+        // sebabnya ringkasannya disisipkan ke detail pengaduan, bukan dengan
+        // menambahkan role ini ke @Roles milik GET /transfers/:id.
+        await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${trx.body.id}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(403);
+
+        // Catatan: GET /applications/:id sampai saat ini TIDAK punya @Roles sama
+        // sekali, jadi setiap role terautentikasi bisa membacanya. Itu kondisi
+        // yang sudah ada sebelumnya, bukan akibat perubahan ini — dikunci di
+        // sini supaya kalau nanti diperketat, keputusannya sadar.
+        await request(app.getHttpServer())
+          .get(`${BASE}/applications/${indivAppIdOk}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+      });
+    });
+
+    // ── Nomor referensi 12 karakter ───────────────────────────
+    describe('YN. nomor referensi baru maksimal 12 karakter', () => {
+      it('YN-01: complaint_no baru = CMP-XXXXXXXX dan unik antar pengaduan', async () => {
+        const seen = new Set<string>();
+        for (let i = 0; i < 5; i++) {
+          const id = await newComplaint();
+          const res = await request(app.getHttpServer())
+            .get(`${BASE}/complaints/${id}`)
+            .set('Authorization', `Bearer ${complaintHandlingToken}`)
+            .expect(200);
+
+          expect(res.body.complaint_no).toMatch(/^CMP-[A-HJ-NP-Z2-9]{8}$/);
+          expect(res.body.complaint_no).toHaveLength(12);
+          expect(seen.has(res.body.complaint_no)).toBe(false);
+          seen.add(res.body.complaint_no);
+        }
+      });
+
+      it('YN-02: complaint_no lama yang panjang tetap bisa dicari', async () => {
+        // Tulis langsung baris legacy — endpoint create tidak bisa lagi
+        // menghasilkan format panjang, tapi baris seperti ini ada di produksi.
+        // SUFFIX unik per run — suite ini tidak membersihkan datanya, jadi
+        // nomor tetap akan menabrak baris sisa run sebelumnya.
+        const legacyNo = `KESH-CMP-20260101-LEG${SUFFIX}`;
+        const id = await newComplaint();
+        await pgPool.query(`UPDATE complaints SET complaint_no = $1 WHERE id = $2`, [
+          legacyNo,
+          Number(id),
+        ]);
+
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/complaints?q=${encodeURIComponent(legacyNo)}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+
+        expect(res.body.data.find((c: any) => c.complaint_no === legacyNo)).toBeDefined();
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/complaints/${id}`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+        // Resi/detail menampilkan nilai yang benar-benar tersimpan, bukan hasil pemotongan.
+        expect(detail.body.complaint_no).toBe(legacyNo);
+      });
+    });
   });
 
   // ══════════════════════════════════════════════════════════
@@ -11714,6 +11900,177 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       }
       return null;
     }
+
+    // ── Akses Report Center per divisi ────────────────────────────────────
+    // Pembatasan sebenarnya ada di service (report-access.ts), bukan di
+    // RolesGuard, karena bergantung pada report_type. Tes ini mengunci matriks
+    // pada keempat endpoint: generate / list / status / download.
+    describe('RA. Akses report per divisi', () => {
+      const period = () => ({
+        format: 'CSV',
+        period_start: daysAgoIso(3),
+        period_end: nowIso(),
+        filters: {},
+      });
+
+      /** Generate lalu tunggu selesai; mengembalikan id report. */
+      async function generateAs(token: string, report_type: string) {
+        const res = await request(server())
+          .post(`${BASE}/reports/generate`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ report_type, ...period() })
+          .expect(201);
+        const done = await pollDone(res.body.id, token);
+        expect(done?.status).toBe('COMPLETED');
+        return String(res.body.id);
+      }
+
+      it('RA-01: ComplaintHandling dapat generate/list/download report COMPLAINTS', async () => {
+        const id = await generateAs(complaintHandlingToken, 'COMPLAINTS');
+
+        const list = await request(server())
+          .get(`${BASE}/reports?limit=100`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+        expect(list.body.data.find((r: any) => String(r.id) === id)).toBeDefined();
+
+        await request(server())
+          .get(`${BASE}/reports/${id}/download`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+      });
+
+      it('RA-02: ComplaintHandling tidak dapat generate report finance/compliance', async () => {
+        for (const report_type of ['TRANSFERS', 'LTKT', 'LTKM', 'KYC_KYB', 'ALL']) {
+          await request(server())
+            .post(`${BASE}/reports/generate`)
+            .set('Authorization', `Bearer ${complaintHandlingToken}`)
+            .send({ report_type, ...period() })
+            .expect(403);
+        }
+      });
+
+      it('RA-03: OperationSupervisor dapat report pengaduan, tidak dapat finance', async () => {
+        await generateAs(operationSupervisorToken, 'COMPLAINTS');
+        await request(server())
+          .post(`${BASE}/reports/generate`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ report_type: 'TRANSFERS', ...period() })
+          .expect(403);
+      });
+
+      it('RA-04: FinanceStaff dapat report TRANSFERS, tidak dapat pengaduan/compliance', async () => {
+        await generateAs(financeStaffToken, 'TRANSFERS');
+        for (const report_type of ['COMPLAINTS', 'LTKM', 'ALL']) {
+          await request(server())
+            .post(`${BASE}/reports/generate`)
+            .set('Authorization', `Bearer ${financeStaffToken}`)
+            .send({ report_type, ...period() })
+            .expect(403);
+        }
+      });
+
+      it('RA-05: FinanceManager punya akses report yang sama dengan FinanceStaff', async () => {
+        await generateAs(financeManagerToken, 'TRANSFERS');
+        await request(server())
+          .post(`${BASE}/reports/generate`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .send({ report_type: 'COMPLAINTS', ...period() })
+          .expect(403);
+      });
+
+      it('RA-06: ComplianceLead dapat seluruh jenis report', async () => {
+        for (const report_type of ['COMPLAINTS', 'TRANSFERS', 'LTKT', 'LTKM']) {
+          await request(server())
+            .post(`${BASE}/reports/generate`)
+            .set('Authorization', `Bearer ${complianceToken}`)
+            .send({ report_type, ...period() })
+            .expect(201);
+        }
+
+        // KYC_KYB dan ALL menghasilkan >1 sheet, jadi wajib XLSX (aturan lama,
+        // bukan bagian dari matriks akses).
+        for (const report_type of ['KYC_KYB', 'ALL']) {
+          await request(server())
+            .post(`${BASE}/reports/generate`)
+            .set('Authorization', `Bearer ${complianceToken}`)
+            .send({ report_type, format: 'XLSX', period_start: daysAgoIso(3), period_end: nowIso() })
+            .expect(201);
+        }
+      });
+
+      it('RA-07: Auditor tetap read-only — tidak boleh generate, boleh list', async () => {
+        await request(server())
+          .post(`${BASE}/reports/generate`)
+          .set('Authorization', `Bearer ${auditorToken}`)
+          .send({ report_type: 'COMPLAINTS', ...period() })
+          .expect(403);
+
+        await request(server())
+          .get(`${BASE}/reports?limit=5`)
+          .set('Authorization', `Bearer ${auditorToken}`)
+          .expect(200);
+      });
+
+      it('RA-08: list hanya memuat jenis report yang boleh dilihat role tersebut', async () => {
+        // Ada report TRANSFERS milik finance di DB (dibuat RA-04/05).
+        const finance = await request(server())
+          .get(`${BASE}/reports?limit=100`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        expect(finance.body.data.length).toBeGreaterThan(0);
+        expect(finance.body.data.every((r: any) => r.report_type === 'TRANSFERS')).toBe(true);
+
+        const complaint = await request(server())
+          .get(`${BASE}/reports?limit=100`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(200);
+        expect(complaint.body.data.length).toBeGreaterThan(0);
+        expect(complaint.body.data.every((r: any) => r.report_type === 'COMPLAINTS')).toBe(true);
+
+        // Menyaring eksplisit ke jenis di luar jatah tetap ditolak, bukan
+        // dikembalikan kosong — supaya tidak terbaca sebagai "tidak ada data".
+        await request(server())
+          .get(`${BASE}/reports?report_type=TRANSFERS`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(403);
+      });
+
+      it('RA-09: download & status report di luar jatah divisi → 404', async () => {
+        const financeReportId = await generateAs(financeStaffToken, 'TRANSFERS');
+
+        // 404, bukan 403: 403 pada id valid tetap membocorkan report itu ada.
+        await request(server())
+          .get(`${BASE}/reports/${financeReportId}/download`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(404);
+        await request(server())
+          .get(`${BASE}/reports/${financeReportId}/status`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .expect(404);
+      });
+
+      it('RA-10: ALL hanya untuk role akses penuh; Auditor boleh mengunduh ALL yang sudah ada', async () => {
+        await request(server())
+          .post(`${BASE}/reports/generate`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ report_type: 'ALL', format: 'XLSX', period_start: daysAgoIso(3), period_end: nowIso() })
+          .expect(403);
+
+        const res = await request(server())
+          .post(`${BASE}/reports/generate`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ report_type: 'ALL', format: 'XLSX', period_start: daysAgoIso(3), period_end: nowIso() })
+          .expect(201);
+        const done = await pollDone(res.body.id, complianceToken);
+        expect(done?.status).toBe('COMPLETED');
+
+        await request(server())
+          .get(`${BASE}/reports/${res.body.id}/download`)
+          .set('Authorization', `Bearer ${auditorToken}`)
+          .expect(200);
+      });
+    });
 
     it('L-01/02: ComplianceLead creates ON_DEMAND XLSX report → PENDING/PROCESSING', async () => {
       const res = await request(server())
@@ -13729,9 +14086,28 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return { id: String(res.body.id), ref: res.body.partner_reference_no as string };
     }
 
+    it('SR-22b: refund matching tetap menerima partner_reference_no format lama yang panjang', async () => {
+      const tx = await createTransferFull('R22B');
+      // Baris legacy: transfer lama masih memakai KESH-TRF-... di produksi.
+      // Pencarian memakai kecocokan persis pada nilai tersimpan, jadi format
+      // lama maupun baru sama-sama harus ketemu.
+      const legacyRef = `KESH-TRF-20260101-${SUFFIX}LEGACY22B`;
+      await pgPool.query(`UPDATE transfers SET partner_reference_no = $1 WHERE id = $2`, [
+        legacyRef,
+        Number(tx.id),
+      ]);
+
+      const created = await createRefund(
+        refundPayload({ original_transfer_reference_no: legacyRef }),
+      ).expect(201);
+
+      expect(String(created.body.original_transfer_id)).toBe(tx.id);
+      expect(created.body.status).toBe('MATCHED');
+    });
+
     it('SR-22: create dengan original_transfer_reference_no meresolusi ke original_transfer_id & muncul di detail', async () => {
       const tx = await createTransferFull('R22');
-      expect(tx.ref).toMatch(/^KESH-TRF-/);
+      expect(tx.ref).toMatch(/^TRF-/);
 
       const created = await createRefund(
         refundPayload({ original_transfer_reference_no: tx.ref }),
@@ -14123,7 +14499,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
     it('SR-29: create dengan complaint_no meresolusi ke complaint_id & muncul di detail', async () => {
       const complaint = await createComplaint('R29');
-      expect(complaint.no).toMatch(/^KESH-CMP-/);
+      expect(complaint.no).toMatch(/^CMP-/);
 
       const created = await createRefund(
         refundPayload({ complaint_no: complaint.no }),

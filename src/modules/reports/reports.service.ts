@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -11,6 +12,11 @@ import { resolveUserId } from '../../common/auth.util';
 import { UploadsService } from '../uploads/uploads.service';
 import { buildCsv, buildXlsx, Sheet } from './report-builders';
 import { GenerateReportDto, ListReportsQueryDto } from './dto';
+import {
+  allowedReportTypes,
+  canAccessReportType,
+  canGenerateReportType,
+} from './report-access';
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
@@ -39,7 +45,31 @@ export class ReportsService {
 
   // ── public API ────────────────────────────────────────────────────────────
 
+  /**
+   * Satu penjaga untuk semua endpoint yang menyentuh satu baris report: baris
+   * yang jenisnya di luar jatah divisi diperlakukan seolah tidak ada (404),
+   * bukan 403 — 403 pada id yang valid tetap membocorkan bahwa report itu ada.
+   */
+  private async assertRowAccessible(id: number, user: AuthedUser) {
+    const q = await this.pool.query(
+      `SELECT report_type FROM generated_reports WHERE id = $1`,
+      [id],
+    );
+    if (!q.rows[0]) throw new NotFoundException('Report not found');
+    if (!canAccessReportType(user.role, q.rows[0].report_type)) {
+      throw new NotFoundException('Report not found');
+    }
+  }
+
   async generate(user: AuthedUser, dto: GenerateReportDto) {
+    // Divisi hanya boleh membuat jenis report miliknya; 'ALL' hanya untuk role
+    // ber-akses penuh, dan Auditor tidak boleh generate sama sekali.
+    if (!canGenerateReportType(user.role, dto.report_type)) {
+      throw new ForbiddenException(
+        `Role ${user.role} tidak berhak membuat report ${dto.report_type}.`,
+      );
+    }
+
     const start = new Date(dto.period_start);
     const end = new Date(dto.period_end);
     if (end.getTime() < start.getTime()) {
@@ -87,7 +117,7 @@ export class ReportsService {
     return { id: String(row.id), report_no: row.report_no, status: row.status };
   }
 
-  async list(query: ListReportsQueryDto) {
+  async list(query: ListReportsQueryDto, user: AuthedUser) {
     const page = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, Math.max(1, query.limit ?? 20));
     const offset = (page - 1) * limit;
@@ -98,6 +128,16 @@ export class ReportsService {
       params.push(val);
       return `$${params.length}`;
     };
+
+    // Filter jatah divisi selalu ikut, bahkan saat pemanggil menyaring sendiri —
+    // metadata report di luar jatah tidak boleh bocor lewat list.
+    const allowed = allowedReportTypes(user.role);
+    if (query.report_type && !allowed.includes(query.report_type)) {
+      throw new ForbiddenException(
+        `Role ${user.role} tidak berhak melihat report ${query.report_type}.`,
+      );
+    }
+    where.push(`report_type = ANY(${add([...allowed])})`);
     if (query.report_type) where.push(`report_type = ${add(query.report_type)}`);
     if (query.generation_mode) where.push(`generation_mode = ${add(query.generation_mode)}`);
     if (query.status) where.push(`status = ${add(query.status)}`);
@@ -121,7 +161,8 @@ export class ReportsService {
     return { data: dataQ.rows, total: countQ.rows[0].total, page, limit };
   }
 
-  async status(id: number) {
+  async status(id: number, user: AuthedUser) {
+    await this.assertRowAccessible(id, user);
     const q = await this.pool.query(
       `SELECT id, report_no, status, error_message, row_counts, completed_at
        FROM generated_reports WHERE id = $1`,
@@ -131,7 +172,8 @@ export class ReportsService {
     return q.rows[0];
   }
 
-  async download(id: number) {
+  async download(id: number, user: AuthedUser) {
+    await this.assertRowAccessible(id, user);
     const q = await this.pool.query(
       `SELECT status, object_key, file_name FROM generated_reports WHERE id = $1`,
       [id],

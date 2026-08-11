@@ -6,6 +6,7 @@ import {
 } from "@nestjs/common";
 import { Pool } from "pg";
 import { resolveUserId } from "../../common/auth.util";
+import { generateUniqueReferenceNo } from "../../common/reference-no.util";
 import {
   AmlReviewDto,
   CloseComplaintDto,
@@ -24,23 +25,23 @@ type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 export class ComplaintsService {
   constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
 
-  private generateComplaintNo(): string {
-    const now = new Date();
-    const date = now.toISOString().slice(0, 10).replace(/-/g, "");
-    const rand = Math.random().toString(36).toUpperCase().slice(2, 7).padEnd(5, "0");
-    return `KESH-CMP-${date}-${rand}`;
-  }
-
+  /**
+   * Nomor pengaduan baru: CMP-XXXXXXXX, tepat 12 karakter (lihat
+   * common/reference-no.util). Nomor lama yang panjang tetap tersimpan apa
+   * adanya dan tetap bisa dicari — pencarian memakai kecocokan persis.
+   */
   private async resolveComplaintNo(): Promise<string> {
-    for (let i = 0; i < 5; i++) {
-      const candidate = this.generateComplaintNo();
+    const no = await generateUniqueReferenceNo("CMP", async (candidate) => {
       const dup = await this.pool.query(
         `SELECT 1 FROM complaints WHERE complaint_no = $1 LIMIT 1`,
         [candidate],
       );
-      if ((dup.rowCount ?? 0) === 0) return candidate;
+      return (dup.rowCount ?? 0) > 0;
+    });
+    if (!no) {
+      throw new BadRequestException("Failed to generate complaint_no, please retry");
     }
-    throw new BadRequestException("Failed to generate complaint_no, please retry");
+    return no;
   }
 
   // ---------------------------------------------------------------------------
@@ -271,6 +272,28 @@ export class ComplaintsService {
   // ---------------------------------------------------------------------------
   // DETAIL
   // ---------------------------------------------------------------------------
+  /**
+   * Status pengaduan yang dianggap SELESAI untuk keperluan resi cetak. Sisanya
+   * (termasuk legacy IN_PROGRESS) dianggap masih berjalan. Dipakai hanya untuk
+   * menurunkan receipt_state — TIDAK memengaruhi workflow.
+   */
+  private static readonly CLOSED_RECEIPT_STATUSES = [
+    "RESOLVED",
+    "CLOSED",
+    "REJECTED",
+  ];
+
+  /**
+   * OPEN vs CLOSED untuk footer resi. Daftar putih ada di sisi CLOSED supaya
+   * status baru yang ditambahkan ke workflow otomatis dianggap masih berjalan
+   * — resi pengaduan yang belum selesai adalah default yang aman.
+   */
+  private receiptState(status?: string | null): "OPEN" | "CLOSED" {
+    return ComplaintsService.CLOSED_RECEIPT_STATUSES.includes(status ?? "")
+      ? "CLOSED"
+      : "OPEN";
+  }
+
   async getById(id: number, _user?: AuthedUser) {
     const q = await this.pool.query(
       `SELECT c.*,
@@ -285,7 +308,19 @@ export class ComplaintsService {
               t.amount AS transaction_amount,
               t.transaction_date AS transaction_date,
               t.status AS transaction_status,
-              t.partner_reference_no AS transaction_partner_reference_no
+              t.partner_reference_no AS transaction_partner_reference_no,
+              -- Ringkasan nasabah & transaksi tertaut. Ada di sini supaya
+              -- ComplaintHandling tidak perlu membuka /applications/:id atau
+              -- /transfers/:id yang tidak boleh diaksesnya; aksesnya jadi
+              -- ter-scope ke pengaduan, bukan ke seluruh tabel.
+              app.public_id AS linked_application_public_id,
+              app.status    AS linked_application_status,
+              -- Sama seperti list aplikasi: override menang atas skor mentah.
+              COALESCE(ar.override_level, ar.risk_level) AS linked_application_risk_level,
+              t.public_id                  AS linked_transfer_public_id,
+              t.beneficiary_account_name   AS linked_beneficiary_account_name,
+              t.beneficiary_account_number AS linked_beneficiary_account_number,
+              t.beneficiary_bank_name      AS linked_beneficiary_bank_name
          FROM complaints c
          LEFT JOIN users u_created ON u_created.id = c.created_by
          LEFT JOIN users u_verified ON u_verified.id = c.data_verified_by
@@ -297,6 +332,7 @@ export class ComplaintsService {
          LEFT JOIN applications app ON app.id = c.customer_application_id
          LEFT JOIN persons p ON p.id = app.person_id
          LEFT JOIN business_entities be ON be.id = app.business_id
+         LEFT JOIN application_risk ar ON ar.application_id = app.id
          LEFT JOIN transfers t ON t.id = c.transfer_id
               OR (c.transfer_id IS NULL AND t.partner_reference_no = c.transaction_reference)
         WHERE c.id = $1`,
@@ -318,7 +354,43 @@ export class ComplaintsService {
       [id],
     );
 
-    return { ...row, statement_refunds: refunds.rows };
+    // Kolom linked_* di atas dibungkus jadi dua objek ringkasan. Field lama
+    // (customer_name, transaction_amount, dst.) sengaja tetap ada di root
+    // supaya konsumen lama tidak perlu berubah — ini murni tambahan.
+    const linked_customer = row.customer_application_id
+      ? {
+          application_id: row.customer_application_id,
+          application_public_id: row.linked_application_public_id,
+          cif_no: row.customer_cif_no,
+          customer_name: row.customer_name,
+          customer_type: row.customer_type,
+          customer_status: row.linked_application_status,
+          risk_level: row.linked_application_risk_level,
+          contact: row.customer_contact,
+        }
+      : null;
+
+    const linked_transfer = row.transaction_partner_reference_no
+      ? {
+          transfer_id: row.transfer_id,
+          transfer_public_id: row.linked_transfer_public_id,
+          partner_reference_no: row.transaction_partner_reference_no,
+          amount: row.transaction_amount,
+          transaction_date: row.transaction_date,
+          status: row.transaction_status,
+          beneficiary_account_name: row.linked_beneficiary_account_name,
+          beneficiary_account_number: row.linked_beneficiary_account_number,
+          beneficiary_bank_name: row.linked_beneficiary_bank_name,
+        }
+      : null;
+
+    return {
+      ...row,
+      receipt_state: this.receiptState(row.status),
+      linked_customer,
+      linked_transfer,
+      statement_refunds: refunds.rows,
+    };
   }
 
   // ---------------------------------------------------------------------------

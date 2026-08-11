@@ -6,7 +6,7 @@
  * (Transfer Credit / Transfer to Bank) saat integрasi nanti.
  */
 
-import { randomBytes } from 'crypto';
+import { buildReferenceNo } from '../../common/reference-no.util';
 
 /**
  * Format angka amount menjadi string 2 desimal (SNAP amount.value),
@@ -28,16 +28,15 @@ export function normalizeCurrency(currency?: string | null): string {
 
 /**
  * Generate partner_reference_no internal yang aman & unik.
- * Format: KESH-TRF-YYYYMMDD-<16 hex char> (total <= 64 char).
- * Tidak ada PII; entropy 64-bit cukup untuk menghindari tabrakan.
- * Tetap divalidasi unik di DB lewat unique index + retry.
+ * Format: TRF-XXXXXXXX, tepat 12 karakter (lihat common/reference-no.util).
+ * Tidak ada PII. Tetap divalidasi unik di DB lewat unique index + retry.
+ *
+ * Referensi lama KESH-TRF-YYYYMMDD-<16 hex> tidak diubah: kolomnya masih
+ * varchar(64) dan pencarian memakai kecocokan persis, jadi baris lama tetap
+ * ditemukan oleh refund matching maupun pencarian transfer.
  */
-export function generatePartnerReferenceNo(now: Date = new Date()): string {
-  const yyyy = now.getFullYear().toString().padStart(4, '0');
-  const mm = (now.getMonth() + 1).toString().padStart(2, '0');
-  const dd = now.getDate().toString().padStart(2, '0');
-  const rand = randomBytes(8).toString('hex').toUpperCase(); // 16 hex chars
-  return `KESH-TRF-${yyyy}${mm}${dd}-${rand}`;
+export function generatePartnerReferenceNo(): string {
+  return buildReferenceNo('TRF');
 }
 
 /**
