@@ -1149,6 +1149,82 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(entry.revision_reason).toBe('Dokumen KTP buram, mohon unggah ulang');
     });
 
+    // "Ditolak" vs "Perlu Perbaikan". Antara migration 0048 dan commit 840ec94
+    // kedua aksi ini menulis status REVISION_REQUIRED yang sama, sehingga
+    // penolakan Compliance tampil sebagai "Perlu Perbaikan" dan tidak ada kolom
+    // yang bisa membedakannya lagi. Kolom `decision` (migration 0065) mencatat
+    // aksinya terpisah dari status; tes berikut mengunci keduanya.
+    describe('E-DEC: keputusan REJECTED tidak boleh tercampur REVISION_REQUIRED', () => {
+      let rejectedId: string;
+
+      it('E-DEC-01: REJECTED menyimpan status DAN decision = REJECTED', async () => {
+        rejectedId = await createAndSubmitForRevision(31);
+
+        const res = await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${rejectedId}/decision`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ decision: 'REJECTED', reason: 'Identitas tidak dapat diverifikasi' })
+          .expect(200);
+
+        expect(res.body.status).toBe('REJECTED');
+        expect(res.body.decision).toBe('REJECTED');
+        expect(res.body.decision_reason).toBe('Identitas tidak dapat diverifikasi');
+        expect(res.body.decision_at).toBeTruthy();
+      });
+
+      it('E-DEC-02: detail aplikasi yang ditolak tetap REJECTED', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${rejectedId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        expect(res.body.application.status).toBe('REJECTED');
+        expect(res.body.application.decision).toBe('REJECTED');
+      });
+
+      it('E-DEC-03: list mengembalikan REJECTED untuk aplikasi yang ditolak', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/applications?status=REJECTED`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        const entry = res.body.data.find((a: any) => String(a.id) === rejectedId);
+        expect(entry).toBeDefined();
+        expect(entry.status).toBe('REJECTED');
+        expect(entry.decision).toBe('REJECTED');
+      });
+
+      it('E-DEC-04: aplikasi ditolak tidak ikut terjaring filter REVISION_REQUIRED', async () => {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/applications?status=REVISION_REQUIRED&limit=200`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        expect(res.body.data.every((a: any) => a.status === 'REVISION_REQUIRED')).toBe(true);
+        expect(res.body.data.find((a: any) => String(a.id) === rejectedId)).toBeUndefined();
+      });
+
+      it('E-DEC-05: RETURN_FOR_REVISION menyimpan decision RETURN_FOR_REVISION', async () => {
+        const appId = await createAndSubmitForRevision(32);
+
+        const res = await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}/decision`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ decision: 'RETURN_FOR_REVISION', reason: 'Slip gaji belum dilampirkan' })
+          .expect(200);
+
+        expect(res.body.status).toBe('REVISION_REQUIRED');
+        expect(res.body.decision).toBe('RETURN_FOR_REVISION');
+      });
+
+      it('E-DEC-06: aplikasi ditolak bersifat terminal — FrontDesk tidak bisa submit ulang', async () => {
+        await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${rejectedId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(400);
+      });
+    });
+
     it('E-REV-05: FrontDesk dapat edit CDD data di status REVISION_REQUIRED', async () => {
       // Send a full update DTO so required fields are preserved (updateIndividualCdd does full replace)
       const res = await request(app.getHttpServer())

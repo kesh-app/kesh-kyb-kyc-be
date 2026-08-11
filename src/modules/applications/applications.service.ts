@@ -3359,6 +3359,8 @@ export class ApplicationsService {
           a.public_id,
           a.type AS application_type,
           a.status,
+          -- Aksi reviewer, terpisah dari status hasilnya (lihat migration 0065).
+          a.decision,
           a.created_at,
           a.updated_at,
           a.revision_reason,
@@ -3953,9 +3955,10 @@ export class ApplicationsService {
 
       const res = await this.pool.query(
         `UPDATE applications
-         SET status='APPROVED', decision_by=$2, decision_reason=$3, decision_at=now(), updated_at=now()
+         SET status='APPROVED', decision='APPROVED',
+             decision_by=$2, decision_reason=$3, decision_at=now(), updated_at=now()
          WHERE id=$1
-         RETURNING id, status, decision_reason, decision_at`,
+         RETURNING id, status, decision, decision_reason, decision_at`,
         [appId, reviewerId, reason || null],
       );
       return res.rows[0];
@@ -3966,11 +3969,15 @@ export class ApplicationsService {
         throw new BadRequestException("Alasan penolakan wajib diisi.");
       }
 
+      // `decision` dicatat terpisah dari `status` supaya aksi yang diambil tidak
+      // ikut hilang kalau status berubah — itu persis yang membuat penolakan era
+      // migration 0048 tidak bisa dibedakan dari permintaan revisi (lihat 0065).
       const res = await this.pool.query(
         `UPDATE applications
-         SET status='REJECTED', decision_by=$2, decision_reason=$3, decision_at=now(), updated_at=now()
+         SET status='REJECTED', decision='REJECTED',
+             decision_by=$2, decision_reason=$3, decision_at=now(), updated_at=now()
          WHERE id=$1
-         RETURNING id, status, decision_reason, decision_at`,
+         RETURNING id, status, decision, decision_reason, decision_at`,
         [appId, reviewerId, reason.trim()],
       );
       return res.rows[0];
@@ -3984,12 +3991,13 @@ export class ApplicationsService {
       const res = await this.pool.query(
         `UPDATE applications
          SET status='REVISION_REQUIRED',
+             decision='RETURN_FOR_REVISION',
              revision_reason=$2,
              revision_requested_by=$3,
              revision_requested_at=now(),
              updated_at=now()
          WHERE id=$1
-         RETURNING id, status, revision_reason, revision_requested_by, revision_requested_at`,
+         RETURNING id, status, decision, revision_reason, revision_requested_by, revision_requested_at`,
         [appId, reason, reviewerId],
       );
       return res.rows[0];
