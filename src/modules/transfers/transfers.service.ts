@@ -2009,23 +2009,111 @@ export class TransfersService {
   }
 
   // ---------------------------------------------------------------------------
-  // BANK CATALOG — daftar bank statis untuk FE dropdown
+  // BANK CATALOG — daftar bank statis untuk FE dropdown.
+  //
+  // `code` di sini adalah singkatan internal untuk lookup nama di FE
+  // (banks.find(b => b.code === selected)) — BUKAN kode bank resmi BI/SKNBI
+  // 3-digit (014, 008, dst). Tidak ada logic lain di backend yang mencocokkan
+  // string ini secara literal, jadi aman diubah/ditambah kapan saja tanpa
+  // migrasi. Kalau nanti butuh kode SKNBI resmi (mis. untuk integrasi SNAP
+  // interbank sungguhan), itu perlu tabel referensi terpisah yang divalidasi
+  // manual terhadap daftar resmi BI/ASPI — jangan tebak dari sini.
   // ---------------------------------------------------------------------------
   getBanks() {
     return [
-      { code: 'BCA',     name: 'Bank Central Asia' },
-      { code: 'MANDIRI', name: 'Bank Mandiri' },
-      { code: 'BRI',     name: 'Bank Rakyat Indonesia' },
-      { code: 'BNI',     name: 'Bank Negara Indonesia' },
-      { code: 'CIMB',    name: 'CIMB Niaga' },
-      { code: 'DANAMON', name: 'Bank Danamon' },
-      { code: 'PERMATA', name: 'Bank Permata' },
-      { code: 'BTN',     name: 'Bank Tabungan Negara' },
-      { code: 'BSI',     name: 'Bank Syariah Indonesia' },
-      { code: 'MAYBANK', name: 'Maybank Indonesia' },
-      { code: 'OCBC',    name: 'OCBC Indonesia' },
-      { code: 'PANIN',   name: 'Panin Bank' },
-      { code: 'NOBU',    name: 'Bank Nobu' },
+      // ── Himbara (bank BUMN) ──────────────────────────────────────────
+      { code: 'BRI',      name: 'Bank Rakyat Indonesia' },
+      { code: 'MANDIRI',  name: 'Bank Mandiri' },
+      { code: 'BNI',      name: 'Bank Negara Indonesia' },
+      { code: 'BTN',      name: 'Bank Tabungan Negara' },
+
+      // ── Bank swasta nasional besar ───────────────────────────────────
+      { code: 'BCA',      name: 'Bank Central Asia' },
+      { code: 'CIMB',     name: 'CIMB Niaga' },
+      { code: 'DANAMON',  name: 'Bank Danamon' },
+      { code: 'PERMATA',  name: 'Bank Permata' },
+      { code: 'MAYBANK',  name: 'Maybank Indonesia' },
+      { code: 'OCBC',     name: 'OCBC NISP' },
+      { code: 'PANIN',    name: 'Panin Bank' },
+      { code: 'NOBU',     name: 'Bank Nobu' },
+      { code: 'MEGA',     name: 'Bank Mega' },
+      { code: 'BUKOPIN',  name: 'KB Bukopin' },
+      { code: 'SINARMAS', name: 'Bank Sinarmas' },
+      { code: 'WOORI',    name: 'Bank Woori Saudara' },
+      { code: 'BTPN',     name: 'Bank BTPN' },
+      { code: 'MAYAPADA', name: 'Bank Mayapada International' },
+      { code: 'MESTIKA',  name: 'Bank Mestika Dharma' },
+      { code: 'ARTHA_GRAHA', name: 'Bank Artha Graha Internasional' },
+      { code: 'BUMI_ARTA', name: 'Bank Bumi Arta' },
+      { code: 'CAPITAL',  name: 'Bank Capital Indonesia' },
+      { code: 'VICTORIA', name: 'Bank Victoria International' },
+      { code: 'GANESHA',  name: 'Bank Ganesha' },
+      { code: 'INDEX_SELINDO', name: 'Bank Index Selindo' },
+      { code: 'SAHABAT_SAMPOERNA', name: 'Bank Sahabat Sampoerna' },
+      { code: 'MULTIARTA_SENTOSA', name: 'Bank Multiarta Sentosa' },
+
+      // ── Bank asing / joint venture ────────────────────────────────────
+      { code: 'HSBC',     name: 'HSBC Indonesia' },
+      { code: 'CITIBANK', name: 'Citibank Indonesia' },
+      { code: 'STANCHART', name: 'Standard Chartered Bank Indonesia' },
+      { code: 'DBS',      name: 'Bank DBS Indonesia' },
+      { code: 'UOB',      name: 'Bank UOB Indonesia' },
+      { code: 'ANZ',      name: 'Bank ANZ Indonesia' },
+      { code: 'BNP_PARIBAS', name: 'Bank BNP Paribas Indonesia' },
+      { code: 'QNB',      name: 'Bank QNB Indonesia' },
+      { code: 'CCB',      name: 'China Construction Bank Indonesia' },
+      { code: 'ICBC',     name: 'Bank ICBC Indonesia' },
+      { code: 'SMBC',     name: 'Bank SMBC Indonesia' },
+      { code: 'HANA',     name: 'Bank KEB Hana Indonesia' },
+      { code: 'CTBC',     name: 'Bank CTBC Indonesia' },
+      { code: 'SHINHAN',  name: 'Bank Shinhan Indonesia' },
+      { code: 'IBK',      name: 'Bank IBK Indonesia' },
+      { code: 'RESONA_PERDANIA', name: 'Bank Resona Perdania' },
+
+      // ── Bank syariah ───────────────────────────────────────────────────
+      { code: 'BSI',      name: 'Bank Syariah Indonesia' },
+      { code: 'MUAMALAT', name: 'Bank Muamalat Indonesia' },
+      { code: 'MEGA_SYARIAH', name: 'Bank Mega Syariah' },
+      { code: 'BTPN_SYARIAH', name: 'Bank BTPN Syariah' },
+      { code: 'PANIN_DUBAI_SYARIAH', name: 'Bank Panin Dubai Syariah' },
+
+      // ── Bank Pembangunan Daerah (BPD) ───────────────────────────────────
+      { code: 'BJB',      name: 'Bank BJB (Jabar Banten)' },
+      { code: 'BPD_DKI',  name: 'Bank DKI' },
+      { code: 'BPD_JATENG', name: 'Bank Jateng' },
+      { code: 'BPD_JATIM', name: 'Bank Jatim' },
+      { code: 'BPD_SUMUT', name: 'Bank Sumut' },
+      { code: 'BPD_SUMSEL_BABEL', name: 'Bank Sumsel Babel' },
+      { code: 'BPD_NAGARI', name: 'Bank Nagari (Sumatera Barat)' },
+      { code: 'BPD_RIAU_KEPRI', name: 'Bank Riau Kepri' },
+      { code: 'BPD_KALBAR', name: 'Bank Kalbar' },
+      { code: 'BPD_KALSEL', name: 'Bank Kalsel' },
+      { code: 'BPD_KALTENG', name: 'Bank Kalteng' },
+      { code: 'BPD_KALTIMTARA', name: 'Bank Kaltimtara' },
+      { code: 'BPD_SULSELBAR', name: 'Bank Sulselbar' },
+      { code: 'BPD_SULUTGO', name: 'Bank SulutGo' },
+      { code: 'BPD_NTB_SYARIAH', name: 'Bank NTB Syariah' },
+      { code: 'BPD_NTT',  name: 'Bank NTT' },
+      { code: 'BPD_PAPUA', name: 'Bank Papua' },
+      { code: 'BPD_MALUKU_MALUT', name: 'Bank Maluku Malut' },
+      { code: 'BPD_BENGKULU', name: 'Bank Bengkulu' },
+      { code: 'BPD_LAMPUNG', name: 'Bank Lampung' },
+      { code: 'BPD_ACEH_SYARIAH', name: 'Bank Aceh Syariah' },
+      { code: 'BPD_DIY',  name: 'Bank BPD DIY' },
+
+      // ── Bank digital ────────────────────────────────────────────────────
+      { code: 'JAGO',     name: 'Bank Jago' },
+      { code: 'SEABANK',  name: 'SeaBank Indonesia' },
+      { code: 'NEOBANK',  name: 'Bank Neo Commerce (neobank)' },
+      { code: 'ALADIN',   name: 'Bank Aladin Syariah' },
+      { code: 'RAYA',     name: 'Bank Raya Indonesia' },
+      { code: 'ALLO',     name: 'Allo Bank Indonesia' },
+      { code: 'BLU_BCA',  name: 'blu by BCA Digital' },
+      { code: 'SUPERBANK', name: 'Superbank Indonesia' },
+      { code: 'KROM',     name: 'Krom Bank Indonesia' },
+      { code: 'SAQU',     name: 'Bank Saqu' },
+      // Jenius sengaja tidak dicantumkan sebagai entri terpisah — itu produk
+      // digital yang berjalan di atas lisensi Bank BTPN, bukan bank sendiri.
     ];
   }
 }
