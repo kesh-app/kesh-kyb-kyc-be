@@ -7,6 +7,7 @@ import {
 import { Pool } from "pg";
 import { resolveUserId } from "../../common/auth.util";
 import { generateUniqueReferenceNo } from "../../common/reference-no.util";
+import { NotificationsService } from "../notifications/notifications.service";
 import {
   AmlReviewDto,
   CloseComplaintDto,
@@ -21,9 +22,45 @@ import {
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
+// Setiap status "kerja" complaint dipetakan ke role pemegang tongkat
+// berikutnya — dipakai untuk broadcast ACTION_REQUIRED. null = belum ada
+// endpoint yang men-transisi keluar dari status itu (mis. WAITING_BANK_CONFIRMATION)
+// atau status terminal (CLOSED) — tidak ada yang perlu diberi tahu.
+const COMPLAINT_STAGE_ROLE: Record<string, string | null> = {
+  OPEN: "ComplaintHandling",
+  WAITING_CUSTOMER_DATA: "ComplaintHandling",
+  OPERATION_INVESTIGATION: "OperationSupervisor",
+  WAITING_BANK_CONFIRMATION: null,
+  AML_REVIEW: "ComplianceLead",
+  AML_HOLD: "ComplianceLead",
+  FINANCE_REVIEW: "FinanceStaff",
+  REFUND_PROCESS: "FinanceStaff",
+  RESOLVED: "ComplaintHandling",
+  REJECTED: "ComplaintHandling",
+  CLOSED: null,
+};
+
 @Injectable()
 export class ComplaintsService {
-  constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
+  constructor(
+    @Inject("PG_POOL") private readonly pool: Pool,
+    private readonly notifications: NotificationsService,
+  ) {}
+
+  // Semua aksi workflow melewati applyWorkflow(), jadi satu titik ini cukup
+  // untuk menutup notifikasi tahap sebelumnya dan membuka yang baru — tidak
+  // perlu diulang di tiap method verifyData/operationInvestigation/dst.
+  private async notifyComplaintStage(id: number, complaintNo: string, status: string) {
+    await this.notifications.resolveForObject("complaint", id);
+    const role = COMPLAINT_STAGE_ROLE[status];
+    if (!role) return;
+    await this.notifications.notifyRole(role, "ACTION_REQUIRED", {
+      objectType: "complaint",
+      objectId: id,
+      title: `Pengaduan ${complaintNo} — ${status.replace(/_/g, " ")}`,
+      link: `/complaints/${id}`,
+    });
+  }
 
   /**
    * Nomor pengaduan baru: CMP-XXXXXXXX, tepat 12 karakter (lihat
@@ -199,6 +236,8 @@ export class ComplaintsService {
         actorId,
       ],
     );
+
+    await this.notifyComplaintStage(result.rows[0].id, complaintNo, "OPEN");
 
     return result.rows[0];
   }
@@ -471,7 +510,9 @@ export class ComplaintsService {
     );
     // getById() sudah mengembalikan bentuk actor-name-enriched — pakai ulang
     // supaya aksi workflow tidak perlu di-refetch terpisah oleh FE.
-    return this.getById(id);
+    const row = await this.getById(id);
+    await this.notifyComplaintStage(id, row.complaint_no, row.status);
+    return row;
   }
 
   // Verifikasi kelengkapan data nasabah — ComplaintHandling

@@ -16,6 +16,7 @@ import {
   UpdateReportDto,
 } from "./dto";
 import { MATCH_THRESHOLD } from "../applications/applications.service";
+import { NotificationsService } from "../notifications/notifications.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
@@ -428,11 +429,35 @@ const CLASSIFYING_LTKM_CODES = [
   "LTKM_COMPLIANCE_MARKED",
 ];
 
+// Monitoring dimiliki tim Compliance sepenuhnya (lihat STATUS_LABELS di atas) —
+// setiap status yang masih butuh tindakan, di kedua tahap review, mengarah ke
+// role yang sama: ComplianceLead.
+const ACTIONABLE_MONITORING_STATUSES = new Set([
+  "DETECTED",
+  "PENDING_COMPLIANCE_STAFF_REVIEW",
+  "NEED_CLARIFICATION",
+  "PENDING_COMPLIANCE_MANAGER_REVIEW",
+]);
+
 @Injectable()
 export class MonitoringService {
   private readonly logger = new Logger(MonitoringService.name);
 
-  constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
+  constructor(
+    @Inject("PG_POOL") private readonly pool: Pool,
+    private readonly notifications: NotificationsService,
+  ) {}
+
+  private async notifyMonitoringStage(id: number, caseNo: string, status: string) {
+    await this.notifications.resolveForObject("monitoring_case", id);
+    if (!ACTIONABLE_MONITORING_STATUSES.has(status)) return;
+    await this.notifications.notifyRole("ComplianceLead", "ACTION_REQUIRED", {
+      objectType: "monitoring_case",
+      objectId: id,
+      title: `Case ${caseNo} — ${status.replace(/_/g, " ")}`,
+      link: `/monitoring/${id}`,
+    });
+  }
 
   // ───────────────────────────────────────────────────────────────────────────
   // Helpers
@@ -1066,6 +1091,7 @@ export class MonitoringService {
 
     await this.insertTriggers(created.id, triggers, ctx);
     await this.audit(actorId, "MONITORING_CASE_DETECTED", String(created.id), null, created);
+    await this.notifyMonitoringStage(created.id, created.case_no, created.status);
 
     return this.getCaseWithTriggers(created.id);
   }
@@ -1467,6 +1493,7 @@ export class MonitoringService {
     );
 
     await this.audit(actorId, "MONITORING_STAFF_REVIEW", String(id), c, upd[0]);
+    await this.notifyMonitoringStage(id, upd[0].case_no, upd[0].status);
     return this.getCaseWithTriggers(id);
   }
 
@@ -1541,6 +1568,7 @@ export class MonitoringService {
     );
 
     await this.audit(actorId, "MONITORING_MANAGER_REVIEW", String(id), c, upd[0]);
+    await this.notifyMonitoringStage(id, upd[0].case_no, upd[0].status);
     return this.getCaseWithTriggers(id);
   }
 

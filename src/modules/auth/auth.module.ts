@@ -21,6 +21,8 @@ import { JwtStrategy } from './jwt.strategy';
   ],
   providers: [AuthService, JwtStrategy],
   controllers: [AuthController],
-  exports: [AuthService],
+  // JwtModule exported so other modules (notifications gateway) can verify the
+  // same tokens without re-registering a second JwtModule/secret.
+  exports: [AuthService, JwtModule],
 })
 export class AuthModule {}

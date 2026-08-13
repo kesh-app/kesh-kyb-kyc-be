@@ -8,6 +8,7 @@ import {
 } from "@nestjs/common";
 import { Pool } from "pg";
 import { computeRbaV01, INDUSTRY_MAP, type RbaInput } from "./rba-v01.engine";
+import { NotificationsService } from "../notifications/notifications.service";
 
 // ─── Internal Preliminary Risk Scoring — RBA v2 ────────────────────────────
 // Bukan formula resmi BI. Dipakai sebagai dasar review compliance internal.
@@ -366,7 +367,38 @@ export interface RiskFactor {
 export class ApplicationsService {
   private readonly logger = new Logger(ApplicationsService.name);
 
-  constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
+  constructor(
+    @Inject("PG_POOL") private readonly pool: Pool,
+    private readonly notifications: NotificationsService,
+  ) {}
+
+  // FE detail page lives at /users/:id (historical route name — it's the
+  // application/registrant detail page, not system-user management).
+  private notifyApplicationRole(id: number | string, role: string, title: string, body?: string) {
+    return this.notifications.notifyRole(role, "ACTION_REQUIRED", {
+      objectType: "application",
+      objectId: id,
+      title,
+      body,
+      link: `/users/${id}`,
+    });
+  }
+
+  private notifyApplicationUser(
+    userId: number | string,
+    type: "ACTION_REQUIRED" | "INFO",
+    id: number | string,
+    title: string,
+    body?: string,
+  ) {
+    return this.notifications.notifyUser(userId, type, {
+      objectType: "application",
+      objectId: id,
+      title,
+      body,
+      link: `/users/${id}`,
+    });
+  }
 
   // ── "Lainnya" manual free-text helpers ───────────────────────────────────────
   // RBA V01 rule: *_other NEVER replaces the dropdown value. The dropdown value
@@ -3186,6 +3218,10 @@ export class ApplicationsService {
     );
     if (!res.rows[0]) throw new NotFoundException("Application not found");
 
+    // Resubmit dari REVISION_REQUIRED: bereskan notifikasi "perlu revisi" yang
+    // dikirim ke FrontDesk pembuat sebelum aplikasi pindah ke stage berikutnya.
+    await this.notifications.resolveForObject("application", appId);
+
     // <<< SCREEN & RISK otomatis setelah submit >>>
     const risk = await this.screenAndComputeRisk(appId);
 
@@ -3196,8 +3232,19 @@ export class ApplicationsService {
         [appId],
       );
       await this.initEddForHighRisk(appId, reviewerId);
+      await this.notifyApplicationRole(
+        appId,
+        "ComplianceLead",
+        `Aplikasi #${appId} (HIGH RISK) menunggu review Anda`,
+      );
       return { id: appId, status: "IN_REVIEW", risk };
     }
+
+    await this.notifyApplicationRole(
+      appId,
+      "OperationSupervisor",
+      `Aplikasi #${appId} menunggu review Anda`,
+    );
 
     return { id: appId, status: "SUBMITTED", risk };
   }
@@ -3852,7 +3899,7 @@ export class ApplicationsService {
     const reviewerId = user.sub ?? (user as any).id;
 
     const { rows } = await this.pool.query(
-      `SELECT id, status FROM applications WHERE id=$1`,
+      `SELECT id, status, created_by FROM applications WHERE id=$1`,
       [appId],
     );
     const app = rows[0];
@@ -3961,6 +4008,15 @@ export class ApplicationsService {
          RETURNING id, status, decision, decision_reason, decision_at`,
         [appId, reviewerId, reason || null],
       );
+      await this.notifications.resolveForObject("application", appId);
+      if (app.created_by) {
+        await this.notifyApplicationUser(
+          app.created_by,
+          "INFO",
+          appId,
+          `Aplikasi #${appId} disetujui`,
+        );
+      }
       return res.rows[0];
     } else if (decision === "REJECTED") {
       // Penolakan final — status terminal, aplikasi tidak bisa diajukan ulang.
@@ -3980,6 +4036,16 @@ export class ApplicationsService {
          RETURNING id, status, decision, decision_reason, decision_at`,
         [appId, reviewerId, reason.trim()],
       );
+      await this.notifications.resolveForObject("application", appId);
+      if (app.created_by) {
+        await this.notifyApplicationUser(
+          app.created_by,
+          "INFO",
+          appId,
+          `Aplikasi #${appId} ditolak`,
+          reason.trim(),
+        );
+      }
       return res.rows[0];
     } else {
       // RETURN_FOR_REVISION → kembalikan ke Frontline untuk perbaikan data.
@@ -4000,6 +4066,16 @@ export class ApplicationsService {
          RETURNING id, status, decision, revision_reason, revision_requested_by, revision_requested_at`,
         [appId, reason, reviewerId],
       );
+      await this.notifications.resolveForObject("application", appId);
+      if (app.created_by) {
+        await this.notifyApplicationUser(
+          app.created_by,
+          "ACTION_REQUIRED",
+          appId,
+          `Aplikasi #${appId} dikembalikan, perlu diperbaiki`,
+          reason,
+        );
+      }
       return res.rows[0];
     }
   }

@@ -11,6 +11,7 @@ import {
   DataReviewDecisionDto,
   ListDataReviewsQueryDto,
 } from "./dto";
+import { NotificationsService } from "../notifications/notifications.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
@@ -27,7 +28,21 @@ const ACTIVE_STATUSES = [
 
 @Injectable()
 export class DataReviewsService {
-  constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
+  constructor(
+    @Inject("PG_POOL") private readonly pool: Pool,
+    private readonly notifications: NotificationsService,
+  ) {}
+
+  private async notifyReviewRole(appId: number, role: string, title: string, body?: string) {
+    await this.notifications.resolveForObject("data_review", appId);
+    await this.notifications.notifyRole(role, "ACTION_REQUIRED", {
+      objectType: "data_review",
+      objectId: appId,
+      title,
+      body,
+      link: `/users/${appId}`,
+    });
+  }
 
   private async getApplication(appId: number) {
     const { rows } = await this.pool.query(
@@ -316,6 +331,11 @@ export class DataReviewsService {
         actorId,
       ],
     );
+    await this.notifyReviewRole(
+      appId,
+      "FrontDesk",
+      `Aplikasi #${appId} — Compliance meminta pengkinian data`,
+    );
     return rows[0];
   }
 
@@ -336,6 +356,11 @@ export class DataReviewsService {
         WHERE id=$1
         RETURNING *`,
       [latest.id, resolveUserId(user)],
+    );
+    await this.notifyReviewRole(
+      appId,
+      "ComplianceLead",
+      `Aplikasi #${appId} — pengkinian data diajukan FrontDesk untuk direview`,
     );
     return rows[0];
   }
@@ -373,6 +398,17 @@ export class DataReviewsService {
         RETURNING *`,
       [latest.id, NEXT[dto.decision], resolveUserId(user), reason],
     );
+
+    if (dto.decision === "RETURN_FOR_REVISION") {
+      await this.notifyReviewRole(
+        appId,
+        "FrontDesk",
+        `Aplikasi #${appId} — pengkinian data dikembalikan, perlu diperbaiki`,
+        reason ?? undefined,
+      );
+    } else {
+      await this.notifications.resolveForObject("data_review", appId);
+    }
     return rows[0];
   }
 }

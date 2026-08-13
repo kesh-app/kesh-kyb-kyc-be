@@ -3,31 +3,16 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import * as express from 'express';
 import * as path from 'path';
+import { corsOriginList, isOriginAllowed } from './common/cors-origin';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Build allowed origins list from env (comma-separated)
-  const allowList = (process.env.CORS_ORIGIN || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
+  const allowList = corsOriginList();
 
   app.enableCors({
-    origin: (origin, cb) => {
-      // allow server-to-server / Postman (no Origin)
-      if (!origin) return cb(null, true);
-
-      let ok = false;
-      try {
-        const u = new URL(origin);
-        const isDevTunnels = /\.devtunnels\.ms$/.test(u.hostname);
-        ok = isDevTunnels || allowList.includes(origin);
-      } catch {
-        ok = false;
-      }
-      return ok ? cb(null, true) : cb(new Error('Not allowed by CORS'));
-    },
+    origin: (origin, cb) =>
+      isOriginAllowed(origin, allowList) ? cb(null, true) : cb(new Error('Not allowed by CORS')),
     methods: ['GET','HEAD','POST','PUT','PATCH','DELETE','OPTIONS'],
     allowedHeaders: ['Content-Type','Authorization'],
     exposedHeaders: ['Content-Disposition'],

@@ -14,15 +14,32 @@ import {
   StatementRefundDecisionDto,
   UpdateStatementRefundDto,
 } from "./dto";
+import { NotificationsService } from "../notifications/notifications.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 
 // Status yang sudah final/terkunci — pencatatan tidak boleh diubah lagi.
 const LOCKED_STATUSES = ["APPROVED", "BALANCE_CREDITED", "REJECTED"];
 
+// Status yang masih perlu tindakan FinanceStaff (match/investigasi/submit).
+const FINANCE_STAFF_STATUSES = ["UNMATCHED", "NEED_INVESTIGATION"];
+
 @Injectable()
 export class StatementRefundsService {
-  constructor(@Inject("PG_POOL") private readonly pool: Pool) {}
+  constructor(
+    @Inject("PG_POOL") private readonly pool: Pool,
+    private readonly notifications: NotificationsService,
+  ) {}
+
+  private async notifyRefundRole(id: number | string, role: string, title: string) {
+    await this.notifications.resolveForObject("statement_refund", id);
+    await this.notifications.notifyRole(role, "ACTION_REQUIRED", {
+      objectType: "statement_refund",
+      objectId: id,
+      title,
+      link: `/statement-refunds/${id}`,
+    });
+  }
 
   private async resolveRefundNo(): Promise<string> {
     for (let i = 0; i < 5; i++) {
@@ -246,6 +263,13 @@ export class StatementRefundsService {
         transfer ? new Date().toISOString() : null,
       ],
     );
+    if (FINANCE_STAFF_STATUSES.includes(rows[0].status)) {
+      await this.notifyRefundRole(
+        rows[0].id,
+        "FinanceStaff",
+        `Refund ${rows[0].refund_no} — ${rows[0].status === "UNMATCHED" ? "belum ditemukan transaksi asalnya" : "perlu investigasi"}`,
+      );
+    }
     return rows[0];
   }
 
@@ -524,6 +548,11 @@ export class StatementRefundsService {
         WHERE id=$1 RETURNING *`,
       [id, resolveUserId(user)],
     );
+    await this.notifyRefundRole(
+      id,
+      "FinanceManager",
+      `Refund ${rows[0].refund_no} menunggu persetujuan Anda`,
+    );
     return rows[0];
   }
 
@@ -557,6 +586,16 @@ export class StatementRefundsService {
           WHERE id=$1 RETURNING *`,
         [id, actorId, reason, dto.finance_notes ?? null],
       );
+      await this.notifications.resolveForObject("statement_refund", id);
+      if (rows[0].created_by) {
+        await this.notifications.notifyUser(rows[0].created_by, "INFO", {
+          objectType: "statement_refund",
+          objectId: id,
+          title: `Refund ${rows[0].refund_no} ditolak`,
+          body: reason,
+          link: `/statement-refunds/${id}`,
+        });
+      }
       return { ...rows[0], balance_credit_status: this.balanceCreditStatus(rows[0]) };
     }
 
@@ -574,6 +613,15 @@ export class StatementRefundsService {
     );
     if (!rows[0]) {
       throw new BadRequestException("Refund sudah diproses oleh proses lain.");
+    }
+    await this.notifications.resolveForObject("statement_refund", id);
+    if (rows[0].created_by) {
+      await this.notifications.notifyUser(rows[0].created_by, "INFO", {
+        objectType: "statement_refund",
+        objectId: id,
+        title: `Refund ${rows[0].refund_no} disetujui`,
+        link: `/statement-refunds/${id}`,
+      });
     }
     return { ...rows[0], balance_credit_status: this.balanceCreditStatus(rows[0]) };
   }

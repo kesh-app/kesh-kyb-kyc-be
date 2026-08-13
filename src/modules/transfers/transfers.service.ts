@@ -23,6 +23,7 @@ import {
   normalizeCurrency,
 } from "./snap.util";
 import { MonitoringService } from "../monitoring/monitoring.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import {
   NEAR_MATCH_THRESHOLD,
   classifyScreeningHit,
@@ -46,7 +47,35 @@ export class TransfersService {
   constructor(
     @Inject("PG_POOL") private readonly pool: Pool,
     private readonly monitoring: MonitoringService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  /** Link + object identity shared by every notification this service fires. */
+  private notifyTransferRole(id: number | string, role: string, title: string, body?: string) {
+    return this.notifications.notifyRole(role, "ACTION_REQUIRED", {
+      objectType: "transfer",
+      objectId: id,
+      title,
+      body,
+      link: `/transfers/${id}`,
+    });
+  }
+
+  private notifyTransferUser(
+    userId: number | string,
+    type: "ACTION_REQUIRED" | "INFO",
+    id: number | string,
+    title: string,
+    body?: string,
+  ) {
+    return this.notifications.notifyUser(userId, type, {
+      objectType: "transfer",
+      objectId: id,
+      title,
+      body,
+      link: `/transfers/${id}`,
+    });
+  }
 
   private async audit(
     actorId: number | string,
@@ -742,6 +771,11 @@ export class TransfersService {
 
     const actorId = resolveUserId(user);
 
+    // Resubmit dari REVISION_REQUIRED: bereskan notifikasi "perlu revisi" yang
+    // tadinya dikirim ke FrontDesk pembuat, sebelum baris ini pindah ke stage
+    // berikutnya (watchlist hit atau alur normal).
+    await this.notifications.resolveForObject("transfer", id);
+
     // Screening watchlist beneficiary. Hanya hit bertingkat MATCH (cocok persis,
     // skor 1.000) yang mengalihkan transfer ke compliance review (jalur yang
     // sudah ada, migrasi 0050). Hit NEAR_MATCH tetap tersimpan di
@@ -788,6 +822,13 @@ export class TransfersService {
       // Monitoring dievaluasi setelah hit tersimpan → rule beneficiary menyala.
       await this.monitoring.safeEvaluateTransfer(id, user);
 
+      await this.notifyTransferRole(
+        id,
+        "ComplianceLead",
+        `Transfer ${flagged.rows[0].partner_reference_no ?? id} — beneficiary kena watchlist hit`,
+        "Menunggu review compliance sebelum lanjut ke Operation Supervisor.",
+      );
+
       return flagged.rows[0];
     }
 
@@ -817,6 +858,12 @@ export class TransfersService {
 
     // Auto monitoring evaluation — tidak boleh menggagalkan transfer.
     await this.monitoring.safeEvaluateTransfer(id, user);
+
+    await this.notifyTransferRole(
+      id,
+      "OperationSupervisor",
+      `Transfer ${next.rows[0].partner_reference_no ?? id} menunggu review Anda`,
+    );
 
     return next.rows[0];
   }
@@ -939,6 +986,13 @@ export class TransfersService {
     // walau transfer masuk jalur PENDING_COMPLIANCE_REVIEW. Tidak boleh gagal.
     await this.monitoring.safeEvaluateTransfer(id, user);
 
+    await this.notifyTransferRole(
+      id,
+      "ComplianceLead",
+      `Transfer ${next.rows[0].partner_reference_no ?? id} diajukan FrontDesk untuk review compliance`,
+      mergedNotes ?? undefined,
+    );
+
     return this.getById(id, user);
   }
 
@@ -1005,6 +1059,10 @@ export class TransfersService {
       [review.id, reviewStatus, actorId, notes],
     );
 
+    // Bereskan notifikasi "menunggu Compliance" untuk ketiga aksi — REQUEST_*
+    // tetap PENDING_COMPLIANCE_REVIEW tapi sudah bukan item baru yang menunggu.
+    await this.notifications.resolveForObject("transfer", id);
+
     let next;
     if (dto.action === "APPROVE_TO_CONTINUE") {
       // Lanjut ke alur normal — transfer boleh direview Operation Supervisor.
@@ -1018,6 +1076,11 @@ export class TransfersService {
          RETURNING *`,
         [id, actorId],
       );
+      await this.notifyTransferRole(
+        id,
+        "OperationSupervisor",
+        `Transfer ${next.rows[0].partner_reference_no ?? id} menunggu review Anda`,
+      );
     } else if (dto.action === "REJECT") {
       next = await this.pool.query(
         `UPDATE transfers SET
@@ -1030,6 +1093,15 @@ export class TransfersService {
          RETURNING *`,
         [id, actorId, notes],
       );
+      if (row.created_by) {
+        await this.notifyTransferUser(
+          row.created_by,
+          "INFO",
+          id,
+          `Transfer ${next.rows[0].partner_reference_no ?? id} ditolak Compliance`,
+          notes ?? undefined,
+        );
+      }
     } else {
       // REQUEST_ADDITIONAL_INFO / REQUEST_EDD / MARK_LTKM_CANDIDATE:
       // transfer tetap PENDING_COMPLIANCE_REVIEW (blocked dari Operation Supervisor)
@@ -1037,6 +1109,14 @@ export class TransfersService {
       next = await this.pool.query(
         `UPDATE transfers SET updated_at=now() WHERE id=$1 RETURNING *`,
         [id],
+      );
+      // Masih perlu keputusan ComplianceLead (APPROVE_TO_CONTINUE/REJECT) — item
+      // "menunggu Compliance" tadi baru saja di-resolve, jadi bikin lagi.
+      await this.notifyTransferRole(
+        id,
+        "ComplianceLead",
+        `Transfer ${next.rows[0].partner_reference_no ?? id} — ${reviewStatus.replace(/_/g, " ").toLowerCase()}`,
+        notes ?? undefined,
       );
     }
 
@@ -1213,6 +1293,7 @@ export class TransfersService {
     }
 
     const actorId = resolveUserId(user);
+    await this.notifications.resolveForObject("transfer", id);
 
     let next;
     if (dto.action === "APPROVE") {
@@ -1226,6 +1307,11 @@ export class TransfersService {
         WHERE id=$1
         RETURNING *`,
         [id, actorId, dto.notes ?? null],
+      );
+      await this.notifyTransferRole(
+        id,
+        "FinanceStaff",
+        `Transfer ${next.rows[0].partner_reference_no ?? id} menunggu review Anda`,
       );
     } else {
       next = await this.pool.query(
@@ -1242,6 +1328,15 @@ export class TransfersService {
         RETURNING *`,
         [id, actorId, dto.reject_reason ?? null, dto.notes ?? null],
       );
+      if (row.created_by) {
+        await this.notifyTransferUser(
+          row.created_by,
+          "INFO",
+          id,
+          `Transfer ${next.rows[0].partner_reference_no ?? id} ditolak Operation Supervisor`,
+          dto.reject_reason ?? undefined,
+        );
+      }
     }
 
     await this.audit(actorId, "TRANSFER_SUPERVISOR_REVIEW", String(id), row, next.rows[0], ip);
@@ -1273,6 +1368,7 @@ export class TransfersService {
 
     const actorId = resolveUserId(user);
     const notes = (dto.notes ?? "").trim() || null;
+    await this.notifications.resolveForObject("transfer", id);
 
     let next;
     let action: string;
@@ -1288,6 +1384,11 @@ export class TransfersService {
         WHERE id=$1
         RETURNING *`,
         [id, actorId, notes],
+      );
+      await this.notifyTransferRole(
+        id,
+        "FinanceManager",
+        `Transfer ${next.rows[0].partner_reference_no ?? id} menunggu persetujuan Anda`,
       );
     } else if (dto.action === "RETURN") {
       // Dikembalikan untuk diperbaiki — BUKAN final. Alasan wajib supaya
@@ -1309,6 +1410,15 @@ export class TransfersService {
         RETURNING *`,
         [id, actorId, notes],
       );
+      if (row.created_by) {
+        await this.notifyTransferUser(
+          row.created_by,
+          "ACTION_REQUIRED",
+          id,
+          `Transfer ${next.rows[0].partner_reference_no ?? id} dikembalikan, perlu diperbaiki`,
+          notes ?? undefined,
+        );
+      }
     } else {
       action = "TRANSFER_FINANCE_REVIEW";
       next = await this.pool.query(
@@ -1325,6 +1435,15 @@ export class TransfersService {
         RETURNING *`,
         [id, actorId, dto.reject_reason ?? null, notes],
       );
+      if (row.created_by) {
+        await this.notifyTransferUser(
+          row.created_by,
+          "INFO",
+          id,
+          `Transfer ${next.rows[0].partner_reference_no ?? id} ditolak Finance Staff`,
+          dto.reject_reason ?? undefined,
+        );
+      }
     }
 
     await this.audit(actorId, action, String(id), row, next.rows[0], ip);
@@ -1368,6 +1487,7 @@ export class TransfersService {
 
     const decisionNotes = dto.decision_notes ?? dto.note ?? null;
     const actorId = resolveUserId(user);
+    await this.notifications.resolveForObject("transfer", id);
 
     let next;
     if (dto.decision === "APPROVE") {
@@ -1385,6 +1505,14 @@ export class TransfersService {
         RETURNING *`,
         [id, actorId, decisionNotes],
       );
+      if (row.created_by) {
+        await this.notifyTransferUser(
+          row.created_by,
+          "INFO",
+          id,
+          `Transfer ${next.rows[0].partner_reference_no ?? id} selesai`,
+        );
+      }
     } else if (dto.decision === "REJECT") {
       next = await this.pool.query(
         `UPDATE transfers SET
@@ -1398,6 +1526,15 @@ export class TransfersService {
         RETURNING *`,
         [id, actorId, dto.reject_reason ?? null, decisionNotes],
       );
+      if (row.created_by) {
+        await this.notifyTransferUser(
+          row.created_by,
+          "INFO",
+          id,
+          `Transfer ${next.rows[0].partner_reference_no ?? id} ditolak Finance Manager`,
+          dto.reject_reason ?? undefined,
+        );
+      }
     } else {
       throw new BadRequestException("decision must be APPROVE or REJECT");
     }
