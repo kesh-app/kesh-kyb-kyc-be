@@ -226,7 +226,9 @@ export class TransfersService {
         dto.beneficiaryAccountName,
         dto.beneficiary_relationship_to_sender,
         dto.description ?? null,
-        dto.requestedTransferAt ?? null,
+        // Tanggal Diminta bukan input user — lahir dari tanggal server saat
+        // transfer dibuat, sama untuk create tunggal maupun bulk.
+        new Date().toISOString().slice(0, 10),
         resolveUserId(user),
         senderApplicationId,
         partnerRef,
@@ -459,7 +461,9 @@ export class TransfersService {
         beneficiary_account_name=$9,
         beneficiary_relationship_to_sender=$27,
         description=$10,
-        requested_transfer_at=$11,
+        -- $11 selalu null → Tanggal Diminta tidak bisa diubah lewat edit draft,
+        -- tetap tanggal saat transfer pertama kali dibuat.
+        requested_transfer_at=COALESCE($11, requested_transfer_at),
         source_account_no=COALESCE($12, source_account_no),
         source_account_name=COALESCE($13, source_account_name),
         source_bank_code=COALESCE($14, source_bank_code),
@@ -489,7 +493,7 @@ export class TransfersService {
         dto.beneficiaryAccountNumber,
         dto.beneficiaryAccountName,
         dto.description ?? null,
-        dto.requestedTransferAt ?? null,
+        null,
         dto.source_account_no ?? null,
         dto.source_account_name ?? null,
         dto.source_bank_code ?? null,

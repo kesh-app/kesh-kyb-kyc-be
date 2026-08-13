@@ -12811,6 +12811,67 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
     });
 
+    // ── Tanggal Diminta (requested_transfer_at) dibuat backend, bukan diinput
+    // admin/frontline ─────────────────────────────────────────────────────
+    describe('ZE. requested_transfer_at di-generate backend, bukan input user', () => {
+      async function detail(txId: string) {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${txId}`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        return res.body;
+      }
+
+      // pg mem-parse kolom DATE sebagai midnight lokal, lalu JSON serialization
+      // mengubahnya ke ISO UTC — bandingkan dengan konversi yang sama, bukan
+      // string tanggal mentah, supaya tidak rapuh terhadap timezone runner.
+      function todayAsDateColumnIso() {
+        const d = new Date();
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString();
+      }
+
+      it('ZE-01: create tanpa requestedTransferAt → tetap terisi tanggal hari ini', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+
+        expect(res.body.requested_transfer_at).toBe(todayAsDateColumnIso());
+      });
+
+      it('ZE-02: requestedTransferAt kiriman client diabaikan, dipakai tanggal server', async () => {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody({ requestedTransferAt: '2020-01-01' }))
+          .expect(201);
+
+        expect(res.body.requested_transfer_at).toBe(todayAsDateColumnIso());
+      });
+
+      it('ZE-03: edit draft tidak dapat mengubah requested_transfer_at', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const txId = String(created.body.id);
+        const original = created.body.requested_transfer_at;
+
+        await request(app.getHttpServer())
+          .patch(`${BASE}/transfers/${txId}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody({ requestedTransferAt: '2020-01-01', description: 'edit' }))
+          .expect(200);
+
+        expect(await detail(txId)).toMatchObject({
+          requested_transfer_at: original,
+          description: 'edit',
+        });
+      });
+    });
+
     it('ZT-01: create tanpa beneficiary_relationship_to_sender → 400', async () => {
       const body = txBody();
       delete (body as any).beneficiary_relationship_to_sender;

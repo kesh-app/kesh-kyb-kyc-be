@@ -58,8 +58,10 @@ export class CreateTransferDto {
   @IsOptional() @IsString()
   description?: string;
 
-  @IsOptional() @IsDateString()
-  requestedTransferAt?: string; // YYYY-MM-DD
+  // requestedTransferAt sengaja TIDAK ada di sini: "Tanggal Diminta" dibuat
+  // backend saat create (CURRENT_DATE), bukan diinput admin/frontline. Kalau
+  // FE lama masih mengirimnya, ValidationPipe `whitelist: true` membuangnya
+  // diam-diam — request tetap 200/201, nilainya diabaikan.
 
   // ── Transfer Recording v2 — SNAP-ready optional fields ──────────────
   // Semua opsional; backward compatible. Pakai snake_case agar mapping 1:1
