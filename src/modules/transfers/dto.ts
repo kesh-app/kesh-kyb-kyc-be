@@ -18,6 +18,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -171,18 +172,48 @@ export class BulkTransferItemDto {
 
   @IsOptional() @IsString() @MaxLength(255)
   transaction_purpose?: string;
+
+  // No. HP penerima — kolom "Ben Mobile Number", wajib untuk BI-Fast di BRI
+  // Qlola. Wajib pada bulk baru supaya batch siap diekspor; transfer lama yang
+  // dibuat sebelum ini tetap boleh NULL di DB (lihat migrasi 0068).
+  // Format dibiarkan apa adanya selain trim: workbook BRI hanya menuntut
+  // alfanumerik ("081234567890"), dan KESH belum punya aturan normalisasi
+  // nomor telepon — jangan mengarang aturan baru di sini.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'beneficiary_mobile_number wajib diisi' })
+  @MaxLength(30)
+  @Matches(/^[0-9+][0-9]*$/, {
+    message: 'beneficiary_mobile_number hanya boleh berisi angka (boleh diawali +)',
+  })
+  beneficiary_mobile_number!: string;
 }
 
 export class CreateBulkTransferDto {
   @IsInt()
   sender_application_id!: number;
 
-  // Nomor referensi bulk dari finance/partner untuk seluruh batch — wajib diisi.
+  // Rekening debit BRI & nama pemilik rekening untuk export Qlola. Sama untuk
+  // seluruh batch, jadi diisi sekali di level batch — bukan per baris penerima.
+  // Panjang mengikuti sheet "Deskripsi File" workbook BRI: Debit Account 10-30,
+  // Sender Name maksimal 60.
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
-  @IsNotEmpty({ message: 'bulk_reference_no wajib diisi' })
-  @MaxLength(150)
-  bulk_reference_no!: string;
+  @IsNotEmpty({ message: 'qlola_debit_account wajib diisi' })
+  @MinLength(10, { message: 'qlola_debit_account minimal 10 karakter' })
+  @MaxLength(30, { message: 'qlola_debit_account maksimal 30 karakter' })
+  qlola_debit_account!: string;
+
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'qlola_sender_name wajib diisi' })
+  @MaxLength(60, { message: 'qlola_sender_name maksimal 60 karakter' })
+  qlola_sender_name!: string;
+
+  // bulk_reference_no SENGAJA tidak ada di DTO ini: nomornya dibuat backend
+  // (BLK-XXXXXXXX). Client lama yang masih mengirimnya tidak ditolak — global
+  // ValidationPipe (whitelist: true) membuangnya diam-diam, sehingga nilai
+  // kiriman client tidak pernah bisa menimpa nomor yang digenerate.
 
   @IsArray()
   @ArrayNotEmpty({ message: 'items wajib diisi minimal 1' })

@@ -16,6 +16,7 @@ import {
   UpdateTransferDto,
 } from "./dto";
 import { resolveUserId } from "../../common/auth.util";
+import { generateUniqueReferenceNo } from "../../common/reference-no.util";
 import {
   buildSnapTransferPayload,
   formatAmountValue,
@@ -24,6 +25,14 @@ import {
 } from "./snap.util";
 import { MonitoringService } from "../monitoring/monitoring.service";
 import { NotificationsService } from "../notifications/notifications.service";
+import {
+  QlolaPurpose,
+  QlolaRowError,
+  QlolaSourceRow,
+  buildQlolaFileName,
+  buildQlolaWorkbook,
+  validateQlolaRow,
+} from "./bri-qlola.exporter";
 import {
   NEAR_MATCH_THRESHOLD,
   classifyScreeningHit,
@@ -249,11 +258,12 @@ export class TransfersService {
         source_of_funds,
         transaction_purpose,
         batch_id,
+        beneficiary_mobile_number,
         updated_at
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31, now()
+        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32, now()
       )
       RETURNING *`,
       [
@@ -293,6 +303,9 @@ export class TransfersService {
         dto.source_of_funds ?? null,
         dto.transaction_purpose ?? null,
         batchId,
+        // No. HP penerima — wajib untuk BI-Fast Qlola pada bulk baru, opsional
+        // pada transfer tunggal (di luar cakupan export Qlola).
+        dto.beneficiary_mobile_number ?? null,
       ],
     );
     return q.rows[0];
@@ -334,7 +347,12 @@ export class TransfersService {
   // ---------------------------------------------------------------------------
   async bulkCreate(
     user: AuthedUser,
-    dto: { sender_application_id: number; bulk_reference_no?: string; items: any[] },
+    dto: {
+      sender_application_id: number;
+      qlola_debit_account?: string;
+      qlola_sender_name?: string;
+      items: any[];
+    },
     ip?: string,
   ) {
     // Input transfer = FrontDesk saja. FinanceStaff hanya layer review finance.
@@ -349,21 +367,8 @@ export class TransfersService {
       throw new BadRequestException("maksimal 20 item per bulk transfer");
     }
 
-    // Nomor referensi bulk level batch — wajib, trimmed, unik per sender.
-    const bulkRef = (dto.bulk_reference_no ?? "").trim();
-    if (!bulkRef) {
-      throw new BadRequestException("bulk_reference_no wajib diisi");
-    }
-    const dupRef = await this.pool.query(
-      `SELECT 1 FROM transfer_batches
-        WHERE sender_application_id = $1 AND bulk_reference_no = $2 LIMIT 1`,
-      [dto.sender_application_id, bulkRef],
-    );
-    if ((dupRef.rowCount ?? 0) > 0) {
-      throw new ConflictException(
-        `bulk_reference_no "${bulkRef}" sudah dipakai untuk pengirim ini`,
-      );
-    }
+    // Nomor referensi bulk dibuat backend — bukan lagi input user.
+    const bulkRef = await this.resolveBulkReferenceNo();
 
     // Sender divalidasi sekali (satu sender untuk seluruh batch).
     await this.assertSenderApproved(dto.sender_application_id);
@@ -382,8 +387,9 @@ export class TransfersService {
 
       const batchRes = await client.query(
         `INSERT INTO transfer_batches
-           (batch_no, bulk_reference_no, created_by, sender_application_id, total_count, total_amount, status)
-         VALUES ($1,$2,$3,$4,$5,$6,'CREATED')
+           (batch_no, bulk_reference_no, created_by, sender_application_id, total_count, total_amount, status,
+            qlola_debit_account, qlola_sender_name)
+         VALUES ($1,$2,$3,$4,$5,$6,'CREATED',$7,$8)
          RETURNING id`,
         [
           batchNo,
@@ -392,6 +398,10 @@ export class TransfersService {
           dto.sender_application_id,
           dto.items.length,
           dto.items.reduce((sum, it) => sum + Number(it.amount || 0), 0),
+          // Rekening debit BRI & nama pengirim Qlola: sama untuk seluruh batch,
+          // jadi disimpan sekali di sini — bukan diulang di tiap baris anak.
+          dto.qlola_debit_account?.trim() || null,
+          dto.qlola_sender_name?.trim() || null,
         ],
       );
       batchId = Number(batchRes.rows[0].id);
@@ -410,10 +420,13 @@ export class TransfersService {
       await client.query("COMMIT");
     } catch (err: any) {
       await client.query("ROLLBACK");
-      // Race dengan request lain yang memakai referensi sama (unique index).
+      // batch_no & bulk_reference_no sama-sama dibuat sistem dan sudah dicek
+      // unik sebelum insert, jadi 23505 di sini hanya bisa berarti race dengan
+      // request lain di antara pengecekan dan INSERT. Bukan salah user, dan
+      // jangan bocor sebagai 500 duplicate-key — minta ulangi saja.
       if (err?.code === "23505") {
         throw new ConflictException(
-          `bulk_reference_no "${bulkRef}" sudah dipakai untuk pengirim ini`,
+          "Nomor referensi bentrok dengan permintaan lain. Silakan coba lagi.",
         );
       }
       throw err;
@@ -443,6 +456,37 @@ export class TransfersService {
       total_amount: created.reduce((sum, r) => sum + Number(r.amount || 0), 0),
       transfers: created,
     };
+  }
+
+  /**
+   * Nomor referensi bulk baru: BLK-XXXXXXXX, tepat 12 karakter — generator dan
+   * alfabet yang sama dengan TRF-XXXXXXXX dan CMP-XXXXXXXX
+   * (common/reference-no.util: CSPRNG, tanpa I/O/0/1, retry saat bentrok).
+   *
+   * Keunikan dicek GLOBAL, bukan per pengirim. Unique index yang ada
+   * (uq_transfer_batches_sender_bulk_ref) hanya menjamin unik per sender, tapi
+   * nomor ini dibaca manusia sebagai identitas satu batch, jadi tidak boleh
+   * kembar antar-pengirim. Index-nya sendiri tidak diubah — pengecekan ini
+   * lebih ketat, bukan lebih longgar.
+   *
+   * Referensi lama yang panjang (mis. "BULK-REF-20260730-001", sampai 29
+   * karakter di data saat ini) tetap tersimpan apa adanya di kolom
+   * VARCHAR(150). Yang dibatasi hanya nilai yang dibuat mulai sekarang.
+   */
+  private async resolveBulkReferenceNo(): Promise<string> {
+    const ref = await generateUniqueReferenceNo("BLK", async (candidate) => {
+      const dup = await this.pool.query(
+        `SELECT 1 FROM transfer_batches WHERE bulk_reference_no = $1 LIMIT 1`,
+        [candidate],
+      );
+      return (dup.rowCount ?? 0) > 0;
+    });
+    if (!ref) {
+      throw new BadRequestException(
+        "Gagal membuat No. Referensi Bulk, silakan coba lagi.",
+      );
+    }
+    return ref;
   }
 
   private async resolveBatchNo(): Promise<string> {
@@ -1781,6 +1825,7 @@ export class TransfersService {
     return `SELECT tb.id, tb.public_id, tb.batch_no, tb.bulk_reference_no, tb.sender_application_id,
                    tb.total_count, tb.total_amount, tb.status, tb.created_by,
                    tb.created_at, tb.updated_at,
+                   tb.qlola_debit_account, tb.qlola_sender_name,
                    COALESCE(p.full_name, b.legal_name) AS sender_display_name,
                    sc.counts
             FROM transfer_batches tb
@@ -1883,6 +1928,112 @@ export class TransfersService {
     const transfers = await this.list(user, undefined, { batchId: id });
 
     return { batch, transfers };
+  }
+
+  // ---------------------------------------------------------------------------
+  // EXPORT BRI QLOLA (BI-Fast) — dua tujuan, dua populasi baris
+  //
+  // FINAL (default): HANYA transfer anak yang benar-benar selesai lewat
+  // persetujuan internal KESH, yaitu status COMPLETED DAN result SUCCESS
+  // (hasil akhir decide() APPROVE oleh Finance Manager).
+  //
+  // REVIEW: HANYA transfer anak berstatus PENDING_FINANCE_STAFF_REVIEW. Dipakai
+  // Finance Staff untuk mengecek data rekening/bank penerima SEBELUM menyetujui.
+  // Kalau ada yang salah, aksinya tetap per transaksi lewat
+  // POST /transfers/:id/finance-review {action:'RETURN'} — tidak ada alur
+  // pengembalian baru, dan file ini tidak mengubah status apa pun.
+  //
+  // Kedua populasi TIDAK PERNAH dicampur dalam satu file: satu masih bisa
+  // berubah/dikembalikan, satunya sudah sah dieksekusi. Status lain
+  // (DRAFT, REVISION_REQUIRED, SUBMITTED, PENDING_COMPLIANCE_REVIEW,
+  // PENDING_FINANCE_MANAGER_APPROVAL, REJECTED) tidak masuk ke mana pun.
+  //
+  // Batch dengan status campuran TIDAK diblokir: baris yang layak untuk tujuan
+  // yang diminta tetap boleh diekspor, dan jumlahnya dilaporkan ke pemanggil
+  // (eligible_count dari total_count). Batch di KESH bukan unit atomik — tiap
+  // transfer anak menjalani rantai approval sendiri-sendiri (lihat bulkCreate).
+  // ---------------------------------------------------------------------------
+  async exportBriQlola(
+    batchId: number,
+    user: AuthedUser,
+    purpose: QlolaPurpose = "FINAL",
+  ) {
+    const batchQ = await this.pool.query(
+      `SELECT id, batch_no, total_count, qlola_debit_account, qlola_sender_name
+         FROM transfer_batches WHERE id = $1`,
+      [batchId],
+    );
+    if ((batchQ.rowCount ?? 0) === 0) {
+      throw new NotFoundException("Transfer batch not found");
+    }
+    const batch = batchQ.rows[0];
+
+    // Filter kelayakan per tujuan — satu-satunya perbedaan antara kedua export.
+    const eligibilitySql =
+      purpose === "REVIEW"
+        ? `t.status = 'PENDING_FINANCE_STAFF_REVIEW'`
+        : `t.status = 'COMPLETED' AND t.result = 'SUCCESS'`;
+
+    const { rows } = await this.pool.query(
+      `SELECT t.id, t.partner_reference_no, t.amount, t.currency,
+              t.beneficiary_account_number, t.beneficiary_account_name,
+              t.beneficiary_address, t.beneficiary_mobile_number,
+              t.beneficiary_bank_code, t.beneficiary_bank_name,
+              t.transaction_purpose, t.description,
+              t.requested_execution_date,
+              rb.bic_code
+         FROM transfers t
+         LEFT JOIN ref_banks rb ON rb.kesh_bank_code = t.beneficiary_bank_code
+        WHERE t.batch_id = $1
+          AND ${eligibilitySql}
+        ORDER BY t.id ASC`,
+      [batchId],
+    );
+
+    if (rows.length === 0) {
+      throw new BadRequestException({
+        message:
+          purpose === "REVIEW"
+            ? "Belum ada transaksi yang menunggu review Finance Staff pada batch ini."
+            : "Belum ada transaksi yang disetujui final pada batch ini, jadi belum ada yang bisa diekspor ke BRI Qlola.",
+        purpose,
+        eligible_count: 0,
+        total_count: Number(batch.total_count ?? 0),
+        errors: [],
+      });
+    }
+
+    // Validasi seluruh baris dulu: lebih baik gagal dengan daftar field yang
+    // kurang daripada menghasilkan file yang ditolak Qlola.
+    const errors: QlolaRowError[] = [];
+    for (const row of rows as QlolaSourceRow[]) {
+      const missing = validateQlolaRow(row, batch);
+      if (missing.length > 0) {
+        errors.push({
+          reference: row.partner_reference_no ?? `#${row.id}`,
+          bank: row.beneficiary_bank_name ?? null,
+          missing,
+        });
+      }
+    }
+
+    if (errors.length > 0) {
+      throw new BadRequestException({
+        message: "Belum siap diekspor ke BRI Qlola",
+        purpose,
+        eligible_count: rows.length,
+        total_count: Number(batch.total_count ?? 0),
+        errors,
+      });
+    }
+
+    return {
+      fileName: buildQlolaFileName(batch.batch_no, purpose),
+      buffer: buildQlolaWorkbook(rows as QlolaSourceRow[], batch),
+      purpose,
+      eligible_count: rows.length,
+      total_count: Number(batch.total_count ?? 0),
+    };
   }
 
   // ---------------------------------------------------------------------------

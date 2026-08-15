@@ -19,15 +19,31 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request = require('supertest');
 import * as path from 'path';
 import * as express from 'express';
+import * as XLSX from 'xlsx';
 import { AppModule } from '../../src/app.module';
 
 const BASE = '/api';
+
+/**
+ * supertest memperlakukan response sebagai teks kecuali diberi parser sendiri.
+ * Tanpa ini, buffer .xlsx rusak sebelum sempat di-parse.
+ */
+function binaryParser(res: any, callback: (err: any, body: any) => void) {
+  const chunks: Buffer[] = [];
+  res.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  res.on('end', () => callback(null, Buffer.concat(chunks)));
+}
 
 // KTP test — 16 digit, dipakai oleh semua individual create yang tidak spesifik test KTP validation
 const TEST_KTP_NUMBER = '3175001234567890';
 
 // Suffix 7 digit akhir epoch — unik per test run, hindari konflik unique constraint
 const SUFFIX = Date.now().toString().slice(-7);
+// Data Qlola level batch (rekening debit BRI + pemilik rekening). Nilai dummy —
+// jangan pakai nomor rekening produksi di test.
+const QLOLA_DEBIT_ACCOUNT = '020601000001301';
+const QLOLA_SENDER_NAME = 'PT KESH E2E';
+const QLOLA_BEN_MOBILE = '081234567890';
 
 // NPWP Badan Usaha wajib tepat 15 digit angka (validasi backend migration 0047).
 // Helper membangun nilai 15 digit dari seed + SUFFIX (npwp tidak unique-constrained).
@@ -1906,13 +1922,15 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         beneficiaryAccountNumber: '9876543210',
         beneficiaryAccountName: name,
         beneficiary_relationship_to_sender: 'Keluarga',
+        beneficiary_mobile_number: QLOLA_BEN_MOBILE,
       });
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(senderAppId),
-          bulk_reference_no: `FW15-${SUFFIX}`,
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [item('Bulk Return A'), item('Bulk Return B')],
         })
         .expect(201);
@@ -12794,13 +12812,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         beneficiaryAccountNumber: '1234567890',
         beneficiaryAccountName: 'Penerima Bulk',
         beneficiary_relationship_to_sender: 'Keluarga',
+        beneficiary_mobile_number: QLOLA_BEN_MOBILE,
         ...extra,
       };
-    }
-    // Nomor referensi bulk unik per test — unique-nya di-scope per sender.
-    let bulkRefSeq = 0;
-    function bulkRef() {
-      return `BULK-REF-${SUFFIX}-${String(++bulkRefSeq).padStart(3, '0')}`;
     }
 
     let ztTransferId: string;
@@ -13045,7 +13059,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             sender_application_id: Number(indivAppIdOk),
-            bulk_reference_no: bulkRef(),
+            qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+            qlola_sender_name: QLOLA_SENDER_NAME,
             items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Bulk Tanggal 2' })],
           })
           .expect(201);
@@ -13064,7 +13079,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .send({
             sender_application_id: Number(indivAppIdOk),
-            bulk_reference_no: bulkRef(),
+            qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+            qlola_sender_name: QLOLA_SENDER_NAME,
             items: [bulkItem({ beneficiaryAccountName: 'Bulk Submit Tanggal' })],
           })
           .expect(201);
@@ -13291,18 +13307,18 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     it('ZT-04: bulk create 3 item → 201, batch + 3 transfer DRAFT ber-batch_id', async () => {
-      const ref = bulkRef();
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: ref,
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Bulk 2' }), bulkItem({ beneficiaryAccountName: 'Bulk 3' })],
         })
         .expect(201);
 
-      expect(res.body.bulk_reference_no).toBe(ref);
+      expect(res.body.bulk_reference_no).toMatch(/^BLK-[A-HJ-NP-Z2-9]{8}$/);
       expect(res.body.batch_no).toMatch(/^KESH-TRB-\d{8}-[A-Z0-9]{5}$/);
       expect(res.body.total_count).toBe(3);
       expect(Array.isArray(res.body.transfers)).toBe(true);
@@ -13320,7 +13336,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items })
+        .send({ sender_application_id: Number(indivAppIdOk), qlola_debit_account: QLOLA_DEBIT_ACCOUNT, qlola_sender_name: QLOLA_SENDER_NAME, items })
         .expect(400);
     });
 
@@ -13330,7 +13346,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: bulkRef(),
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem(), bulkItem({ amount: 5_000 })], // amount di bawah minimum
         })
         .expect(400);
@@ -13342,7 +13359,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [bulkItem(), bad] })
+        .send({ sender_application_id: Number(indivAppIdOk), qlola_debit_account: QLOLA_DEBIT_ACCOUNT, qlola_sender_name: QLOLA_SENDER_NAME, items: [bulkItem(), bad] })
         .expect(400);
     });
 
@@ -13350,7 +13367,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [] })
+        .send({ sender_application_id: Number(indivAppIdOk), qlola_debit_account: QLOLA_DEBIT_ACCOUNT, qlola_sender_name: QLOLA_SENDER_NAME, items: [] })
         .expect(400);
     });
 
@@ -13358,7 +13375,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [bulkItem()] })
+        .send({ sender_application_id: Number(indivAppIdOk), qlola_debit_account: QLOLA_DEBIT_ACCOUNT, qlola_sender_name: QLOLA_SENDER_NAME, items: [bulkItem()] })
         .expect(201);
       const txId = String(bulk.body.transfers[0].id);
 
@@ -13392,7 +13409,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${financeStaffToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), bulk_reference_no: bulkRef(), items: [bulkItem()] })
+        .send({ sender_application_id: Number(indivAppIdOk), qlola_debit_account: QLOLA_DEBIT_ACCOUNT, qlola_sender_name: QLOLA_SENDER_NAME, items: [bulkItem()] })
         .expect(403);
     });
 
@@ -13413,67 +13430,127 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('DRAFT');
     });
 
-    // ── bulk_reference_no level batch ────────────────────────
-    it('ZT-20: bulk create tanpa bulk_reference_no → 400', async () => {
-      await request(app.getHttpServer())
-        .post(`${BASE}/transfers/bulk`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({ sender_application_id: Number(indivAppIdOk), items: [bulkItem()] })
-        .expect(400);
-    });
+    // -- bulk_reference_no level batch - dibuat sistem, bukan input user ----
+    //
+    // Formatnya sama dengan TRF-XXXXXXXX / CMP-XXXXXXXX: prefix 3 huruf +
+    // 8 karakter acak dari alfabet tanpa I/O/0/1 (common/reference-no.util).
+    const BULK_REF_PATTERN = /^BLK-[A-HJ-NP-Z2-9]{8}$/;
 
-    it('ZT-21: bulk create dengan bulk_reference_no kosong/whitespace → 400', async () => {
-      for (const ref of ['', '   ']) {
-        await request(app.getHttpServer())
-          .post(`${BASE}/transfers/bulk`)
-          .set('Authorization', `Bearer ${frontDeskToken}`)
-          .send({
-            sender_application_id: Number(indivAppIdOk),
-            bulk_reference_no: ref,
-            items: [bulkItem()],
-          })
-          .expect(400);
-      }
-    });
+    /** Payload bulk standar - sengaja TIDAK memuat bulk_reference_no. */
+    function bulkBody(extra: Record<string, any> = {}) {
+      return {
+        sender_application_id: Number(indivAppIdOk),
+        qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+        qlola_sender_name: QLOLA_SENDER_NAME,
+        items: [bulkItem()],
+        ...extra,
+      };
+    }
 
-    it('ZT-22: bulk create valid → 201, response memuat bulk_reference_no + batch trimmed di DB', async () => {
-      const ref = bulkRef();
+    it('ZT-20: bulk create tanpa bulk_reference_no -> 201 + referensi dibuat backend', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({
-          sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: `  ${ref}  `,
-          items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Bulk Ref 2' })],
-        })
+        .send(bulkBody())
         .expect(201);
 
-      expect(res.body.bulk_reference_no).toBe(ref);
-      expect(res.body.batch_id).toBeDefined();
-      expect(res.body.total_count).toBe(2);
-      expect(res.body.total_amount).toBe(200_000);
-      // Semua transfer tetap ter-link ke batch seperti sebelumnya.
-      for (const t of res.body.transfers) {
-        expect(String(t.batch_id)).toBe(String(res.body.batch_id));
-      }
+      expect(res.body.bulk_reference_no).toMatch(BULK_REF_PATTERN);
+      expect(res.body.bulk_reference_no).toHaveLength(12);
+
+      // Nilai yang dikembalikan = nilai yang benar-benar tersimpan.
       const db = await pgPool.query(
         `SELECT bulk_reference_no FROM transfer_batches WHERE id=$1`,
         [res.body.batch_id],
       );
-      expect(db.rows[0].bulk_reference_no).toBe(ref);
+      expect(db.rows[0].bulk_reference_no).toBe(res.body.bulk_reference_no);
+    });
+
+    it('ZT-21: tiga batch berturut-turut mendapat referensi berbeda', async () => {
+      const refs = new Set<string>();
+      for (let i = 0; i < 3; i++) {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/bulk`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(bulkBody())
+          .expect(201);
+        expect(res.body.bulk_reference_no).toMatch(BULK_REF_PATTERN);
+        refs.add(res.body.bulk_reference_no);
+      }
+      expect(refs.size).toBe(3);
+    });
+
+    it('ZT-22: bulk_reference_no kiriman client TIDAK dipakai (di-strip whitelist)', async () => {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        // Client lama masih mengirim field ini - tidak boleh ditolak 400,
+        // tapi juga tidak boleh menentukan nomor yang tersimpan.
+        .send({ ...bulkBody(), bulk_reference_no: 'CUSTOM-REF-123' })
+        .expect(201);
+
+      expect(res.body.bulk_reference_no).not.toBe('CUSTOM-REF-123');
+      expect(res.body.bulk_reference_no).toMatch(BULK_REF_PATTERN);
+      const db = await pgPool.query(
+        `SELECT bulk_reference_no FROM transfer_batches WHERE id=$1`,
+        [res.body.batch_id],
+      );
+      expect(db.rows[0].bulk_reference_no).toMatch(BULK_REF_PATTERN);
+
+      // Referensi lama yang panjang pun tidak boleh menyelinap lewat field ini.
+      const long = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ ...bulkBody(), bulk_reference_no: 'X'.repeat(151) })
+        .expect(201);
+      expect(long.body.bulk_reference_no).toMatch(BULK_REF_PATTERN);
+    });
+
+    it('ZT-22b: referensi tidak kembar antar sender berbeda', async () => {
+      // Keunikan dicek global, bukan per sender - nomor ini identitas batch
+      // yang dibaca manusia, jadi tidak boleh kembar lintas pengirim.
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Bulk Ref Sender 2 ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3266${SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. Bulk Ref No. 2',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0866${SUFFIX}`.slice(0, 15),
+          occupation: 'Wiraswasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const senderB = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [senderB]);
+
+      const a = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(bulkBody())
+        .expect(201);
+      const b = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send(bulkBody({ sender_application_id: Number(senderB) }))
+        .expect(201);
+
+      expect(b.body.bulk_reference_no).not.toBe(a.body.bulk_reference_no);
+      expect(b.body.bulk_reference_no).toMatch(BULK_REF_PATTERN);
     });
 
     it('ZT-23: detail & list transfer mengembalikan batch_no + bulk_reference_no', async () => {
-      const ref = bulkRef();
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({
-          sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: ref,
-          items: [bulkItem()],
-        })
+        .send(bulkBody())
         .expect(201);
+      const ref = bulk.body.bulk_reference_no;
       const txId = String(bulk.body.transfers[0].id);
 
       const detail = await request(app.getHttpServer())
@@ -13508,83 +13585,35 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(detail.body.bulk_reference_no).toBeNull();
     });
 
-    it('ZT-25: bulk_reference_no duplikat untuk sender yang sama → 409', async () => {
-      const ref = bulkRef();
-      const body = {
-        sender_application_id: Number(indivAppIdOk),
-        bulk_reference_no: ref,
-        items: [bulkItem()],
-      };
-      await request(app.getHttpServer())
+    it('ZT-25: referensi bulk lama yang panjang tetap terbaca & tercari', async () => {
+      const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send(body)
+        .send(bulkBody())
         .expect(201);
 
-      const dup = await request(app.getHttpServer())
-        .post(`${BASE}/transfers/bulk`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send(body)
-        .expect(409);
-      expect(String(dup.body.message)).toContain(ref);
-    });
+      // Tiru baris warisan: format lama, jauh lebih panjang dari 12 karakter.
+      const legacyRef = `BULK-REF-LEGACY-${SUFFIX}-0001`;
+      await pgPool.query(
+        `UPDATE transfer_batches SET bulk_reference_no=$2 WHERE id=$1`,
+        [Number(bulk.body.batch_id), legacyRef],
+      );
 
-    it('ZT-26: bulk_reference_no sama untuk sender berbeda → 201 (unique per sender)', async () => {
-      // Sender kedua yang APPROVED.
-      const create = await request(app.getHttpServer())
-        .post(`${BASE}/applications/individual`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({
-          full_name: `Bulk Ref Sender 2 ${SUFFIX}`,
-          ktp_number: TEST_KTP_NUMBER,
-          identity_type: 'KTP',
-          identity_number: `3266${SUFFIX}`.slice(0, 16),
-          address_identity: 'Jl. Bulk Ref No. 2',
-          pob: 'Jakarta',
-          dob: '1990-01-01',
-          nationality: 'ID',
-          phone: `0866${SUFFIX}`.slice(0, 15),
-          occupation: 'Wiraswasta',
-          gender: 'M',
-          signature_uri: 'https://storage.test/sig.png',
-        })
-        .expect(201);
-      const senderB = String(create.body.id);
-      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [senderB]);
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches/${bulk.body.batch_id}`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      expect(detail.body.batch.bulk_reference_no).toBe(legacyRef);
 
-      const ref = bulkRef();
-      await request(app.getHttpServer())
-        .post(`${BASE}/transfers/bulk`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({
-          sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: ref,
-          items: [bulkItem()],
-        })
-        .expect(201);
-
-      const res = await request(app.getHttpServer())
-        .post(`${BASE}/transfers/bulk`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({
-          sender_application_id: Number(senderB),
-          bulk_reference_no: ref,
-          items: [bulkItem()],
-        })
-        .expect(201);
-      expect(res.body.bulk_reference_no).toBe(ref);
-    });
-
-    it('ZT-27: bulk_reference_no > 150 karakter → 400', async () => {
-      await request(app.getHttpServer())
-        .post(`${BASE}/transfers/bulk`)
-        .set('Authorization', `Bearer ${frontDeskToken}`)
-        .send({
-          sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: 'X'.repeat(151),
-          items: [bulkItem()],
-        })
-        .expect(400);
+      // Pencarian batch memakai nilai tersimpan apa adanya.
+      const search = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/bulk-batches`)
+        .query({ q: legacyRef, limit: 50 })
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .expect(200);
+      expect(search.body.data.map((r: any) => String(r.id))).toContain(
+        String(bulk.body.batch_id),
+      );
     });
 
     // ── Pemisahan single vs bulk listing ─────────────────────
@@ -13600,7 +13629,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: bulkRef(),
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem()],
         })
         .expect(201);
@@ -13665,17 +13695,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     it('ZT-34: bulk-batches = satu baris per batch, memuat batch_no + bulk_reference_no', async () => {
-      const ref = bulkRef();
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: ref,
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Batch List 2' }), bulkItem({ beneficiaryAccountName: 'Batch List 3' })],
         })
         .expect(201);
 
+      // Referensi dibuat backend, jadi baru diketahui dari response.
+      const ref = bulk.body.bulk_reference_no;
       const res = await request(app.getHttpServer())
         .get(`${BASE}/transfers/bulk-batches?q=${ref}`)
         .set('Authorization', `Bearer ${financeStaffToken}`)
@@ -13695,13 +13727,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     it('ZT-35: bulk-batches detail = ringkasan batch + seluruh transfer anak', async () => {
-      const ref = bulkRef();
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: ref,
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Batch Detail 2' })],
         })
         .expect(201);
@@ -13712,7 +13744,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
 
       expect(res.body.batch.batch_no).toBe(bulk.body.batch_no);
-      expect(res.body.batch.bulk_reference_no).toBe(ref);
+      expect(res.body.batch.bulk_reference_no).toBe(bulk.body.bulk_reference_no);
       expect(res.body.batch.total_count).toBe(2);
       expect(res.body.transfers.length).toBe(2);
       for (const t of res.body.transfers) {
@@ -13725,13 +13757,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     });
 
     it('ZT-36: status_summary mengikuti status transfer anak', async () => {
-      const ref = bulkRef();
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: ref,
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem(), bulkItem({ beneficiaryAccountName: 'Summary 2' })],
         })
         .expect(201);
@@ -13778,7 +13810,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: bulkRef(),
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem()],
         })
         .expect(201);
@@ -13819,10 +13852,736 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${auditorToken}`)
         .send({
           sender_application_id: Number(indivAppIdOk),
-          bulk_reference_no: bulkRef(),
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [bulkItem()],
         })
         .expect(403);
+    });
+
+    // ══════════════════════════════════════════════════════════
+    // ZQ. Export BRI Qlola (BI-Fast) dari batch bulk
+    //
+    // Struktur file mengikuti workbook BRI `13-08-2026_Mass Transfer.xlsx`
+    // sheet "Transaction Records": legenda baris 1-6, baris 7 kosong, header
+    // 36 kolom di baris 8, data mulai baris 9, lalu Total Records/Total Amount.
+    // ══════════════════════════════════════════════════════════
+    describe('ZQ. Export BRI Qlola', () => {
+      const QLOLA_HEADERS = [
+        'No', 'CustRefNo', 'InstructionCode', 'ValueDate', 'Debit Account',
+        'Sender Name', 'BenBankIdentifier', 'Credit Account', 'Beneficiary Name',
+        'Beneficiary Address', 'Amount', 'Currency', 'TrxRemark', 'Notification',
+        'Charge Type', 'FxCode', 'Rate Voucher Code', 'Sender Address',
+        'Ben Mobile Number', 'Sender Country Code', 'Beneficiary Country Code',
+        'BenBankName', 'BenBankAddress', 'BenBankCountryCode', 'InterBankIdentifier',
+        'InterBankName', 'InterBankAddress', 'InterBankCountryCode',
+        'Beneficiary Category', 'Beneficiary Relation', 'BI Transaction Code',
+        'Simodis Info', 'Enrichment Details 1', 'Enrichment Details 2',
+        'Enrichment Details 3', 'Enrichment Details 4',
+      ];
+      const HEADER_ROW = 7; // baris 8, 0-indexed
+      const DATA_ROW = 8; // baris 9, 0-indexed
+
+      /**
+       * Item bulk yang siap Qlola: bulkItem() global sengaja tidak mengisi
+       * transaction_purpose, padahal itu sumber TrxRemark yang wajib.
+       */
+      function qlolaItem(extra: Record<string, any> = {}) {
+        return bulkItem({
+          transaction_purpose: 'Pembayaran vendor',
+          // Bank tujuan wajib punya BIC di ref_banks, jadi pakai bank nyata
+          // dari katalog — bukan 'Bank Test' bawaan bulkItem().
+          beneficiaryBankCode: 'BCA',
+          beneficiaryBankName: 'Bank Central Asia',
+          ...extra,
+        });
+      }
+
+      /** Buat batch bulk; `extra` menimpa field level batch. */
+      async function createBatch(
+        items: any[],
+        extra: Record<string, any> = {},
+      ): Promise<{ batchId: string; children: any[] }> {
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/bulk`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            sender_application_id: Number(indivAppIdOk),
+            qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+            qlola_sender_name: QLOLA_SENDER_NAME,
+            items,
+            ...extra,
+          })
+          .expect(201);
+        return { batchId: String(res.body.batch_id), children: res.body.transfers };
+      }
+
+      /** Bawa satu transfer anak sampai COMPLETED/SUCCESS lewat rantai approval nyata. */
+      async function approveChild(id: string | number) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        const done = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/decision`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .send({ decision: 'APPROVE' })
+          .expect(201);
+        expect(done.body.status).toBe('COMPLETED');
+        expect(done.body.result).toBe('SUCCESS');
+        return done.body;
+      }
+
+      /**
+       * Bawa transfer anak sampai PENDING_FINANCE_STAFF_REVIEW - populasi
+       * export REVIEW. Berhenti tepat sebelum Finance Staff memutuskan.
+       */
+      async function toFinanceStaffReview(id: string | number) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        expect(res.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+        return res.body;
+      }
+
+      /** Naikkan ke PENDING_FINANCE_MANAGER_APPROVAL (bukan populasi mana pun). */
+      async function toManagerApproval(id: string | number) {
+        await toFinanceStaffReview(id);
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        expect(res.body.status).toBe('PENDING_FINANCE_MANAGER_APPROVAL');
+        return res.body;
+      }
+
+      function exportReq(
+        batchId: string,
+        token = financeManagerToken,
+        purpose?: string,
+      ) {
+        const qs = purpose ? `?purpose=${purpose}` : '';
+        return request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches/${batchId}/exports/bri-qlola${qs}`)
+          .set('Authorization', `Bearer ${token}`);
+      }
+
+      /** Unduh + parse jadi array-of-arrays sheet "Transaction Records". */
+      async function exportSheet(
+        batchId: string,
+        token = financeManagerToken,
+        purpose?: string,
+      ) {
+        const res = await exportReq(batchId, token, purpose)
+          .buffer(true)
+          .parse(binaryParser)
+          .expect(200);
+        const wb = XLSX.read(res.body, { type: 'buffer' });
+        expect(wb.SheetNames).toContain('Transaction Records');
+        const aoa = XLSX.utils.sheet_to_json<any[]>(wb.Sheets['Transaction Records'], {
+          header: 1,
+          defval: '',
+          blankrows: true,
+        });
+        return { res, wb, aoa };
+      }
+
+      it('ZQ-01: bulk baru menyimpan seluruh data sumber Qlola', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiary_mobile_number: '081200001111' }),
+        ]);
+
+        const batch = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches/${batchId}`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+        expect(batch.body.batch.qlola_debit_account).toBe(QLOLA_DEBIT_ACCOUNT);
+        expect(batch.body.batch.qlola_sender_name).toBe(QLOLA_SENDER_NAME);
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${children[0].id}`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+        expect(detail.body.beneficiary_mobile_number).toBe('081200001111');
+      });
+
+      it('ZQ-02: bulk tanpa no. HP penerima ditolak (400)', async () => {
+        const { beneficiary_mobile_number, ...noMobile } = qlolaItem() as any;
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/bulk`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            sender_application_id: Number(indivAppIdOk),
+            qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+            qlola_sender_name: QLOLA_SENDER_NAME,
+            items: [noMobile],
+          })
+          .expect(400);
+      });
+
+      it('ZQ-03: rekening debit di luar 10-30 karakter ditolak (400)', async () => {
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/bulk`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            sender_application_id: Number(indivAppIdOk),
+            qlola_debit_account: '12345',
+            qlola_sender_name: QLOLA_SENDER_NAME,
+            items: [qlolaItem()],
+          })
+          .expect(400);
+      });
+
+      it('ZQ-04: batch lama (tanpa data Qlola) tetap terbaca, tapi belum siap diekspor', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        // Simulasi batch/transfer warisan: kolom baru dikosongkan langsung di DB.
+        await pgPool.query(
+          `UPDATE transfer_batches SET qlola_debit_account=NULL, qlola_sender_name=NULL WHERE id=$1`,
+          [Number(batchId)],
+        );
+        await pgPool.query(
+          `UPDATE transfers SET beneficiary_mobile_number=NULL WHERE batch_id=$1`,
+          [Number(batchId)],
+        );
+        await approveChild(children[0].id);
+
+        // Batch lama tetap bisa dibuka — tidak boleh error.
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches/${batchId}`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+        expect(detail.body.batch.qlola_debit_account).toBeNull();
+        expect(detail.body.transfers).toHaveLength(1);
+
+        const res = await exportReq(batchId).expect(400);
+        expect(res.body.message).toBe('Belum siap diekspor ke BRI Qlola');
+        const missing = res.body.errors[0].missing.join(' | ');
+        expect(res.body.errors[0].reference).toMatch(/^TRF-/);
+        expect(missing).toContain('Debit Account');
+        expect(missing).toContain('Sender Name');
+        expect(missing).toContain('Ben Mobile Number');
+      });
+
+      it('ZQ-05: baris approved dengan field kurang → 400 + daftar field per referensi', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Lengkap' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Kurang' }),
+        ]);
+        await approveChild(children[0].id);
+        const incomplete = await approveChild(children[1].id);
+        // Hanya baris kedua yang dilubangi.
+        await pgPool.query(
+          `UPDATE transfers SET beneficiary_mobile_number=NULL, transaction_purpose=NULL, description=NULL WHERE id=$1`,
+          [Number(children[1].id)],
+        );
+
+        const res = await exportReq(batchId).expect(400);
+        expect(res.body.errors).toHaveLength(1);
+        expect(res.body.errors[0].reference).toBe(incomplete.partner_reference_no);
+        expect(res.body.errors[0].missing).toEqual(
+          expect.arrayContaining([
+            'TrxRemark (tujuan transaksi) belum diisi',
+            'Ben Mobile Number (No. Handphone Penerima) belum diisi',
+          ]),
+        );
+      });
+
+      it('ZQ-06: batch tanpa satupun transfer final → 400, tidak ada file', async () => {
+        const { batchId, children } = await createBatch([qlolaItem(), qlolaItem()]);
+        // Baru diajukan, belum disetujui final.
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${children[0].id}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+
+        const res = await exportReq(batchId).expect(400);
+        expect(res.body.eligible_count).toBe(0);
+        expect(res.body.total_count).toBe(2);
+      });
+
+      it('ZQ-07: hanya transfer COMPLETED/SUCCESS yang ikut; batch campuran diekspor sebagian', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Final 1', beneficiaryAccountNumber: '5566771980' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Draft' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Final 2' }),
+        ]);
+        const finalA = await approveChild(children[0].id);
+        const finalB = await approveChild(children[2].id);
+        // children[1] sengaja dibiarkan DRAFT.
+
+        const { res, aoa } = await exportSheet(batchId);
+        expect(res.headers['x-qlola-eligible-count']).toBe('2');
+        expect(res.headers['x-qlola-total-count']).toBe('3');
+
+        const refs = [aoa[DATA_ROW][1], aoa[DATA_ROW + 1][1]];
+        expect(refs).toEqual([finalA.partner_reference_no, finalB.partner_reference_no]);
+        // Baris DRAFT tidak boleh muncul di mana pun.
+        const flat = JSON.stringify(aoa);
+        expect(flat).not.toContain(children[1].partner_reference_no);
+      });
+
+      it('ZQ-08: layout sheet & urutan kolom A:AJ persis workbook BRI', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await approveChild(children[0].id);
+
+        const { wb, aoa } = await exportSheet(batchId);
+        // Nama sheet persis, dan tidak ada sheet lain yang ikut.
+        expect(wb.SheetNames).toEqual(['Transaction Records']);
+        // Legenda baris 1-6 (label di kolom B), baris 7 kosong.
+        expect(aoa[0][1]).toBe('Mandatory For All Transaction');
+        expect(aoa[3][1]).toBe('Mandatory Field for BI-Fast');
+        expect(aoa[5][1]).toBe('Optional');
+        expect((aoa[6] ?? []).filter((c: any) => String(c ?? '').trim() !== '')).toHaveLength(0);
+        // Header 36 kolom di baris 8, urutan asli.
+        expect(aoa[HEADER_ROW]).toEqual(QLOLA_HEADERS);
+        expect(aoa[HEADER_ROW]).toHaveLength(36);
+      });
+
+      it('ZQ-09: nilai kolom wajib — No urut, CustRefNo, BIF, IDR, OUR, HP', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Row 1', beneficiary_mobile_number: '081200002222' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Row 2', beneficiary_mobile_number: '081200003333' }),
+        ]);
+        const a = await approveChild(children[0].id);
+        const b = await approveChild(children[1].id);
+
+        const { aoa } = await exportSheet(batchId);
+        const r1 = aoa[DATA_ROW];
+        const r2 = aoa[DATA_ROW + 1];
+
+        // No: urut 1..n, bukan id internal transfer.
+        expect(r1[0]).toBe(1);
+        expect(r2[0]).toBe(2);
+        expect(r1[0]).not.toBe(Number(children[0].id));
+        // CustRefNo = partner_reference_no user-facing, bukan id numerik.
+        expect(r1[1]).toBe(a.partner_reference_no);
+        expect(r2[1]).toBe(b.partner_reference_no);
+        expect(String(r1[1])).toMatch(/^TRF-/);
+        expect(String(r1[1])).not.toBe(String(children[0].id));
+        // Konstanta profil BI-Fast.
+        expect(r1[2]).toBe('BIF');
+        expect(r1[11]).toBe('IDR');
+        expect(r1[14]).toBe('OUR');
+        // Level batch, sama di semua baris.
+        expect(r1[4]).toBe(QLOLA_DEBIT_ACCOUNT);
+        expect(r2[4]).toBe(QLOLA_DEBIT_ACCOUNT);
+        expect(r1[5]).toBe(QLOLA_SENDER_NAME);
+        // Level item.
+        expect(String(r1[7])).toBe(String(qlolaItem().beneficiaryAccountNumber));
+        expect(r1[8]).toBe('Qlola Row 1');
+        expect(r1[10]).toBe(100_000);
+        expect(r1[12]).toBeTruthy(); // TrxRemark
+        expect(r1[18]).toBe('081200002222');
+        expect(r2[18]).toBe('081200003333');
+
+        // Footer rekap seperti workbook: label kolom A, nilai kolom C.
+        const totalRow = aoa[DATA_ROW + 2];
+        expect(totalRow[0]).toBe('Total Records');
+        expect(totalRow[2]).toBe(2);
+        expect(aoa[DATA_ROW + 3][0]).toBe('Total Amount');
+        expect(aoa[DATA_ROW + 3][2]).toBe(200_000);
+      });
+
+      it('ZQ-10: ValueDate kosong bila tanpa jadwal, YYYYMMDDhhmm bila dijadwalkan', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Tanpa Jadwal' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Terjadwal' }),
+        ]);
+        // requested_execution_date = jadwal eksekusi (SNAP), bukan tanggal
+        // persetujuan. Diset langsung karena bulk item belum mengeksposnya.
+        await pgPool.query(
+          `UPDATE transfers SET requested_execution_date = '2027-03-04 08:30:00' WHERE id=$1`,
+          [Number(children[1].id)],
+        );
+        await approveChild(children[0].id);
+        const scheduled = await approveChild(children[1].id);
+
+        const { aoa } = await exportSheet(batchId);
+        // Immediate → kosong (sheet "Deskripsi File": M/O, optional bila immediate).
+        expect(aoa[DATA_ROW][3]).toBe('');
+        expect(String(aoa[DATA_ROW + 1][3])).toBe('202703040830');
+        expect(String(aoa[DATA_ROW + 1][3])).toMatch(/^\d{12}$/);
+        // transaction_date (stempel persetujuan) TIDAK boleh bocor ke ValueDate.
+        expect(scheduled.transaction_date).toBeTruthy();
+        const approvedDay = new Date(scheduled.transaction_date);
+        const stamp = `${approvedDay.getFullYear()}${String(approvedDay.getMonth() + 1).padStart(2, '0')}`;
+        expect(String(aoa[DATA_ROW + 1][3]).slice(0, 6)).not.toBe(stamp);
+      });
+
+      it('ZQ-11: BenBankIdentifier diisi dari ref_banks untuk bank yang terpetakan', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola BIC', beneficiaryBankCode: 'BCA' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola BIC 2', beneficiaryBankCode: 'MANDIRI', beneficiaryBankName: 'Bank Mandiri' }),
+        ]);
+        await approveChild(children[0].id);
+        await approveChild(children[1].id);
+
+        const { aoa } = await exportSheet(batchId);
+        // Nilai persis dari sheet "Bank Code" workbook BRI.
+        expect(aoa[DATA_ROW][6]).toBe('CENAIDJA');
+        expect(aoa[DATA_ROW + 1][6]).toBe('BMRIIDJA');
+      });
+
+      it('ZQ-12: tidak ada baris contoh IFT/RTG/LLG/BIF/SWI dari workbook asli', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await approveChild(children[0].id);
+
+        const { aoa } = await exportSheet(batchId);
+        const flat = JSON.stringify(aoa);
+        for (const sample of [
+          'REFF-IFT01012024001', 'REFF-RTG01012024002', 'REFF-LLG01012024003',
+          'REFF-BIF01012024004', 'REFF-SWI01012024005',
+          'NAMA PERUSAHAAN', 'NAMA PENERIMA', 'notif@email.com',
+        ]) {
+          expect(flat).not.toContain(sample);
+        }
+        // Hanya satu baris data + 2 baris rekap.
+        expect(aoa[DATA_ROW][0]).toBe(1);
+        expect(aoa[DATA_ROW + 1][0]).toBe('Total Records');
+      });
+
+      it('ZQ-13: referensi transfer legacy yang panjang tetap didukung', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await approveChild(children[0].id);
+        // Format lama sebelum TRF-XXXXXXXX — jangan sampai ditolak/dipotong.
+        const legacyRef = `TRF-LEGACY-${SUFFIX}-0001-PANJANG`;
+        await pgPool.query(`UPDATE transfers SET partner_reference_no=$2 WHERE id=$1`, [
+          Number(children[0].id),
+          legacyRef,
+        ]);
+
+        const { aoa } = await exportSheet(batchId);
+        expect(aoa[DATA_ROW][1]).toBe(legacyRef);
+      });
+
+      it('ZQ-14: RBAC — hanya pelaksana finance (+ SystemAdmin/Director) yang boleh mengunduh', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await approveChild(children[0].id);
+
+        for (const token of [financeStaffToken, financeManagerToken, sysAdminToken, directorToken]) {
+          await exportReq(batchId, token).buffer(true).parse(binaryParser).expect(200);
+        }
+        // FrontDesk membuat batch, tapi tidak boleh menarik instruksi bayar ke bank.
+        for (const token of [
+          frontDeskToken,
+          operationSupervisorToken,
+          complianceToken,
+          auditorToken,
+          complaintHandlingToken,
+        ]) {
+          await exportReq(batchId, token).expect(403);
+        }
+      });
+
+      it('ZQ-15: nama file BRI_QLOLA_BIF_<batch_no>_<YYYYMMDDHHmm>.xlsx + MIME xlsx', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await approveChild(children[0].id);
+
+        const batch = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches/${batchId}`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+
+        const res = await exportReq(batchId).buffer(true).parse(binaryParser).expect(200);
+        expect(res.headers['content-type']).toBe(
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+        // Timestamp = waktu unduh, jadi hanya polanya yang diuji.
+        expect(res.headers['content-disposition']).toMatch(
+          new RegExp(
+            `^attachment; filename="BRI_QLOLA_BIF_${batch.body.batch.batch_no}_\\d{12}\\.xlsx"$`,
+          ),
+        );
+      });
+
+      // ── QA pemetaan bank/BIC sebelum upload live pertama ──────────────────
+      // Sheet "Deskripsi File" baris 18 menyebut BIF sebagai pemakai BIC dan
+      // HANYA memberi pengecualian "Optional ... IFT". Jadi BenBankIdentifier
+      // wajib untuk BIF: bank tanpa pemetaan harus memblokir export, bukan
+      // menghasilkan file dengan kolom G kosong atau BIC tebakan.
+
+      const MISSING_BIC = 'BenBankIdentifier tidak tersedia pada referensi BRI Qlola';
+
+      it('ZQ-16: bank tanpa pemetaan BIC memblokir export + menyebut transfer & bank', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({
+            beneficiaryAccountName: 'Qlola Bank Tanpa BIC',
+            // Neo Commerce memang tidak ada di sheet "Bank Code" BRI.
+            beneficiaryBankCode: 'NEOBANK',
+            beneficiaryBankName: 'Bank Neo Commerce (neobank)',
+          }),
+        ]);
+        const approved = await approveChild(children[0].id);
+
+        const res = await exportReq(batchId).expect(400);
+        expect(res.body.message).toBe('Belum siap diekspor ke BRI Qlola');
+        expect(res.body.errors).toHaveLength(1);
+        expect(res.body.errors[0].reference).toBe(approved.partner_reference_no);
+        expect(res.body.errors[0].bank).toBe('Bank Neo Commerce (neobank)');
+        expect(res.body.errors[0].missing).toContain(MISSING_BIC);
+      });
+
+      it('ZQ-17: BRI tetap tanpa BIC (BRI→BRI = IFT, bukan BIF) dan memblokir export', async () => {
+        // Sheet "Bank Code" BRI tidak memuat baris Bank Rakyat Indonesia sama
+        // sekali; ini konsisten karena transfer BRI→BRI berjalan sebagai IFT.
+        const ref = await pgPool.query(
+          `SELECT bic_code FROM ref_banks WHERE kesh_bank_code = 'BRI'`,
+        );
+        expect(ref.rowCount).toBe(0);
+
+        const { batchId, children } = await createBatch([
+          qlolaItem({
+            beneficiaryAccountName: 'Qlola BRI',
+            beneficiaryBankCode: 'BRI',
+            beneficiaryBankName: 'Bank Rakyat Indonesia',
+          }),
+        ]);
+        await approveChild(children[0].id);
+
+        const res = await exportReq(batchId).expect(400);
+        expect(res.body.errors[0].bank).toBe('Bank Rakyat Indonesia');
+        expect(res.body.errors[0].missing).toContain(MISSING_BIC);
+      });
+
+      it('ZQ-18: bank tak terpetakan tidak pernah diberi BIC tebakan', async () => {
+        // Tujuh bank ini tidak ada di sheet BRI — tidak boleh ada satupun yang
+        // diam-diam mendapat BIC hasil tebakan nama/prefix.
+        const unmapped = ['BRI', 'BTPN', 'NEOBANK', 'ALLO', 'SUPERBANK', 'KROM', 'SAQU'];
+        const res = await pgPool.query(
+          `SELECT kesh_bank_code FROM ref_banks WHERE kesh_bank_code = ANY($1)`,
+          [unmapped],
+        );
+        expect(res.rows).toHaveLength(0);
+
+        // Dan pemetaan yang ada tetap unik: satu kode KESH → satu BIC.
+        const dup = await pgPool.query(
+          `SELECT kesh_bank_code, COUNT(*) FROM ref_banks
+            WHERE kesh_bank_code IS NOT NULL
+            GROUP BY kesh_bank_code HAVING COUNT(*) > 1`,
+        );
+        expect(dup.rows).toHaveLength(0);
+      });
+
+      it('ZQ-19: SMBC ambigu dibiarkan tanpa pemetaan sampai dikonfirmasi', async () => {
+        // Sheet BRI memuat dua entitas grup SMBC (45 SUNIIDJ1 Sumitomo Mitsui,
+        // 213 SUNIIDJA "PT Bank SMBC Indonesia Tbk" = kode BTPN yang berganti
+        // nama). Sampai product memastikan maksudnya, entri ini tidak dipetakan.
+        const smbc = await pgPool.query(
+          `SELECT bic_code FROM ref_banks WHERE kesh_bank_code = 'SMBC'`,
+        );
+        expect(smbc.rowCount).toBe(0);
+
+        // Kedua baris sumbernya tetap ada sebagai referensi, hanya tak terjembatani.
+        const rows = await pgPool.query(
+          `SELECT bic_code, kesh_bank_code FROM ref_banks
+            WHERE bic_code IN ('SUNIIDJ1','SUNIIDJA') ORDER BY bic_code`,
+        );
+        expect(rows.rows).toEqual([
+          { bic_code: 'SUNIIDJ1', kesh_bank_code: null },
+          { bic_code: 'SUNIIDJA', kesh_bank_code: null },
+        ]);
+      });
+
+      // -- Export REVIEW: Finance Staff mengecek data sebelum menyetujui --------
+      //
+      // Dua populasi tidak pernah bercampur: REVIEW hanya
+      // PENDING_FINANCE_STAFF_REVIEW, FINAL hanya COMPLETED+SUCCESS.
+
+      it('ZQ-21: REVIEW mengekspor transfer yang menunggu review Finance Staff', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        const pending = await toFinanceStaffReview(children[0].id);
+
+        const { res, aoa } = await exportSheet(batchId, financeStaffToken, 'REVIEW');
+        expect(res.headers['x-qlola-purpose']).toBe('REVIEW');
+        expect(res.headers['x-qlola-eligible-count']).toBe('1');
+        expect(aoa[DATA_ROW][1]).toBe(pending.partner_reference_no);
+        // Struktur sheet sama persis dengan FINAL - kolom A:AJ tidak berubah.
+        expect(aoa[HEADER_ROW]).toEqual(QLOLA_HEADERS);
+        expect(aoa[DATA_ROW][2]).toBe('BIF');
+      });
+
+      it('ZQ-22: REVIEW tidak mengekspor PENDING_FINANCE_MANAGER_APPROVAL maupun COMPLETED', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Menunggu Manager' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Sudah Final' }),
+        ]);
+        await toManagerApproval(children[0].id);
+        await approveChild(children[1].id);
+
+        // Tidak ada satupun baris di tahap review -> 400, bukan file kosong.
+        const res = await exportReq(batchId, financeStaffToken, 'REVIEW').expect(400);
+        expect(res.body.purpose).toBe('REVIEW');
+        expect(res.body.eligible_count).toBe(0);
+        expect(res.body.message).toContain('menunggu review Finance Staff');
+      });
+
+      it('ZQ-23: batch campuran - REVIEW dan FINAL menghasilkan baris berbeda', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Review Row' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Final Row' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Draft Row' }),
+        ]);
+        const inReview = await toFinanceStaffReview(children[0].id);
+        const isFinal = await approveChild(children[1].id);
+        // children[2] dibiarkan DRAFT.
+
+        const review = await exportSheet(batchId, financeStaffToken, 'REVIEW');
+        expect(review.res.headers['x-qlola-eligible-count']).toBe('1');
+        expect(review.aoa[DATA_ROW][1]).toBe(inReview.partner_reference_no);
+
+        const final = await exportSheet(batchId, financeManagerToken, 'FINAL');
+        expect(final.res.headers['x-qlola-eligible-count']).toBe('1');
+        expect(final.aoa[DATA_ROW][1]).toBe(isFinal.partner_reference_no);
+
+        // Tidak boleh saling bocor.
+        expect(JSON.stringify(review.aoa)).not.toContain(isFinal.partner_reference_no);
+        expect(JSON.stringify(final.aoa)).not.toContain(inReview.partner_reference_no);
+      });
+
+      it('ZQ-24: purpose dihilangkan = FINAL (kompatibilitas client lama)', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Default Final' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Default Review' }),
+        ]);
+        const isFinal = await approveChild(children[0].id);
+        await toFinanceStaffReview(children[1].id);
+
+        // Tanpa query string sama sekali.
+        const { res, aoa } = await exportSheet(batchId);
+        expect(res.headers['x-qlola-purpose']).toBe('FINAL');
+        expect(res.headers['x-qlola-eligible-count']).toBe('1');
+        expect(aoa[DATA_ROW][1]).toBe(isFinal.partner_reference_no);
+        expect(res.headers['content-disposition']).toContain('BRI_QLOLA_BIF_');
+
+        // purpose=FINAL eksplisit harus identik.
+        const explicit = await exportSheet(batchId, financeManagerToken, 'FINAL');
+        expect(explicit.aoa[DATA_ROW][1]).toBe(isFinal.partner_reference_no);
+      });
+
+      it('ZQ-25: nama file REVIEW memakai penanda REVIEW', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+
+        const batch = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches/${batchId}`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .expect(200);
+
+        const res = await exportReq(batchId, financeStaffToken, 'REVIEW')
+          .buffer(true)
+          .parse(binaryParser)
+          .expect(200);
+        expect(res.headers['content-disposition']).toMatch(
+          new RegExp(
+            `^attachment; filename="BRI_QLOLA_REVIEW_${batch.body.batch.batch_no}_\\d{12}\\.xlsx"$`,
+          ),
+        );
+      });
+
+      it('ZQ-26: validasi wajib Qlola juga memblokir REVIEW', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        const pending = await toFinanceStaffReview(children[0].id);
+        // Lubangi data yang wajib untuk Qlola.
+        await pgPool.query(
+          `UPDATE transfers SET beneficiary_mobile_number=NULL WHERE id=$1`,
+          [Number(children[0].id)],
+        );
+
+        const res = await exportReq(batchId, financeStaffToken, 'REVIEW').expect(400);
+        expect(res.body.message).toBe('Belum siap diekspor ke BRI Qlola');
+        expect(res.body.purpose).toBe('REVIEW');
+        expect(res.body.errors[0].reference).toBe(pending.partner_reference_no);
+        expect(res.body.errors[0].missing).toContain(
+          'Ben Mobile Number (No. Handphone Penerima) belum diisi',
+        );
+      });
+
+      it('ZQ-27: RBAC REVIEW - hanya finance (+ SystemAdmin/Director)', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+
+        for (const token of [financeStaffToken, financeManagerToken, sysAdminToken, directorToken]) {
+          await exportReq(batchId, token, 'REVIEW')
+            .buffer(true)
+            .parse(binaryParser)
+            .expect(200);
+        }
+        for (const token of [
+          frontDeskToken,
+          operationSupervisorToken,
+          complianceToken,
+          auditorToken,
+          complaintHandlingToken,
+        ]) {
+          await exportReq(batchId, token, 'REVIEW').expect(403);
+        }
+      });
+
+      it('ZQ-28: purpose tidak dikenal ditolak 400', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        await exportReq(batchId, financeStaffToken, 'SOMETHING').expect(400);
+      });
+
+      it('ZQ-29: file REVIEW tidak mengubah status transfer apa pun', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        await exportSheet(batchId, financeStaffToken, 'REVIEW');
+
+        // Mengunduh hanya membaca - alur pengembalian tetap per transaksi.
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/${children[0].id}`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .expect(200);
+        expect(detail.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
+
+        // Dan RETURN per transaksi yang sudah ada tetap jalan setelahnya.
+        const returned = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${children[0].id}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'RETURN', notes: 'rekening penerima salah' })
+          .expect(201);
+        expect(returned.body.status).toBe('REVISION_REQUIRED');
+      });
+
+      it('ZQ-20: pemetaan exact-name yang dipakai sehari-hari tetap benar', async () => {
+        // Nilai-nilai ini disalin apa adanya dari sheet "Bank Code" workbook BRI.
+        const expected: Record<string, string> = {
+          BCA: 'CENAIDJA',
+          MANDIRI: 'BMRIIDJA',
+          BNI: 'BNINIDJA',
+          BTN: 'BTANIDJA',
+          CIMB: 'BNIAIDJA',
+          PERMATA: 'BBBAIDJA',
+          DANAMON: 'BDINIDJA',
+          BSI: 'BSMDIDJA',
+        };
+        const res = await pgPool.query(
+          `SELECT kesh_bank_code, bic_code FROM ref_banks WHERE kesh_bank_code = ANY($1)`,
+          [Object.keys(expected)],
+        );
+        const actual = Object.fromEntries(
+          res.rows.map((r: any) => [r.kesh_bank_code, r.bic_code]),
+        );
+        expect(actual).toEqual(expected);
+      });
     });
   });
 
@@ -15260,7 +16019,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({
           sender_application_id: Number(twSenderAppId),
-          bulk_reference_no: `TWBULK${SUFFIX}`,
+          qlola_debit_account: QLOLA_DEBIT_ACCOUNT,
+          qlola_sender_name: QLOLA_SENDER_NAME,
           items: [
             {
               amount: 250_000,
@@ -15268,6 +16028,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
               beneficiaryAccountNumber: '1122334455',
               beneficiaryAccountName: DTTOT_NAME,
               beneficiary_relationship_to_sender: 'Keluarga',
+              beneficiary_mobile_number: QLOLA_BEN_MOBILE,
             },
             {
               amount: 250_000,
@@ -15275,6 +16036,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
               beneficiaryAccountNumber: '5566778899',
               beneficiaryAccountName: 'Penerima Bulk Tanpa Hit',
               beneficiary_relationship_to_sender: 'Keluarga',
+              beneficiary_mobile_number: QLOLA_BEN_MOBILE,
             },
           ],
         })

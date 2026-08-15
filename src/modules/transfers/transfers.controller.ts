@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -8,8 +9,10 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from "@nestjs/common";
+import type { Response } from "express";
 import { JwtAuthGuard } from "../auth/jwt.guard";
 import { RolesGuard } from "../auth/roles.guard";
 import { Roles } from "../auth/roles.decorator";
@@ -26,6 +29,7 @@ import {
   SubmitComplianceReviewDto,
   UpdateTransferDto,
 } from "./dto";
+import { QLOLA_PURPOSES, type QlolaPurpose } from "./bri-qlola.exporter";
 
 // Hak baca transfer (SystemAdmin/Director lewat bypass RolesGuard).
 const READ_ROLES = [
@@ -190,6 +194,60 @@ export class TransfersController {
       page: Number(page),
       limit: Number(limit),
     });
+  }
+
+  // EXPORT BRI QLOLA (BI-Fast)
+  //
+  //   ?purpose=FINAL  (default) — transfer anak COMPLETED/SUCCESS, siap dieksekusi
+  //   ?purpose=REVIEW           — transfer anak PENDING_FINANCE_STAFF_REVIEW,
+  //                               dipakai Finance Staff untuk mengecek data
+  //                               rekening/bank penerima sebelum menyetujui
+  //
+  // purpose dihilangkan = FINAL, supaya client lama tidak berubah perilakunya.
+  //
+  // Sengaja lebih ketat dari READ_ROLES: file ini dipakai untuk mengeksekusi
+  // uang di Qlola, jadi hanya peran yang memproses/menyetujui yang boleh
+  // mengunduhnya. FrontDesk (pembuat batch) TIDAK termasuk — membuat pencatatan
+  // bukan berarti boleh menarik instruksi pembayaran ke bank.
+  // ComplianceLead, OperationSupervisor, ComplaintHandling & Auditor juga tidak:
+  // peran pengawasan, bukan pelaksana. Kedua tujuan memakai daftar peran yang
+  // sama; FinanceStaff memang pemakai utama jalur REVIEW.
+  // SystemAdmin/Director tetap masuk lewat bypass RolesGuard.
+  //
+  // Harus dideklarasikan sebelum @Get("bulk-batches/:id")? Tidak — path ini
+  // lebih panjang dan spesifik, jadi tidak bentrok.
+  @Get("bulk-batches/:id/exports/bri-qlola")
+  @Roles("FinanceStaff", "FinanceManager")
+  async exportBriQlola(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Res() res: Response,
+    @Query("purpose") purpose?: string,
+  ) {
+    const requested = (purpose ?? "FINAL").toUpperCase();
+    if (!QLOLA_PURPOSES.includes(requested as QlolaPurpose)) {
+      throw new BadRequestException(
+        `purpose harus salah satu dari: ${QLOLA_PURPOSES.join(", ")}`,
+      );
+    }
+
+    const { fileName, buffer, eligible_count, total_count } =
+      await this.svc.exportBriQlola(id, req.user, requested as QlolaPurpose);
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    // Dipakai FE untuk memberi tahu "12 dari 15 transaksi siap diekspor".
+    res.setHeader("X-Qlola-Eligible-Count", String(eligible_count));
+    res.setHeader("X-Qlola-Total-Count", String(total_count));
+    res.setHeader("X-Qlola-Purpose", requested);
+    res.setHeader(
+      "Access-Control-Expose-Headers",
+      "Content-Disposition, X-Qlola-Eligible-Count, X-Qlola-Total-Count, X-Qlola-Purpose",
+    );
+    res.end(buffer);
   }
 
   // BULK BATCH DETAIL — ringkasan batch + seluruh transfer anak.

@@ -1,0 +1,81 @@
+﻿kesh_bank_code,kesh_bank_name,bri_bank_code,bri_bank_name,bic,match_method,confidence,notes
+BRI,Bank Rakyat Indonesia,,,,UNMAPPED,N/A,"Tidak ada baris Bank Rakyat Indonesia di sheet ""Bank Code"" BRI. Transfer BRI→BRI adalah IFT (inhouse), bukan BIF — wajar di luar cakupan export ini."
+MANDIRI,Bank Mandiri,8,PT. BANK MANDIRI (PERSERO) TBK,BMRIIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BNI,Bank Negara Indonesia,9,PT. BANK NEGARA INDONESIA (PERSERO),BNINIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BTN,Bank Tabungan Negara,200,PT. BANK TABUNGAN NEGARA (PERSERO),BTANIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BCA,Bank Central Asia,14,PT. BANK CENTRAL ASIA Tbk.,CENAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+CIMB,CIMB Niaga,22,PT. BANK CIMB NIAGA TBK,BNIAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+DANAMON,Bank Danamon,11,PT. BANK DANAMON INDONESIA Tbk.,BDINIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+PERMATA,Bank Permata,13,"PT. BANK PERMATA,TBK",BBBAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+MAYBANK,Maybank Indonesia,16,PT. BANK MAYBANK INDONESIA Tbk.,IBBKIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+OCBC,OCBC NISP,28,"PT. BANK OCBC NISP, Tbk.",NISPIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+PANIN,Panin Bank,19,PT. PANIN BANK Tbk.,PINBIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+NOBU,Bank Nobu,503,PT. BANK NATIONALNOBU,LFIBIDJ1,NORMALIZED_NAME,HIGH,"Sheet BRI menulis ""NATIONALNOBU""; Bank Nobu = PT Bank Nationalnobu. Substring, entitas sama."
+MEGA,Bank Mega,426,PT. BANK MEGA Tbk.,MEGAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BUKOPIN,KB Bukopin,441,PT. BANK KB BUKOPIN Tbk.,BBUKIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+SINARMAS,Bank Sinarmas,153,PT. BANK SINARMAS,SBJKIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+WOORI,Bank Woori Saudara,212,"PT. BANK WOORI SAUDARA INDONESIA 1906,TBK",BSDRIDJA,NORMALIZED_NAME,HIGH,"Sheet BRI: ""BANK WOORI SAUDARA INDONESIA 1906,TBK"". Entitas sama, hanya sufiks tahun/badan hukum."
+BTPN,Bank BTPN,,,,UNMAPPED,N/A,"Tidak ada baris BTPN konvensional; sheet hanya memuat 547 BTPN Syariah. Kode 213 kini bernama ""PT Bank SMBC Indonesia Tbk"" — lihat catatan SMBC."
+MAYAPADA,Bank Mayapada International,97,PT. BANK MAYAPADA Tbk.,MAYAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+MESTIKA,Bank Mestika Dharma,151,PT. BANK MESTIKA DHARMA,MEDHIDS1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+ARTHA_GRAHA,Bank Artha Graha Internasional,37,"PT. BANK ARTHA GRAHA INTERNASIONAL, TBK",ARTGIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BUMI_ARTA,Bank Bumi Arta,76,PT. BANK BUMI ARTA,BBAIIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+CAPITAL,Bank Capital Indonesia,54,PT BANK CAPITAL INDONESIA,BCIAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+VICTORIA,Bank Victoria International,566,PT. BANK VICTORIA INTERNATIONAL,VICTIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+GANESHA,Bank Ganesha,161,PT. BANK GANESHA,GNESIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+INDEX_SELINDO,Bank Index Selindo,555,BANK INDEX SELINDO,BIDXIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+SAHABAT_SAMPOERNA,Bank Sahabat Sampoerna,523,PT. BANK SAHABAT SAMPOERNA,BDIPIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+MULTIARTA_SENTOSA,Bank Multiarta Sentosa,548,PT. BANK MULTI ARTA SENTOSA,BMSEIDJA,NORMALIZED_NAME,HIGH,"Sheet BRI: ""BANK MULTI ARTA SENTOSA"". Beda spasi saja."
+HSBC,HSBC Indonesia,87,PT. BANK HSBC INDONESIA,HSBCIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+CITIBANK,Citibank Indonesia,31,"CITIBANK, NA",CITIIDJX,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+STANCHART,Standard Chartered Bank Indonesia,50,STANDARD CHARTERED BANK,SCBLIDJX,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+DBS,Bank DBS Indonesia,46,PT. BANK DBS INDONESIA,DBSBIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+UOB,Bank UOB Indonesia,23,PT. BANK UOB INDONESIA,BBIJIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+ANZ,Bank ANZ Indonesia,61,PT. BANK ANZ INDONESIA,ANZBIDJX,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BNP_PARIBAS,Bank BNP Paribas Indonesia,57,PT. BANK BNP PARIBAS INDONESIA,BNPAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+QNB,Bank QNB Indonesia,167,"PT. BANK QNB INDONESIA,TBK",AWANIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+CCB,China Construction Bank Indonesia,36,"PT. BANK CHINA CONSTRUCTION BANK INDONESIA, TBK",MCORIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+ICBC,Bank ICBC Indonesia,164,PT. BANK ICBC INDONESIA,ICBKIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+SMBC,Bank SMBC Indonesia,,,,AMBIGUOUS,LOW (tidak aktif),"DICABUT (migrasi 0069). Sheet BRI memuat dua entitas grup SMBC: 45 SUNIIDJ1 ""Bank Sumitomo Mitsui Indonesia"" dan 213 SUNIIDJA ""PT Bank SMBC Indonesia Tbk"" (kode 213 = kode BTPN yang berganti nama). Katalog KESH memuat ""BTPN"" DAN ""SMBC"" terpisah, jadi maksudnya tidak bisa dipastikan. Export diblokir sampai dikonfirmasi."
+HANA,Bank KEB Hana Indonesia,484,PT. BANK KEB HANA INDONESIA,HNBNIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+CTBC,Bank CTBC Indonesia,949,PT. BANK CTBC INDONESIA,CTCBIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+SHINHAN,Bank Shinhan Indonesia,152,PT. BANK SHINHAN INDONESIA,MEEKIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+IBK,Bank IBK Indonesia,945,PT. BANK AGRIS,IBKOIDJA,FORMER_NAME,MEDIUM,"Sheet BRI menulis ""PT. BANK AGRIS"" (945). Bank Agris berganti nama menjadi Bank IBK Indonesia. Tidak ada kandidat pesaing, TAPI nama di sheet tidak cocok sama sekali. PERLU KONFIRMASI BRI sebelum upload live."
+RESONA_PERDANIA,Bank Resona Perdania,47,PT. BANK RESONA PERDANIA,BPIAIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BSI,Bank Syariah Indonesia,451,PT BANK SYARIAH INDONESIA,BSMDIDJA,EXACT_NAME,HIGH,"Nama identik setelah normalisasi (""BANK SYARIAH INDONESIA"")."
+MUAMALAT,Bank Muamalat Indonesia,147,PT. BANK MUAMALAT INDONESIA,MUABIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+MEGA_SYARIAH,Bank Mega Syariah,506,PT. BANK MEGA SYARIAH,BUTGIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BTPN_SYARIAH,Bank BTPN Syariah,547,PT. BANK TABUNGAN PENSIUNAN NASIONAL SYARIAH,PUBAIDJ1,MANUAL_ALIAS,HIGH,BTPN = Bank Tabungan Pensiunan Nasional. Ekspansi akronim baku; hanya ada satu baris Syariah (547).
+PANIN_DUBAI_SYARIAH,Bank Panin Dubai Syariah,517,PT. BANK PANIN DUBAI SYARIAH,ARFAIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BJB,Bank BJB (Jabar Banten),110,PT. BANK PEMBANGUNAN DAERAH JABAR DAN BANTEN,PDJBIDJA,MANUAL_ALIAS,HIGH,BJB = BPD Jabar dan Banten (110). BUKAN BPD Banten (137) maupun Jabar Banten Syariah (425) — bank berbeda.
+BPD_DKI,Bank DKI,111,PT. BANK DKI,BDKIIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_JATENG,Bank Jateng,113,PT. BANK PEMBANGUNAN DAERAH JAWA TENGAH,PDJGIDJ1,MANUAL_ALIAS,HIGH,"Jateng = Jawa Tengah (113). Baris konvensional, bukan UUS."
+BPD_JATIM,Bank Jatim,114,PT. BANK PEMBANGUNAN DAERAH JATIM,PDJTIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_SUMUT,Bank Sumut,117,PT. BANK PEMBANGUNAN DAERAH SUMUT,PDSUIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_SUMSEL_BABEL,Bank Sumsel Babel,120,PT. BPD SUMSEL DAN BABEL,BSSPIDSP,NORMALIZED_NAME,HIGH,"Sheet BRI: ""BPD SUMSEL DAN BABEL"". Baris konvensional, bukan UUS."
+BPD_NAGARI,Bank Nagari (Sumatera Barat),118,PT. BANK PEMBANGUNAN DAERAH SUMATERA BARAT,PDSBIDJ1,MANUAL_ALIAS,HIGH,"Bank Nagari = BPD Sumatera Barat (118). Dipilih baris konvensional PDSBIDJ1, bukan UUS SYSBIDJ1."
+BPD_RIAU_KEPRI,Bank Riau Kepri,119,PT. BANK PEMBANGUNAN DAERAH RIAU KEPRI,PDRIIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_KALBAR,Bank Kalbar,123,PT.BANK PEMBANGUNAN DAERAH KALBAR,PDKBIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_KALSEL,Bank Kalsel,122,PT. BANK PEMBANGUNAN DAERAH KALSEL,PDKSIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_KALTENG,Bank Kalteng,125,PT. BPD KALIMANTAN TENGAH,PDKGIDJ1,MANUAL_ALIAS,HIGH,Kalteng = Kalimantan Tengah (125). Tidak ada baris UUS pesaing.
+BPD_KALTIMTARA,Bank Kaltimtara,124,PT. BANK PEMBANGUNAN DAERAH KALTIM DAN KALTARA,PDKTIDJ1,MANUAL_ALIAS,HIGH,"Kaltimtara = Kaltim dan Kaltara (124). Baris konvensional, bukan UUS."
+BPD_SULSELBAR,Bank Sulselbar,126,PT. BANK SULSELBAR,PDWSIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_SULUTGO,Bank SulutGo,127,PT. BANK PEMBANGUNAN DAERAH SULUT,PDWUIDJ1,FORMER_NAME,MEDIUM,"Sheet BRI masih ""BPD SULUT"" (127); bank telah berganti nama menjadi Bank SulutGo. Entitas sama, nama di sheet belum diperbarui. PERLU KONFIRMASI."
+BPD_NTB_SYARIAH,Bank NTB Syariah,128,PT. BANK PEMBANGUNAN DAERAH NUSA TENGGARAT BARAT SYARIAH,PDNBIDJ1,MANUAL_ALIAS,HIGH,"NTB = Nusa Tenggara Barat (128). Sheet BRI salah ketik ""TENGGARAT""."
+BPD_NTT,Bank NTT,130,PT.BANK PEMBANGUNAN DAERAH NTT,PDNTIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_PAPUA,Bank Papua,132,PT.BANK PEMBANGUNAN DAERAH PAPUA,PDIJIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_MALUKU_MALUT,Bank Maluku Malut,131,PT.BANK PEMBANGUNAN DAERAH MALUKU DAN MALUKU UTARA,PDMLIDJ1,NORMALIZED_NAME,HIGH,"Malut = Maluku Utara; sheet BRI: ""BPD MALUKU DAN MALUKU UTARA""."
+BPD_BENGKULU,Bank Bengkulu,133,PT. BPD BENGKULU,PDBKIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_LAMPUNG,Bank Lampung,121,PT.BANK PEMBANGUNAN DAERAH LAMPUNG,PDLPIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_ACEH_SYARIAH,Bank Aceh Syariah,116,PT. BANK ACEH SYARIAH,SYACIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+BPD_DIY,Bank BPD DIY,112,PT. BANK PEMBANGUNAN DAERAH DIY,PDYKIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+JAGO,Bank Jago,542,PT. BANK JAGO Tbk,ATOSIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+SEABANK,SeaBank Indonesia,535,PT. BANK SEABANK INDONESIA,KSEBIDJ1,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+NEOBANK,Bank Neo Commerce (neobank),,,,UNMAPPED,N/A,"Tidak ada di sheet ""Bank Code"" BRI."
+ALADIN,Bank Aladin Syariah,947,PT BANK ALADIN SYARIAH TBK,NETBIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+RAYA,Bank Raya Indonesia,494,PT. BANK RAYA INDONESIA TBK,AGTBIDJA,EXACT_NAME,HIGH,Nama badan hukum identik setelah normalisasi.
+ALLO,Allo Bank Indonesia,,,,UNMAPPED,N/A,"Tidak ada di sheet ""Bank Code"" BRI."
+BLU_BCA,blu by BCA Digital,501,PT. BANK DIGITAL BCA,BBLUIDJA,MANUAL_ALIAS,HIGH,blu by BCA Digital = PT Bank Digital BCA (501). Bukan BCA Syariah (536).
+SUPERBANK,Superbank Indonesia,,,,UNMAPPED,N/A,"Tidak ada di sheet ""Bank Code"" BRI."
+KROM,Krom Bank Indonesia,,,,UNMAPPED,N/A,"Tidak ada di sheet ""Bank Code"" BRI."
+SAQU,Bank Saqu,,,,UNMAPPED,N/A,"Tidak ada di sheet ""Bank Code"" BRI."
