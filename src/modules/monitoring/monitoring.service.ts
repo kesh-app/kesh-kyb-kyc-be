@@ -38,6 +38,18 @@ const CASH_THRESHOLD = 500_000_000; // LTKT cash single / aggregate
 const HIGH_VALUE_THRESHOLD = 100_000_000; // LTKM high-value alert
 const MANY_BENEFICIARIES_THRESHOLD = 5; // LTKM distinct beneficiaries/day
 
+// ── Waktu kejadian transfer (event time) ─────────────────────────────────────
+// Satu ekspresi dipakai SEMUA query monitoring supaya bucket harian tidak bisa
+// menyimpang antar-query. Urutan mengikuti umur data:
+//   transaction_date      → distempel saat Finance Manager APPROVE (final)
+//   submitted_at          → saat transfer diajukan; monitoring jalan di titik ini,
+//                           jadi ini yang benar untuk transfer yang belum final
+//   requested_transfer_at → legacy: dulu diisi saat draft dibuat
+//   created_at            → fallback terakhir (draft yang belum pernah diajukan)
+// `t` = alias tabel transfers.
+const TRANSFER_EVENT_TIME_SQL =
+  "COALESCE(t.transaction_date, t.submitted_at, t.requested_transfer_at, t.created_at)";
+
 // ── Rupiah formatter (used in alert matched_conditions) ──────────────────────
 function fmtRp(n: number): string {
   return `Rp${Math.round(n)
@@ -681,7 +693,7 @@ export class MonitoringService {
     const { rows } = await this.pool.query(
       `SELECT t.id, t.amount, t.transfer_method, t.transfer_channel, t.additional_info,
               t.beneficiary_account_number, t.sender_application_id,
-              COALESCE(t.transaction_date, t.requested_transfer_at, t.created_at) AS txn_at,
+              ${TRANSFER_EVENT_TIME_SQL} AS txn_at,
               a.id AS application_id, a.type AS app_type, a.person_id, a.business_id,
               r.risk_level, r.risk_factors,
               COALESCE(p.cif_no, b.cif_no)      AS cif_no,
@@ -699,7 +711,7 @@ export class MonitoringService {
 
   /**
    * Ambil semua transfer dengan CIF sama pada hari kalender yang sama
-   * (berbasis COALESCE(transaction_date, requested_transfer_at, created_at)).
+   * (berbasis TRANSFER_EVENT_TIME_SQL — sama persis dengan txn_at di atas).
    */
   private async loadSameCifSameDay(cifNo: string, txnAt: Date | string) {
     const { rows } = await this.pool.query(
@@ -710,7 +722,7 @@ export class MonitoringService {
        LEFT JOIN persons p ON p.id = a.person_id
        LEFT JOIN business_entities b ON b.id = a.business_id
        WHERE COALESCE(p.cif_no, b.cif_no) = $1
-         AND COALESCE(t.transaction_date, t.requested_transfer_at, t.created_at)::date = $2::date`,
+         AND ${TRANSFER_EVENT_TIME_SQL}::date = $2::date`,
       [cifNo, txnAt],
     );
     return rows;

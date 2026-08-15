@@ -42,6 +42,17 @@ const EDITABLE_STATUSES = ["DRAFT", "REVISION_REQUIRED"];
 const WIC_TRANSFER_MAX_AMOUNT = 100_000_000;
 const WIC_LIMIT_ERROR = "Walk-In Customer (WIC) memiliki limit transaksi maksimal Rp100.000.000.";
 
+// Tanggal Transaksi & Tanggal Diminta lahir dari jam PostgreSQL saat transfer
+// DISETUJUI (decide() APPROVE oleh FinanceManager) — bukan saat create, submit,
+// atau review antara. Tipe kolom menentukan fungsinya: transaction_date
+// TIMESTAMPTZ → now(), requested_transfer_at DATE → CURRENT_DATE.
+// COALESCE menjaga approval/review berikutnya tidak menimpa tanggal asli.
+// Fragment ini dipakai SEMUA jalur approval supaya tidak ada yang terlewat —
+// approval path baru wajib menyisipkannya.
+const APPROVAL_DATE_STAMP_SQL = `
+          transaction_date      = COALESCE(transaction_date, now()),
+          requested_transfer_at = COALESCE(requested_transfer_at, CURRENT_DATE),`;
+
 @Injectable()
 export class TransfersService {
   constructor(
@@ -255,9 +266,10 @@ export class TransfersService {
         dto.beneficiaryAccountName,
         dto.beneficiary_relationship_to_sender,
         dto.description ?? null,
-        // Tanggal Diminta bukan input user — lahir dari tanggal server saat
-        // transfer dibuat, sama untuk create tunggal maupun bulk.
-        new Date().toISOString().slice(0, 10),
+        // Tanggal Diminta bukan input user dan TIDAK lahir saat draft dibuat —
+        // distempel backend saat Finance Manager menyetujui (lihat decide()).
+        // Berlaku sama untuk create tunggal maupun bulk (keduanya lewat helper ini).
+        null,
         resolveUserId(user),
         senderApplicationId,
         partnerRef,
@@ -273,8 +285,8 @@ export class TransfersService {
         dto.beneficiary_customer_type ?? null,
         transferMethod,
         transferChannel,
-        // Draft selalu lahir tanpa tanggal transaksi — diisi backend saat submit.
-        // Berlaku untuk create tunggal maupun bulk (keduanya lewat helper ini).
+        // Draft selalu lahir tanpa tanggal transaksi — diisi backend saat
+        // persetujuan Finance Manager, bukan saat create maupun submit.
         null,
         dto.requested_execution_date ?? null,
         JSON.stringify(additionalInfo),
@@ -490,8 +502,8 @@ export class TransfersService {
         beneficiary_account_name=$9,
         beneficiary_relationship_to_sender=$27,
         description=$10,
-        -- $11 selalu null → Tanggal Diminta tidak bisa diubah lewat edit draft,
-        -- tetap tanggal saat transfer pertama kali dibuat.
+        -- $11 selalu null → Tanggal Diminta tidak bisa disetel lewat edit draft.
+        -- Draft baru tetap NULL sampai disetujui Finance Manager.
         requested_transfer_at=COALESCE($11, requested_transfer_at),
         source_account_no=COALESCE($12, source_account_no),
         source_account_name=COALESCE($13, source_account_name),
@@ -534,7 +546,7 @@ export class TransfersService {
         dto.transfer_method ?? null,
         dto.transfer_channel ?? null,
         // null → COALESCE mempertahankan nilai yang ada. Edit draft tidak boleh
-        // menyentuh tanggal transaksi; itu wewenang submit.
+        // menyentuh tanggal transaksi; itu wewenang persetujuan Finance Manager.
         null,
         dto.requested_execution_date ?? null,
         dto.additional_info ? JSON.stringify(dto.additional_info) : null,
@@ -796,7 +808,6 @@ export class TransfersService {
            status = 'PENDING_COMPLIANCE_REVIEW',
            submitted_by = $2,
            submitted_at = now(),
-           transaction_date = COALESCE(transaction_date, now()),
            updated_at = now()
          WHERE id = $1
          RETURNING *`,
@@ -832,15 +843,14 @@ export class TransfersService {
       return flagged.rows[0];
     }
 
-    // Tanggal transaksi lahir di sini, dari jam server, dalam UPDATE yang sama
-    // dengan perubahan status — bukan dari jam client. COALESCE membuat submit
-    // ulang dari REVISION_REQUIRED mempertahankan tanggal aslinya.
+    // Submit BUKAN persetujuan: tanggal transaksi & Tanggal Diminta tetap NULL
+    // di sini. Keduanya baru distempel saat Finance Manager menyetujui
+    // (decide() APPROVE) — lihat APPROVAL_DATE_STAMP_SQL.
     const next = await this.pool.query(
       `UPDATE transfers SET
        status = 'SUBMITTED',
        submitted_by = $2,
        submitted_at = now(),
-       transaction_date = COALESCE(transaction_date, now()),
        updated_at = now()
      WHERE id = $1
      RETURNING *`,
@@ -954,16 +964,20 @@ export class TransfersService {
           .join(" ")
       : (dto.report_notes ?? null);
 
-    // Jalur submit ketiga (DRAFT → compliance review) ikut menstempel tanggal
-    // transaksi, supaya tidak ada cara meninggalkan DRAFT tanpa tanggal.
+    // Jalur submit ketiga (DRAFT → compliance review) juga bukan persetujuan:
+    // tanggal tetap NULL sampai Finance Manager menyetujui. Tapi ini TETAP sebuah
+    // pengajuan, jadi submitted_by/submitted_at wajib terisi seperti dua jalur
+    // submit lainnya — monitoring dievaluasi tepat setelah ini dan memakai
+    // submitted_at sebagai waktu kejadian.
     const next = await this.pool.query(
       `UPDATE transfers SET
          status='PENDING_COMPLIANCE_REVIEW',
-         transaction_date = COALESCE(transaction_date, now()),
+         submitted_by=$2,
+         submitted_at=now(),
          updated_at=now()
        WHERE id=$1
        RETURNING *`,
-      [id],
+      [id, actorId],
     );
 
     await this.pool.query(
@@ -1066,11 +1080,14 @@ export class TransfersService {
     let next;
     if (dto.action === "APPROVE_TO_CONTINUE") {
       // Lanjut ke alur normal — transfer boleh direview Operation Supervisor.
+      // submitted_at di-COALESCE: ini bukan pengajuan baru, dan monitoring TIDAK
+      // dievaluasi ulang di sini. Menimpanya akan menggeser bucket harian
+      // transfer yang sudah terlanjur dievaluasi memakai waktu submit aslinya.
       next = await this.pool.query(
         `UPDATE transfers SET
            status='SUBMITTED',
-           submitted_by=$2,
-           submitted_at=now(),
+           submitted_by=COALESCE(submitted_by, $2),
+           submitted_at=COALESCE(submitted_at, now()),
            updated_at=now()
          WHERE id=$1
          RETURNING *`,
@@ -1492,13 +1509,15 @@ export class TransfersService {
     let next;
     if (dto.decision === "APPROVE") {
       // FinanceManager final approval directly completes the transfer as SUCCESS.
+      // Ini satu-satunya titik "draft disetujui": tanggal transaksi & Tanggal
+      // Diminta distempel di sini, dalam UPDATE yang sama dengan perubahan status.
       next = await this.pool.query(
         `UPDATE transfers SET
           status='COMPLETED',
           result='SUCCESS',
           approved_by=$2,
           approved_at=now(),
-          completed_at=now(),
+          completed_at=now(),${APPROVAL_DATE_STAMP_SQL}
           decision_notes=$3,
           updated_at=now()
         WHERE id=$1
@@ -1697,8 +1716,10 @@ export class TransfersService {
          t.batch_id, tb.batch_no, tb.bulk_reference_no,
          t.status, t.result, t.created_at, t.submitted_at, t.approved_at,
          t.completed_at, t.failed_at,
-         -- Tanggal transaksi kini dibuat backend saat submit; list ikut membawanya
-         -- supaya Pencatatan Transfer bisa menampilkannya tanpa panggil detail.
+         -- Tanggal transaksi dibuat backend saat transfer disetujui; list ikut
+         -- membawanya supaya Pencatatan Transfer bisa menampilkannya tanpa
+         -- panggil detail. requested_transfer_at sengaja tidak ikut: hanya
+         -- dipakai di detail/report, list tidak menampilkannya.
          t.transaction_date,
          t.source_of_funds, t.transaction_purpose,
          COALESCE(p.full_name, b.legal_name) AS sender_name,

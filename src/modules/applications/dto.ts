@@ -231,10 +231,6 @@ export class CreateBusinessDto {
   @IsString()
   legal_form_other?: string;
 
-  @IsString()
-  @IsNotEmpty()
-  incorporation_place!: string;
-
   @IsDateString()
   incorporation_date!: string;
 
@@ -299,10 +295,6 @@ export class CreateBusinessDto {
   @IsOptional()
   @IsString()
   business_activity_other?: string;
-
-  @IsOptional()
-  @IsString()
-  industry_code?: string; // KBLI
 
   @IsString()
   @IsNotEmpty()

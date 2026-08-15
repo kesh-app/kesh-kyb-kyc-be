@@ -184,7 +184,7 @@
 |-------|-------|
 | **Method** | `POST` |
 | **Endpoint** | `/applications/business` |
-| **Body** | `{"legal_name":"PT Test","legal_form":"PT","incorporation_place":"Jakarta","incorporation_date":"2020-01-01","business_license_number":"BL001","nib":"12345678901234567","npwp":"123456789012345","address_line":"Jl. Bisnis No.5","city":"Jakarta","province":"DKI Jakarta","postal_code":"12345","business_activity":"Perdagangan Umum","phone":"02112345678"}` |
+| **Body** | `{"legal_name":"PT Test","legal_form":"PT","incorporation_date":"2020-01-01","business_license_number":"BL001","nib":"12345678901234567","npwp":"123456789012345","address_line":"Jl. Bisnis No.5","city":"Jakarta","province":"DKI Jakarta","postal_code":"12345","business_activity":"Perdagangan Umum","phone":"02112345678"}` |
 | **Expected HTTP** | `201` |
 | **Expected Body** | `{id, status:"DRAFT"}` |
 

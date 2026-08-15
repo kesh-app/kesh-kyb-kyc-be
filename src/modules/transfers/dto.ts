@@ -59,9 +59,10 @@ export class CreateTransferDto {
   description?: string;
 
   // requestedTransferAt sengaja TIDAK ada di sini: "Tanggal Diminta" dibuat
-  // backend saat create (CURRENT_DATE), bukan diinput admin/frontline. Kalau
-  // FE lama masih mengirimnya, ValidationPipe `whitelist: true` membuangnya
-  // diam-diam — request tetap 200/201, nilainya diabaikan.
+  // backend saat transfer DISETUJUI Finance Manager (CURRENT_DATE), bukan saat
+  // create dan bukan diinput admin/frontline. Kalau FE lama masih mengirimnya,
+  // ValidationPipe `whitelist: true` membuangnya diam-diam — request tetap
+  // 200/201, nilainya diabaikan.
 
   // ── Transfer Recording v2 — SNAP-ready optional fields ──────────────
   // Semua opsional; backward compatible. Pakai snake_case agar mapping 1:1
@@ -104,9 +105,13 @@ export class CreateTransferDto {
   transfer_channel?: string;
 
   // transaction_date sengaja TIDAK ada di sini: tanggal transaksi dibuat backend
-  // saat submit (COALESCE(transaction_date, now())), bukan dipilih user. Kalau FE
-  // lama masih mengirimnya, ValidationPipe `whitelist: true` membuangnya diam-diam
-  // — request tetap 200, nilainya diabaikan.
+  // saat transfer DISETUJUI Finance Manager (COALESCE(transaction_date, now())),
+  // bukan saat submit dan bukan dipilih user. Kalau FE lama masih mengirimnya,
+  // ValidationPipe `whitelist: true` membuangnya diam-diam — request tetap 200,
+  // nilainya diabaikan.
+  //
+  // requested_execution_date di bawah BEDA: itu "Tanggal Eksekusi Diminta"
+  // (SNAP), memang input user dan tetap dipertahankan.
 
   @IsOptional() @IsDateString()
   requested_execution_date?: string;

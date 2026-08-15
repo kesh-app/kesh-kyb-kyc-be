@@ -1376,9 +1376,9 @@ export class ApplicationsService {
     // Kolom yang boleh diubah lewat endpoint ini. *_other dikelola pasangan
     // "Lainnya" di bawah; kolom nama provinsi/kota diturunkan dari dropdown code.
     const UPDATABLE = [
-      "legal_name", "legal_form", "incorporation_place", "incorporation_date",
+      "legal_name", "legal_form", "incorporation_date",
       "business_license_number", "nib", "npwp", "address_line", "city",
-      "province", "postal_code", "business_activity", "industry_code", "phone",
+      "province", "postal_code", "business_activity", "phone",
       "company_email", "pic_name", "pic_position", "pic_identity_number",
       "pic_identity_type", "representative_signature_name",
       "verification_officer", "supervisor", "source_of_funds",
@@ -1386,7 +1386,7 @@ export class ApplicationsService {
     ];
     // Wajib di create — dikirim kosong berarti salah input, bukan "hapus nilai".
     const REQUIRED = [
-      "legal_name", "legal_form", "incorporation_place", "incorporation_date",
+      "legal_name", "legal_form", "incorporation_date",
       "npwp", "address_line", "city", "province", "postal_code",
       "business_activity", "phone",
     ];
@@ -1635,8 +1635,8 @@ export class ApplicationsService {
       await client.query("BEGIN");
 
       const q = await client.query(
-        `INSERT INTO business_entities (legal_name, legal_form, incorporation_place, incorporation_date,
-          business_license_number, nib, npwp, address_line, city, province, postal_code, business_activity, industry_code, phone,
+        `INSERT INTO business_entities (legal_name, legal_form, incorporation_date,
+          business_license_number, nib, npwp, address_line, city, province, postal_code, business_activity, phone,
           deed_number, company_email,
           pic_name, pic_position, pic_identity_number, pic_identity_type,
           representative_signature_name, verification_officer, supervisor,
@@ -1647,12 +1647,11 @@ export class ApplicationsService {
           director_share_percentage, commissioner_share_percentage,
           deed_establishment_number, deed_latest_amendment_number)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-          $27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
+          $27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40)
          RETURNING id`,
         [
           dto.legal_name,
           dto.legal_form,
-          dto.incorporation_place,
           dto.incorporation_date,
           dto.business_license_number ?? null,
           dto.nib ?? null,
@@ -1662,7 +1661,6 @@ export class ApplicationsService {
           dto.province,
           dto.postal_code,
           dto.business_activity,
-          dto.industry_code || null,
           dto.phone,
           // deed_number (deprecated) di-mirror dari No. Akta Pendirian supaya
           // pembaca lama tetap dapat nilai yang benar.
@@ -1881,7 +1879,7 @@ export class ApplicationsService {
     if (app.business_id) {
       const { rows: biz } = await this.pool.query(
         `SELECT id, public_id, legal_name, legal_form, legal_form_other,
-                incorporation_place, incorporation_date,
+                incorporation_date,
                 deed_number, deed_establishment_number, deed_latest_amendment_number,
                 business_license_number, company_email,
                 nib, npwp, address_line, city, province, postal_code,
@@ -1889,7 +1887,7 @@ export class ApplicationsService {
                 business_city_code, business_city_name,
                 business_district_code, business_district_name,
                 business_village_code, business_village_name,
-                phone, industry_code, business_activity, business_activity_other, cif_no,
+                phone, business_activity, business_activity_other, cif_no,
                 source_of_funds, source_of_funds_other,
                 business_relationship_purpose, business_relationship_purpose_other,
                 distribution_channel,

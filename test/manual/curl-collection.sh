@@ -190,7 +190,6 @@ BIZ_RES=$(curl -s -X POST "$BASE_URL/applications/business" \
   -d "{
     \"legal_name\": \"PT Test Bisnis $TS\",
     \"legal_form\": \"PT\",
-    \"incorporation_place\": \"Jakarta\",
     \"incorporation_date\": \"2020-01-01\",
     \"business_license_number\": \"BL$TS\",
     \"nib\": \"NIB$TS\",

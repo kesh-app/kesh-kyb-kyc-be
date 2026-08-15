@@ -2019,6 +2019,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       // J2: status baru
       expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+      // Jalur submit ketiga ini juga bukan persetujuan — tanggal masih kosong.
+      expect(res.body.transaction_date).toBeNull();
+      expect(res.body.requested_transfer_at).toBeNull();
       // J3: review row OPEN + reported_by + reported_at (backend timestamp)
       expect(res.body.compliance_review_status).toBe('OPEN');
       const review = res.body.latest_compliance_review;
@@ -2262,7 +2265,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `PT Test Bisnis ${SUFFIX}`,
           legal_form: 'PT',
-          incorporation_place: 'Jakarta',
           incorporation_date: '2020-01-01',
           deed_number: `AKTA-G01-${SUFFIX}`,
           business_license_number: `BL${SUFFIX}`,
@@ -2373,7 +2375,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return {
         legal_name: `PT CDD ${tag} ${SUFFIX}`,
         legal_form: 'PT',
-        incorporation_place: 'Jakarta',
         incorporation_date: '2019-06-01',
         deed_number: `AKTA-${tag}-${SUFFIX}`,
         business_license_number: `IZN${tag}${SUFFIX}`,
@@ -2604,7 +2605,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `PT ReqDoc ${tag} ${u}`,
           legal_form: 'PT',
-          incorporation_place: 'Jakarta',
           incorporation_date: '2020-03-03',
           deed_number: `AKTA-${tag}-${u}`,
           business_license_number: `IZN${tag}${u}`,
@@ -2765,7 +2765,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const body: Record<string, unknown> = {
         legal_name: `PT Izin ${tag} ${u}`,
         legal_form: 'PT',
-        incorporation_place: 'Jakarta',
         incorporation_date: '2020-04-04',
         deed_number: `AKTA-${tag}-${u}`,
         npwp: npwp15(u),
@@ -2856,7 +2855,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return {
         legal_name: `PT GE ${u}`,
         legal_form: 'PT',
-        incorporation_place: 'Jakarta',
         incorporation_date: '2020-05-05',
         deed_number: `AKTA-GE-${u}`,
         business_license_number: `IZN-GE-${u}`,
@@ -3375,7 +3373,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return {
         legal_name: `PT GU ${u}`,
         legal_form: 'PT',
-        incorporation_place: 'Jakarta',
         incorporation_date: '2018-03-03',
         deed_establishment_number: `AKTA-GU-${u}`,
         business_license_number: `IZN-GU-${u}`,
@@ -4823,16 +4820,18 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const b = res.body.business;
       expect(b).not.toBeNull();
       for (const field of [
-        'legal_name', 'legal_form', 'incorporation_place', 'incorporation_date',
+        'legal_name', 'legal_form', 'incorporation_date',
         'nib', 'npwp', 'address_line', 'city', 'province', 'postal_code',
         'phone', 'business_activity',
       ]) {
         expect(b[field]).toBeDefined();
       }
-      // Nama Dagang (trade_name) tidak lagi diekspos pada CDD form terbaru
+      // Nama Dagang (trade_name), Tempat Pendirian (incorporation_place) dan
+      // KBLI (industry_code) tidak lagi diekspos pada CDD form terbaru
       expect(Object.prototype.hasOwnProperty.call(b, 'trade_name')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(b, 'incorporation_place')).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(b, 'industry_code')).toBe(false);
       // field baru & opsional — key harus ada
-      expect(Object.prototype.hasOwnProperty.call(b, 'industry_code')).toBe(true);
       expect(Object.prototype.hasOwnProperty.call(b, 'deed_number')).toBe(true);
       expect(Object.prototype.hasOwnProperty.call(b, 'company_email')).toBe(true);
       expect(Object.prototype.hasOwnProperty.call(b, 'business_form')).toBe(true);
@@ -4924,7 +4923,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `Yayasan Kripto ${SUFFIX}`,
           legal_form: 'YAYASAN',
-          incorporation_place: 'Jakarta',
           incorporation_date: '2021-01-01',
           business_license_number: `BL_YK_${SUFFIX}`,
           nib: `NIB_YK_${SUFFIX}`,
@@ -6152,7 +6150,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return {
         legal_name: `PT GG ${tag} ${SUFFIX}`,
         legal_form: 'PT',
-        incorporation_place: 'Jakarta',
         incorporation_date: '2018-03-01',
         deed_number: `AKTA-GG-${tag}-${SUFFIX}`,
         business_license_number: `IZNGG${tag}${SUFFIX}`,
@@ -6755,7 +6752,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `PT CIF Nib Test ${SUFFIX}`,
           legal_form: 'PT',
-          incorporation_place: 'Jakarta',
           incorporation_date: '2020-01-01',
           deed_number: `AKTA-CIF-${SUFFIX}`,
           business_license_number: `BL_CIF_${SUFFIX}`,
@@ -6790,7 +6786,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `PT CIF Npwp Test ${SUFFIX}`,
           legal_form: 'CV',
-          incorporation_place: 'Bandung',
           incorporation_date: '2021-06-01',
           business_license_number: `BL_NPWP_${SUFFIX}`,
           nib: null,
@@ -6906,7 +6901,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `PT BO First Test ${SUFFIX}`,
           legal_form: 'PT',
-          incorporation_place: 'Jakarta',
           incorporation_date: '2022-01-01',
           deed_number: `AKTA-BOF-${SUFFIX}`,
           business_license_number: `BL_BOF_${SUFFIX}`,
@@ -7033,7 +7027,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `PT Indiv First Biz ${SUFFIX}`,
           legal_form: 'PT',
-          incorporation_place: 'Surabaya',
           incorporation_date: '2023-03-03',
           deed_number: `AKTA-IFB-${SUFFIX}`,
           business_license_number: `BL_IFB_${SUFFIX}`,
@@ -8791,6 +8784,212 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(row.staff_reviewed_by_name).toBeTruthy();
       expect(row.manager_reviewed_by_name).toBeTruthy();
     });
+
+    // ══════════════════════════════════════════════════════════
+    // T-ET. Waktu kejadian transfer (event time) untuk agregasi harian
+    //
+    // transaction_date & requested_transfer_at sekarang NULL sampai Finance
+    // Manager menyetujui, padahal monitoring dievaluasi jauh sebelum itu.
+    // Presedensi yang benar:
+    //   transaction_date → submitted_at → requested_transfer_at → created_at
+    //
+    // Cara mengamatinya: rule LTKM_STRUCTURING_DAILY hanya menyala kalau ≥ 2
+    // transfer CIF yang sama, masing-masing < 500M dan total ≥ 500M, jatuh di
+    // hari kalender yang SAMA. Jadi "probe" transfer 300M yang dibuat hari ini
+    // dipasangkan dengan transfer uji 300M: rule menyala ⇔ transfer uji
+    // dianggap terjadi hari ini juga. Tiap test memakai app (dan CIF) sendiri
+    // supaya agregasi tidak tercampur data test lain.
+    // ══════════════════════════════════════════════════════════
+    describe('T-ET. Transfer event time precedence', () => {
+      // Semua tag harus angka: identity_number & nomor rekening tujuan
+      // divalidasi digits-only.
+      const ET = SUFFIX;
+
+      /** Geser kolom waktu transfer ke `days` hari lalu (atau NULL). */
+      async function setDates(
+        transferId: string,
+        cols: Record<string, string | null>,
+      ) {
+        const sets = Object.entries(cols)
+          .map(([c, v]) => `${c} = ${v === null ? 'NULL' : v}`)
+          .join(', ');
+        await pgPool.query(`UPDATE transfers SET ${sets} WHERE id=$1`, [
+          Number(transferId),
+        ]);
+      }
+
+      /**
+       * true kalau transfer uji dianggap jatuh di hari ini oleh monitoring.
+       * Probe dibuat sekarang, jadi event time-nya pasti hari ini.
+       */
+      async function bucketsToday(appId: string, tag: string): Promise<boolean> {
+        const probe = await createTransfer(appId, {
+          amount: 300_000_000,
+          benef: `${tag}9`,
+        });
+        const ev = await evaluate(probe);
+        expect(ev.status).toBe(201);
+        // Tanpa trigger sama sekali, endpoint mengembalikan { triggered: false }
+        // tanpa array triggers.
+        return (ev.body.triggers ?? []).some(
+          (t: any) => t.rule_code === 'LTKM_STRUCTURING_DAILY',
+        );
+      }
+
+      it('T-ET-01: dibuat Senin, diajukan Rabu, belum final → dihitung di hari submitted_at', async () => {
+        const appId = await createApprovedIndividual(`8010${ET}`, `0810${ET}`);
+        const trId = await createTransfer(appId, { amount: 300_000_000, benef: `9101${ET}` });
+
+        // Draft dibuat 3 hari lalu, lalu benar-benar diajukan hari ini.
+        await setDates(trId, { created_at: `now() - interval '3 days'` });
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+
+        const row = await pgPool.query(
+          `SELECT transaction_date, requested_transfer_at, submitted_at FROM transfers WHERE id=$1`,
+          [Number(trId)],
+        );
+        // Submit bukan persetujuan: dua kolom tanggal tetap kosong…
+        expect(row.rows[0].transaction_date).toBeNull();
+        expect(row.rows[0].requested_transfer_at).toBeNull();
+        // …jadi submitted_at yang harus menentukan bucket, bukan created_at.
+        expect(row.rows[0].submitted_at).not.toBeNull();
+
+        expect(await bucketsToday(appId, `9101${ET}`)).toBe(true);
+      });
+
+      it('T-ET-02: transfer sudah disetujui final → dihitung di hari transaction_date', async () => {
+        const appId = await createApprovedIndividual(`8020${ET}`, `0820${ET}`);
+        const trId = await createTransfer(appId, { amount: 300_000_000, benef: `9102${ET}` });
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        // SystemAdmin punya full access → boleh memutus langsung dari SUBMITTED.
+        const decided = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/decision`)
+          .set('Authorization', `Bearer ${sysAdminToken}`)
+          .send({ decision: 'APPROVE' })
+          .expect(201);
+        expect(decided.body.transaction_date).not.toBeNull();
+
+        // Mundurkan SEMUA sumber di bawahnya: kalau bucket tetap hari ini,
+        // transaction_date benar-benar menang.
+        await setDates(trId, {
+          created_at: `now() - interval '3 days'`,
+          submitted_at: `now() - interval '3 days'`,
+          requested_transfer_at: `CURRENT_DATE - 3`,
+        });
+
+        expect(await bucketsToday(appId, `9102${ET}`)).toBe(true);
+      });
+
+      it('T-ET-03: legacy tanpa submitted_at → jatuh ke requested_transfer_at', async () => {
+        const appId = await createApprovedIndividual(`8030${ET}`, `0830${ET}`);
+        const trId = await createTransfer(appId, { amount: 300_000_000, benef: `9103${ET}` });
+
+        // Baris lama: requested_transfer_at terisi (perilaku create versi lama),
+        // transaction_date & submitted_at kosong, created_at 3 hari lalu.
+        await setDates(trId, {
+          created_at: `now() - interval '3 days'`,
+          submitted_at: null,
+          transaction_date: null,
+          requested_transfer_at: `CURRENT_DATE`,
+        });
+
+        expect(await bucketsToday(appId, `9103${ET}`)).toBe(true);
+      });
+
+      it('T-ET-04: hanya created_at yang tersedia → created_at dipakai', async () => {
+        const appId = await createApprovedIndividual(`8040${ET}`, `0840${ET}`);
+
+        // Draft murni hari ini — semua kolom lain NULL.
+        const today = await createTransfer(appId, { amount: 300_000_000, benef: `9104${ET}` });
+        expect(await bucketsToday(appId, `9104${ET}`)).toBe(true);
+
+        // Kontrol negatif: created_at 3 hari lalu → tidak boleh ikut bucket
+        // hari ini. Tanpa ini, test di atas juga lulus untuk alasan yang salah.
+        await setDates(today, { created_at: `now() - interval '3 days'` });
+        const other = await createApprovedIndividual(`8041${ET}`, `0841${ET}`);
+        const stale = await createTransfer(other, { amount: 300_000_000, benef: `9114${ET}` });
+        await setDates(stale, { created_at: `now() - interval '3 days'` });
+        expect(await bucketsToday(other, `9114${ET}`)).toBe(false);
+      });
+
+      it('T-ET-05: transfer jalur compliance (belum final) tetap memakai submitted_at', async () => {
+        const appId = await createApprovedIndividual(`8050${ET}`, `0850${ET}`);
+        const trId = await createTransfer(appId, { amount: 300_000_000, benef: `9105${ET}` });
+        await setDates(trId, { created_at: `now() - interval '3 days'` });
+
+        const flagged = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/submit-compliance-review`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ red_flags: ['UNUSUAL_VOLUME'], report_notes: 'uji event time' })
+          .expect(201);
+        expect(flagged.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+        // Jalur ini dulu tidak mengisi submitted_at sama sekali.
+        expect(flagged.body.submitted_at).not.toBeNull();
+        expect(flagged.body.transaction_date ?? null).toBeNull();
+
+        expect(await bucketsToday(appId, `9105${ET}`)).toBe(true);
+      });
+
+      it('T-ET-06: resubmit setelah revisi memajukan submitted_at; lanjut-compliance tidak', async () => {
+        const appId = await createApprovedIndividual(`8060${ET}`, `0860${ET}`);
+        const trId = await createTransfer(appId, { amount: 10_000_000, benef: `9106${ET}` });
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        const first = (
+          await pgPool.query(`SELECT submitted_at FROM transfers WHERE id=$1`, [Number(trId)])
+        ).rows[0].submitted_at;
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'lanjut' })
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'RETURN', notes: 'mohon perbaiki nominal' })
+          .expect(201);
+
+        // Resubmit = pengajuan baru DAN monitoring dievaluasi ulang, jadi
+        // submitted_at memang harus maju ke waktu pengajuan terbaru.
+        const resubmitted = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        expect(new Date(resubmitted.body.submitted_at).getTime()).toBeGreaterThan(
+          new Date(first).getTime(),
+        );
+
+        // Sebaliknya: APPROVE_TO_CONTINUE bukan pengajuan baru dan TIDAK memicu
+        // evaluasi ulang, jadi submitted_at asli harus dipertahankan.
+        const appId2 = await createApprovedIndividual(`8061${ET}`, `0861${ET}`);
+        const trId2 = await createTransfer(appId2, { amount: 10_000_000, benef: `9116${ET}` });
+        const flagged = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId2}/submit-compliance-review`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ red_flags: ['UNUSUAL_VOLUME'], report_notes: 'uji submitted_at' })
+          .expect(201);
+        const continued = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId2}/compliance-review`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ action: 'APPROVE_TO_CONTINUE' })
+          .expect(201);
+        expect(continued.body.status).toBe('SUBMITTED');
+        expect(new Date(continued.body.submitted_at).getTime()).toBe(
+          new Date(flagged.body.submitted_at).getTime(),
+        );
+      });
+    });
   });
 
   // ══════════════════════════════════════════════════════════
@@ -9234,7 +9433,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: ph1BizName,
           legal_form: 'PT',
-          incorporation_place: 'Surabaya',
           incorporation_date: '2019-07-01',
           deed_number: `AKTA-PH1-${SUFFIX}`,
           business_license_number: `BL_PH1_${PH1_SUFFIX}`,
@@ -11541,7 +11739,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({
           legal_name: `PT RBA Complete ${sfx}`,
           legal_form: 'PT',
-          incorporation_place: 'Jakarta',
           incorporation_date: '2020-01-01',
           deed_number: `AKTA-R03-${SUFFIX}`,
           nib: `1234567890${sfx.replace(/\D/g, '').slice(0, 3).padEnd(3, '0')}`,
@@ -12608,11 +12805,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
     let ztTransferId: string;
 
-    // ── Tanggal transaksi dibuat backend, bukan dipilih user ──────────────
-    // Draft lahir tanpa tanggal; tanggal distempel dari jam server (now()) di
-    // UPDATE yang sama dengan perubahan status saat submit. COALESCE menjaga
-    // submit ulang tidak menimpa tanggal asli.
-    describe('ZD. transaction_date di-generate backend saat submit', () => {
+    // ── Tanggal transaksi & Tanggal Diminta dibuat backend saat DISETUJUI ──
+    // Draft lahir tanpa kedua tanggal dan tetap kosong sepanjang submit dan
+    // review antara (Ops SPV layer 1, Finance Staff layer 2). Keduanya baru
+    // distempel dari jam PostgreSQL saat FinanceManager menyetujui
+    // (decide() APPROVE → COMPLETED), dalam UPDATE yang sama dengan perubahan
+    // status. COALESCE menjaga nilai yang sudah ada tidak pernah ditimpa.
+    describe('ZD. transaction_date & requested_transfer_at di-generate backend saat disetujui', () => {
       /** Ambil satu transfer lewat detail endpoint. */
       async function detail(txId: string) {
         const res = await request(app.getHttpServer())
@@ -12622,7 +12821,48 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         return res.body;
       }
 
-      it('ZD-01: create tanpa transaction_date → 201 DRAFT, transaction_date null', async () => {
+      /** Submit → Ops SPV layer 1 → Finance Staff layer 2 (berhenti sebelum approve). */
+      async function advanceToManagerApproval(txId: string) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        return request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+      }
+
+      /** Persetujuan final FinanceManager — satu-satunya event yang menstempel tanggal. */
+      async function approveFinal(txId: string) {
+        return request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/decision`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .send({ decision: 'APPROVE' })
+          .expect(201);
+      }
+
+      /** Seluruh rantai sampai COMPLETED. */
+      async function approveFully(txId: string) {
+        await advanceToManagerApproval(txId);
+        return approveFinal(txId);
+      }
+
+      // Kolom DATE di-parse pg sebagai midnight lokal lalu di-serialize ke ISO
+      // UTC — bandingkan lewat konversi yang sama, bukan string tanggal mentah,
+      // supaya tidak rapuh terhadap timezone runner.
+      function todayAsDateColumnIso() {
+        const d = new Date();
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString();
+      }
+
+      it('ZD-01: create draft → 201 DRAFT, kedua tanggal null', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -12631,23 +12871,63 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
         expect(res.body.status).toBe('DRAFT');
         expect(res.body.transaction_date).toBeNull();
+        expect(res.body.requested_transfer_at).toBeNull();
       });
 
-      it('ZD-02: transaction_date kiriman client diabaikan, tidak tersimpan', async () => {
-        const clientDate = '2020-01-01T00:00:00.000Z';
+      it('ZD-02: kedua tanggal kiriman client diabaikan, tidak tersimpan', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
-          .send(txBody({ transaction_date: clientDate }))
+          .send(txBody({
+            transaction_date: '2020-01-01T00:00:00.000Z',
+            requestedTransferAt: '2020-01-01',
+            requested_transfer_at: '2020-01-01',
+          }))
           .expect(201);
 
         // Tetap 201 (whitelist membuang field, bukan menolak request) tapi
         // nilainya tidak pernah menyentuh DB.
         expect(res.body.transaction_date).toBeNull();
-        expect(await detail(String(res.body.id))).toMatchObject({ transaction_date: null });
+        expect(res.body.requested_transfer_at).toBeNull();
+        expect(await detail(String(res.body.id))).toMatchObject({
+          transaction_date: null,
+          requested_transfer_at: null,
+        });
       });
 
-      it('ZD-03: submit menstempel transaction_date otomatis, dekat waktu server', async () => {
+      it('ZD-03: submit BUKAN persetujuan → kedua tanggal tetap null', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody({ transaction_date: '2020-01-01T00:00:00.000Z' }))
+          .expect(201);
+        const txId = String(created.body.id);
+
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/submit`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(201);
+
+        expect(res.body.status).toBe('SUBMITTED');
+        expect(res.body.transaction_date).toBeNull();
+        expect(res.body.requested_transfer_at).toBeNull();
+      });
+
+      it('ZD-03b: review antara (layer 1 & 2) belum menstempel tanggal', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const txId = String(created.body.id);
+
+        const afterLayer2 = await advanceToManagerApproval(txId);
+        expect(afterLayer2.body.status).toBe('PENDING_FINANCE_MANAGER_APPROVAL');
+        expect(afterLayer2.body.transaction_date).toBeNull();
+        expect(afterLayer2.body.requested_transfer_at).toBeNull();
+      });
+
+      it('ZD-04: persetujuan FinanceManager menstempel kedua tanggal dari jam server', async () => {
         const created = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -12656,14 +12936,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         const txId = String(created.body.id);
 
         const before = Date.now();
-        const res = await request(app.getHttpServer())
-          .post(`${BASE}/transfers/${txId}/submit`)
-          .set('Authorization', `Bearer ${frontDeskToken}`)
-          .expect(201);
+        const res = await approveFully(txId);
         const after = Date.now();
 
-        expect(res.body.status).toBe('SUBMITTED');
+        expect(res.body.status).toBe('COMPLETED');
         expect(res.body.transaction_date).not.toBeNull();
+        // requested_transfer_at kolom DATE → CURRENT_DATE, bukan now().
+        expect(res.body.requested_transfer_at).toBe(todayAsDateColumnIso());
 
         // Jendela longgar: jam Postgres dan jam proses test bisa sedikit beda.
         // Cukup ketat untuk menangkap tanggal client (2020) atau tanggal basi.
@@ -12673,7 +12952,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(stamped).toBeLessThanOrEqual(after + SKEW_MS);
       });
 
-      it('ZD-04: submit ulang setelah dikembalikan TIDAK menimpa transaction_date', async () => {
+      it('ZD-04b: dikembalikan lalu diajukan ulang → tanggal baru lahir saat disetujui', async () => {
         const created = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -12681,13 +12960,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(201);
         const txId = String(created.body.id);
 
-        const submitted = await request(app.getHttpServer())
+        await request(app.getHttpServer())
           .post(`${BASE}/transfers/${txId}/submit`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .expect(201);
-        const original = submitted.body.transaction_date;
-        expect(original).not.toBeNull();
-
         await request(app.getHttpServer())
           .post(`${BASE}/transfers/${txId}/supervisor-review`)
           .set('Authorization', `Bearer ${operationSupervisorToken}`)
@@ -12700,19 +12976,42 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .send({ action: 'RETURN', notes: 'Mohon perbaiki nama penerima' })
           .expect(201);
         expect(returned.body.status).toBe('REVISION_REQUIRED');
-        // Dikembalikan tidak menghapus tanggal yang sudah ada.
-        expect(returned.body.transaction_date).toBe(original);
+        // Belum pernah disetujui → masih kosong.
+        expect(returned.body.transaction_date).toBeNull();
+        expect(returned.body.requested_transfer_at).toBeNull();
 
-        const resubmitted = await request(app.getHttpServer())
-          .post(`${BASE}/transfers/${txId}/submit`)
-          .set('Authorization', `Bearer ${frontDeskToken}`)
-          .expect(201);
-
-        expect(resubmitted.body.status).toBe('SUBMITTED');
-        expect(resubmitted.body.transaction_date).toBe(original);
+        const approved = await approveFully(txId);
+        expect(approved.body.status).toBe('COMPLETED');
+        expect(approved.body.transaction_date).not.toBeNull();
+        expect(approved.body.requested_transfer_at).not.toBeNull();
       });
 
-      it('ZD-05: edit draft tidak dapat menyetel transaction_date', async () => {
+      it('ZD-04c: COALESCE — nilai lama (data legacy) tidak ditimpa saat disetujui', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const txId = String(created.body.id);
+
+        // Simulasikan baris legacy yang sudah terlanjur punya tanggal dari
+        // perilaku lama (stamping saat create/submit).
+        const legacyTs = '2020-05-05T03:04:05.000Z';
+        const legacyDate = '2020-05-05';
+        await pgPool.query(
+          `UPDATE transfers SET transaction_date=$2, requested_transfer_at=$3 WHERE id=$1`,
+          [txId, legacyTs, legacyDate],
+        );
+
+        const approved = await approveFully(txId);
+        expect(approved.body.status).toBe('COMPLETED');
+        expect(new Date(approved.body.transaction_date).toISOString()).toBe(legacyTs);
+        expect(approved.body.requested_transfer_at).toBe(
+          new Date(2020, 4, 5).toISOString(),
+        );
+      });
+
+      it('ZD-05: edit draft tidak dapat menyetel kedua tanggal', async () => {
         const created = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -12721,15 +13020,21 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         const txId = String(created.body.id);
 
         // UpdateTransferDto extends CreateTransferDto → field wajib create tetap
-        // wajib di PATCH, jadi kirim body utuh plus transaction_date.
+        // wajib di PATCH, jadi kirim body utuh plus kedua tanggal.
         await request(app.getHttpServer())
           .patch(`${BASE}/transfers/${txId}`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
-          .send(txBody({ transaction_date: '2020-01-01T00:00:00.000Z', description: 'edit' }))
+          .send(txBody({
+            transaction_date: '2020-01-01T00:00:00.000Z',
+            requestedTransferAt: '2020-01-01',
+            requested_transfer_at: '2020-01-01',
+            description: 'edit',
+          }))
           .expect(200);
 
         expect(await detail(txId)).toMatchObject({
           transaction_date: null,
+          requested_transfer_at: null,
           description: 'edit',
         });
       });
@@ -12749,10 +13054,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         for (const t of res.body.transfers) {
           expect(t.status).toBe('DRAFT');
           expect(t.transaction_date).toBeNull();
+          expect(t.requested_transfer_at).toBeNull();
         }
       });
 
-      it('ZD-07: anak bulk mendapat transaction_date saat di-submit sendiri', async () => {
+      it('ZD-07: anak bulk mendapat kedua tanggal saat disetujui sendiri', async () => {
         const bulk = await request(app.getHttpServer())
           .post(`${BASE}/transfers/bulk`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -12765,17 +13071,17 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
         const childId = String(bulk.body.transfers[0].id);
         expect(bulk.body.transfers[0].transaction_date).toBeNull();
+        expect(bulk.body.transfers[0].requested_transfer_at).toBeNull();
 
-        const submitted = await request(app.getHttpServer())
-          .post(`${BASE}/transfers/${childId}/submit`)
-          .set('Authorization', `Bearer ${frontDeskToken}`)
-          .expect(201);
+        // Tidak ada mass approval: tiap anak melalui approval-nya sendiri.
+        const approved = await approveFully(childId);
 
-        expect(submitted.body.status).toBe('SUBMITTED');
-        expect(submitted.body.transaction_date).not.toBeNull();
+        expect(approved.body.status).toBe('COMPLETED');
+        expect(approved.body.transaction_date).not.toBeNull();
+        expect(approved.body.requested_transfer_at).toBe(todayAsDateColumnIso());
       });
 
-      it('ZD-08: list & detail tetap membawa transaction_date (null untuk draft, terisi setelah submit)', async () => {
+      it('ZD-08: list & detail tetap membawa kedua tanggal (null untuk draft, terisi setelah disetujui)', async () => {
         const draft = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -12783,19 +13089,21 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(201);
         const draftId = String(draft.body.id);
 
-        const submitted = await request(app.getHttpServer())
+        const approved = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .send(txBody())
           .expect(201);
-        const submittedId = String(submitted.body.id);
-        await request(app.getHttpServer())
-          .post(`${BASE}/transfers/${submittedId}/submit`)
-          .set('Authorization', `Bearer ${frontDeskToken}`)
-          .expect(201);
+        const approvedId = String(approved.body.id);
+        await approveFully(approvedId);
 
-        expect(await detail(draftId)).toMatchObject({ transaction_date: null });
-        expect((await detail(submittedId)).transaction_date).not.toBeNull();
+        expect(await detail(draftId)).toMatchObject({
+          transaction_date: null,
+          requested_transfer_at: null,
+        });
+        const approvedDetail = await detail(approvedId);
+        expect(approvedDetail.transaction_date).not.toBeNull();
+        expect(approvedDetail.requested_transfer_at).not.toBeNull();
 
         const list = await request(app.getHttpServer())
           .get(`${BASE}/transfers`)
@@ -12803,17 +13111,90 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(200);
 
         const draftRow = list.body.find((t: any) => String(t.id) === draftId);
-        const submittedRow = list.body.find((t: any) => String(t.id) === submittedId);
+        const approvedRow = list.body.find((t: any) => String(t.id) === approvedId);
         expect(draftRow).toBeDefined();
-        expect(submittedRow).toBeDefined();
+        expect(approvedRow).toBeDefined();
+        // List hanya membawa transaction_date; requested_transfer_at cukup di
+        // detail/report, jadi tidak diassert di sini.
         expect(draftRow).toHaveProperty('transaction_date', null);
-        expect(submittedRow.transaction_date).not.toBeNull();
+        expect(approvedRow.transaction_date).not.toBeNull();
+      });
+
+      it('ZD-09: requested_execution_date tetap input user & tidak terpengaruh approval', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody({ requested_execution_date: '2027-03-04' }))
+          .expect(201);
+        const txId = String(created.body.id);
+
+        // Nilai user tersimpan sejak draft — beda dari dua tanggal
+        // system-generated yang masih null. Dibandingkan round-trip (bukan ke
+        // konstanta) karena kolomnya TIMESTAMPTZ: '2027-03-04' disimpan sebagai
+        // midnight zona server, bukan midnight UTC.
+        const asDraft = await detail(txId);
+        const userDate = asDraft.requested_execution_date;
+        expect(userDate).not.toBeNull();
+        expect(asDraft.transaction_date).toBeNull();
+        expect(asDraft.requested_transfer_at).toBeNull();
+
+        const approved = await approveFully(txId);
+        // Approval menstempel dua tanggal system, tidak menyentuh milik user.
+        expect(approved.body.requested_execution_date).toBe(userDate);
+        expect(approved.body.transaction_date).not.toBeNull();
+        expect(approved.body.requested_transfer_at).not.toBeNull();
+      });
+
+      it('ZD-10: jalur compliance — kosong sampai akhirnya disetujui FinanceManager', async () => {
+        const created = await request(app.getHttpServer())
+          .post(`${BASE}/transfers`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send(txBody())
+          .expect(201);
+        const txId = String(created.body.id);
+
+        const flagged = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/submit-compliance-review`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ red_flags: ['UNUSUAL_VOLUME'], report_notes: 'Perlu review.' })
+          .expect(201);
+        expect(flagged.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+        expect(flagged.body.transaction_date).toBeNull();
+        expect(flagged.body.requested_transfer_at).toBeNull();
+
+        const cleared = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/compliance-review`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ action: 'APPROVE_TO_CONTINUE', decision_notes: 'Lanjut.' })
+          .expect(201);
+        // Compliance "Setujui untuk Dilanjutkan" bukan persetujuan draft.
+        expect(cleared.body.status).toBe('SUBMITTED');
+        expect(cleared.body.transaction_date).toBeNull();
+        expect(cleared.body.requested_transfer_at).toBeNull();
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/supervisor-review`)
+          .set('Authorization', `Bearer ${operationSupervisorToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+
+        const approved = await approveFinal(txId);
+        expect(approved.body.status).toBe('COMPLETED');
+        expect(approved.body.transaction_date).not.toBeNull();
+        expect(approved.body.requested_transfer_at).toBe(todayAsDateColumnIso());
       });
     });
 
-    // ── Tanggal Diminta (requested_transfer_at) dibuat backend, bukan diinput
-    // admin/frontline ─────────────────────────────────────────────────────
-    describe('ZE. requested_transfer_at di-generate backend, bukan input user', () => {
+    // ── Tanggal Diminta (requested_transfer_at) tidak lahir saat create ────
+    // Dulu kolom ini diisi CURRENT_DATE saat draft dibuat. Sekarang ikut
+    // transaction_date: baru distempel saat FinanceManager menyetujui, jadi
+    // draft yang belum disetujui selalu kosong. Lihat ZD untuk stamping-nya.
+    describe('ZE. requested_transfer_at tidak lagi di-generate saat create', () => {
       async function detail(txId: string) {
         const res = await request(app.getHttpServer())
           .get(`${BASE}/transfers/${txId}`)
@@ -12822,42 +13203,34 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         return res.body;
       }
 
-      // pg mem-parse kolom DATE sebagai midnight lokal, lalu JSON serialization
-      // mengubahnya ke ISO UTC — bandingkan dengan konversi yang sama, bukan
-      // string tanggal mentah, supaya tidak rapuh terhadap timezone runner.
-      function todayAsDateColumnIso() {
-        const d = new Date();
-        return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString();
-      }
-
-      it('ZE-01: create tanpa requestedTransferAt → tetap terisi tanggal hari ini', async () => {
+      it('ZE-01: create → requested_transfer_at null, bukan tanggal hari ini', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .send(txBody())
           .expect(201);
 
-        expect(res.body.requested_transfer_at).toBe(todayAsDateColumnIso());
+        expect(res.body.requested_transfer_at).toBeNull();
       });
 
-      it('ZE-02: requestedTransferAt kiriman client diabaikan, dipakai tanggal server', async () => {
+      it('ZE-02: requestedTransferAt kiriman client diabaikan, tetap null', async () => {
         const res = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .send(txBody({ requestedTransferAt: '2020-01-01' }))
           .expect(201);
 
-        expect(res.body.requested_transfer_at).toBe(todayAsDateColumnIso());
+        expect(res.body.requested_transfer_at).toBeNull();
       });
 
-      it('ZE-03: edit draft tidak dapat mengubah requested_transfer_at', async () => {
+      it('ZE-03: edit draft tidak dapat mengisi requested_transfer_at', async () => {
         const created = await request(app.getHttpServer())
           .post(`${BASE}/transfers`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .send(txBody())
           .expect(201);
         const txId = String(created.body.id);
-        const original = created.body.requested_transfer_at;
+        expect(created.body.requested_transfer_at).toBeNull();
 
         await request(app.getHttpServer())
           .patch(`${BASE}/transfers/${txId}`)
@@ -12866,7 +13239,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(200);
 
         expect(await detail(txId)).toMatchObject({
-          requested_transfer_at: original,
+          requested_transfer_at: null,
           description: 'edit',
         });
       });
@@ -14728,6 +15101,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const res = await submitTransfer(txId).expect(201);
       expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+      // Jalur watchlist bukan persetujuan: kedua tanggal tetap kosong sampai
+      // FinanceManager menyetujui (lihat ZD).
+      expect(res.body.transaction_date).toBeNull();
+      expect(res.body.requested_transfer_at).toBeNull();
 
       // Review row otomatis dengan red flag watchlist.
       const detail = await request(app.getHttpServer())
@@ -15989,7 +16366,6 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return {
         legal_name: `PT Wilayah ${seq} ${SUFFIX}`,
         legal_form: 'PT',
-        incorporation_place: 'Bandar Lampung',
         incorporation_date: '2021-05-05',
         deed_number: `AKTA-WL${seq}-${SUFFIX}`,
         deed_establishment_number: `AKTA-WL${seq}-${SUFFIX}`,
