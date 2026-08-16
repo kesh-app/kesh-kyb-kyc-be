@@ -12,7 +12,9 @@ import {
   AmlReviewDto,
   CloseComplaintDto,
   ComplaintFinanceReviewDto,
+  CooReviewDto,
   CreateComplaintDto,
+  FinanceManagerReviewDto,
   ListComplaintsQueryDto,
   OperationInvestigationDto,
   ResolveComplaintDto,
@@ -30,7 +32,13 @@ const COMPLAINT_STAGE_ROLE: Record<string, string | null> = {
   OPEN: "ComplaintHandling",
   WAITING_CUSTOMER_DATA: "ComplaintHandling",
   OPERATION_INVESTIGATION: "OperationSupervisor",
-  WAITING_BANK_CONFIRMATION: null,
+  WAITING_BANK_CONFIRMATION: "OperationSupervisor",
+  COO_REVIEW: "COO",
+  FINANCE_STAFF_REVIEW: "FinanceStaff",
+  FINANCE_MANAGER_REVIEW: "FinanceManager",
+  COMPLIANCE_REVIEW: "ComplianceLead",
+  COMPLIANCE_HOLD: "ComplianceLead",
+  COMPLAINT_HANDLING_FINALIZATION: "ComplaintHandling",
   AML_REVIEW: "ComplianceLead",
   AML_HOLD: "ComplianceLead",
   FINANCE_REVIEW: "FinanceStaff",
@@ -38,6 +46,27 @@ const COMPLAINT_STAGE_ROLE: Record<string, string | null> = {
   RESOLVED: "ComplaintHandling",
   REJECTED: "ComplaintHandling",
   CLOSED: null,
+};
+
+/**
+ * Tahap alur berbasis level (migration 0070). Tiket yang berada di salah satu
+ * status ini sedang dipegang role lain — ComplaintHandling tidak boleh
+ * menyelesaikannya dari luar giliran. Status legacy sengaja TIDAK masuk daftar
+ * ini supaya tiket lama tetap bisa ditutup seperti sebelumnya.
+ */
+const LEVEL_FLOW_STAGES = [
+  "COO_REVIEW",
+  "FINANCE_STAFF_REVIEW",
+  "FINANCE_MANAGER_REVIEW",
+  "COMPLIANCE_REVIEW",
+  "COMPLIANCE_HOLD",
+];
+
+/** Tujuan COO APPROVE — ditentukan complaint_level, bukan pilihan manual COO. */
+const COO_APPROVE_ROUTING: Record<string, string> = {
+  LEVEL_1: "COMPLAINT_HANDLING_FINALIZATION",
+  LEVEL_2: "FINANCE_STAFF_REVIEW",
+  LEVEL_3: "COMPLIANCE_REVIEW",
 };
 
 @Injectable()
@@ -292,6 +321,7 @@ export class ComplaintsService {
               c.complaint_level, c.level_3_risk_category,
               c.data_verification_status, c.operation_investigation_result,
               c.aml_decision, c.finance_decision,
+              c.coo_decision, c.finance_manager_decision,
               c.resolution_notes, c.created_by, c.resolved_at, c.closed_at,
               c.created_at, c.updated_at
        FROM complaints c ${where}
@@ -340,7 +370,15 @@ export class ComplaintsService {
               COALESCE(u_verified.name, u_verified.email) AS data_verified_by_name,
               COALESCE(u_invest.name, u_invest.email) AS operation_investigated_by_name,
               COALESCE(u_aml.name, u_aml.email) AS aml_reviewed_by_name,
+              -- Alias eksplisit: tahap COMPLIANCE_REVIEW alur level memakai
+              -- kolom aml_* yang sama, jadi FE tidak perlu tahu nama lamanya.
+              COALESCE(u_aml.name, u_aml.email) AS compliance_reviewed_by_name,
+              c.aml_decision    AS compliance_decision,
+              c.aml_notes       AS compliance_notes,
+              c.aml_reviewed_at AS compliance_reviewed_at,
               COALESCE(u_finance.name, u_finance.email) AS finance_reviewed_by_name,
+              COALESCE(u_coo.name, u_coo.email) AS coo_reviewed_by_name,
+              COALESCE(u_fin_mgr.name, u_fin_mgr.email) AS finance_manager_reviewed_by_name,
               COALESCE(u_resolved.name, u_resolved.email) AS resolved_by_name,
               COALESCE(u_closed.name, u_closed.email) AS closed_by_name,
               COALESCE(p.phone, be.phone) AS customer_contact,
@@ -366,6 +404,8 @@ export class ComplaintsService {
          LEFT JOIN users u_invest ON u_invest.id = c.operation_investigated_by
          LEFT JOIN users u_aml ON u_aml.id = c.aml_reviewed_by
          LEFT JOIN users u_finance ON u_finance.id = c.finance_reviewed_by
+         LEFT JOIN users u_coo ON u_coo.id = c.coo_reviewed_by
+         LEFT JOIN users u_fin_mgr ON u_fin_mgr.id = c.finance_manager_reviewed_by
          LEFT JOIN users u_resolved ON u_resolved.id = c.resolved_by
          LEFT JOIN users u_closed ON u_closed.id = c.closed_by
          LEFT JOIN applications app ON app.id = c.customer_application_id
@@ -461,6 +501,19 @@ export class ComplaintsService {
       sets.push(`customer_communication_notes = ${addField(dto.customer_communication_notes)}`);
     }
     if (dto.complaint_level !== undefined) {
+      // Level menentukan routing setelah COO. Mengubahnya di tengah jalan akan
+      // membelokkan tiket yang sudah berjalan tanpa jejak, jadi hanya boleh
+      // selagi tiket masih di tangan ComplaintHandling. SystemAdmin/Director
+      // tetap punya kewenangan administratif seperti kebijakan yang berlaku.
+      const isAdmin = user.role === "SystemAdmin" || user.role === "Director";
+      if (
+        !isAdmin &&
+        !["OPEN", "WAITING_CUSTOMER_DATA"].includes(existing.status)
+      ) {
+        throw new BadRequestException(
+          "Complaint level terkunci setelah investigasi operasional dimulai.",
+        );
+      }
       sets.push(`complaint_level = ${addField(dto.complaint_level)}`);
       sets.push(
         `level_3_risk_category = ${addField(
@@ -468,13 +521,9 @@ export class ComplaintsService {
         )}`,
       );
     }
-    if (dto.status !== undefined) {
-      sets.push(`status = ${addField(dto.status)}`);
-      if (dto.status === "RESOLVED") {
-        sets.push(`resolved_by = ${addField(actorId)}`);
-        sets.push(`resolved_at = now()`);
-      }
-    }
+    // Tidak ada penulisan `status` di sini — lihat UpdateComplaintDto. PATCH
+    // generik hanya untuk metadata tiket; perpindahan tahap wajib lewat
+    // endpoint workflow supaya jejak keputusan/aktor/waktunya tidak hilang.
 
     const result = await this.pool.query(
       `UPDATE complaints SET ${sets.join(", ")} WHERE id = $1 RETURNING *`,
@@ -550,22 +599,23 @@ export class ComplaintsService {
     dto: OperationInvestigationDto,
   ) {
     const existing = await this.loadOpen(id);
-    if (existing.status !== "OPERATION_INVESTIGATION") {
+    if (
+      existing.status !== "OPERATION_INVESTIGATION" &&
+      existing.status !== "WAITING_BANK_CONFIRMATION"
+    ) {
       throw new BadRequestException(
         "Tahap investigasi operasional sudah selesai atau tidak tersedia.",
       );
     }
     const actorId = resolveUserId(user);
 
-    const routing: Record<string, string | null> = {
-      SUCCESS: "RESOLVED",
-      PENDING: "WAITING_BANK_CONFIRMATION",
-      FAILED: null, // status tetap; ComplaintHandling yang menyelesaikan manual
-      RETURNED: "FINANCE_REVIEW",
-      NEED_AML_REVIEW: "AML_REVIEW",
-      NEED_FINANCE_REVIEW: "FINANCE_REVIEW",
-    };
-    const nextStatus = routing[dto.result] ?? existing.status;
+    // Alur berbasis level: supervisor tidak lagi memilih tujuan berikutnya —
+    // setiap investigasi yang selesai naik ke COO, yang meneruskannya sesuai
+    // complaint_level. PENDING tetap menunggu konfirmasi bank dan masih milik
+    // supervisor (bisa disubmit ulang dari WAITING_BANK_CONFIRMATION).
+    // Nilai result lama tetap diterima demi tiket & laporan historis.
+    const nextStatus =
+      dto.result === "PENDING" ? "WAITING_BANK_CONFIRMATION" : "COO_REVIEW";
 
     return this.applyWorkflow(
       id,
@@ -581,21 +631,126 @@ export class ComplaintsService {
     );
   }
 
-  // AML / Compliance review — ComplianceLead
-  async amlReview(id: number, user: AuthedUser, dto: AmlReviewDto) {
+  // Review COO — satu-satunya aksi COO. Tujuan APPROVE ditentukan
+  // complaint_level, tidak pernah dipilih manual.
+  async cooReview(id: number, user: AuthedUser, dto: CooReviewDto) {
     const existing = await this.loadOpen(id);
-    if (existing.status !== "AML_REVIEW" && existing.status !== "AML_HOLD") {
+    if (existing.status !== "COO_REVIEW") {
       throw new BadRequestException(
-        "AML review hanya untuk complaint berstatus AML_REVIEW atau AML_HOLD",
+        "Review COO hanya untuk complaint berstatus COO_REVIEW",
+      );
+    }
+    const actorId = resolveUserId(user);
+
+    let nextStatus: string;
+    if (dto.decision === "RETURN_TO_SUPERVISOR") {
+      // Hasil investigasi sebelumnya sengaja tidak dikosongkan — supervisor
+      // memperbaiki di atas jejak lamanya, bukan mulai dari kosong.
+      nextStatus = "OPERATION_INVESTIGATION";
+    } else {
+      nextStatus = COO_APPROVE_ROUTING[existing.complaint_level ?? ""] ?? "";
+      if (!nextStatus) {
+        throw new BadRequestException(
+          "Complaint level belum ditetapkan — tidak dapat menentukan tahap berikutnya.",
+        );
+      }
+    }
+
+    return this.applyWorkflow(
+      id,
+      [
+        "coo_decision = $2",
+        "coo_notes = $3",
+        "coo_reviewed_by = $4",
+        "coo_reviewed_at = now()",
+        "updated_by = $4",
+        "status = $5",
+      ],
+      [id, dto.decision, dto.notes, actorId, nextStatus],
+    );
+  }
+
+  // Review Finance Manager — hanya tahap FINANCE_MANAGER_REVIEW (LEVEL_2).
+  // Menulis ke kolomnya sendiri; keputusan FinanceStaff tidak ditimpa.
+  async financeManagerReview(
+    id: number,
+    user: AuthedUser,
+    dto: FinanceManagerReviewDto,
+  ) {
+    const existing = await this.loadOpen(id);
+    if (existing.status !== "FINANCE_MANAGER_REVIEW") {
+      throw new BadRequestException(
+        "Review Finance Manager hanya untuk complaint berstatus FINANCE_MANAGER_REVIEW",
       );
     }
     const actorId = resolveUserId(user);
     const nextStatus =
-      dto.decision === "REJECT"
-        ? "REJECTED"
-        : dto.decision === "HOLD"
-          ? "AML_HOLD"
-          : "OPERATION_INVESTIGATION";
+      dto.decision === "APPROVE"
+        ? "COMPLAINT_HANDLING_FINALIZATION"
+        : "FINANCE_STAFF_REVIEW";
+
+    return this.applyWorkflow(
+      id,
+      [
+        "finance_manager_decision = $2",
+        "finance_manager_notes = $3",
+        "finance_manager_reviewed_by = $4",
+        "finance_manager_reviewed_at = now()",
+        "updated_by = $4",
+        "status = $5",
+      ],
+      [id, dto.decision, dto.notes, actorId, nextStatus],
+    );
+  }
+
+  /**
+   * Routing compliance per tahap. Status alur level dan status legacy tidak
+   * pernah bertabrakan (COMPLIANCE_HOLD terpisah dari AML_HOLD), jadi status
+   * saja sudah cukup menentukan alur mana yang berlaku — tidak perlu penanda
+   * tambahan. Alur level: REJECT pun tidak menutup tiket, ComplaintHandling
+   * yang mengomunikasikan hasilnya lalu menutup.
+   */
+  private static readonly COMPLIANCE_ROUTING: Record<string, Record<string, string>> = {
+    COMPLIANCE_REVIEW: {
+      APPROVE: "COMPLAINT_HANDLING_FINALIZATION",
+      REJECT: "COMPLAINT_HANDLING_FINALIZATION",
+      HOLD: "COMPLIANCE_HOLD",
+      RETURN: "COO_REVIEW",
+    },
+    COMPLIANCE_HOLD: {
+      RESUME: "COMPLIANCE_REVIEW",
+    },
+    // Legacy — tidak berubah sejak sebelum migration 0070.
+    AML_REVIEW: {
+      APPROVE: "OPERATION_INVESTIGATION",
+      REJECT: "REJECTED",
+      HOLD: "AML_HOLD",
+    },
+    AML_HOLD: {
+      APPROVE: "OPERATION_INVESTIGATION",
+      REJECT: "REJECTED",
+      HOLD: "AML_HOLD",
+    },
+  };
+
+  // Compliance review — ComplianceLead. Melayani tahap COMPLIANCE_REVIEW /
+  // COMPLIANCE_HOLD (alur level) maupun AML_REVIEW / AML_HOLD (legacy) dengan
+  // kolom audit yang sama.
+  async amlReview(id: number, user: AuthedUser, dto: AmlReviewDto) {
+    const existing = await this.loadOpen(id);
+    const routing = ComplaintsService.COMPLIANCE_ROUTING[existing.status];
+    if (!routing) {
+      throw new BadRequestException(
+        "Compliance review hanya untuk complaint berstatus COMPLIANCE_REVIEW, COMPLIANCE_HOLD, AML_REVIEW, atau AML_HOLD",
+      );
+    }
+    const nextStatus = routing[dto.decision];
+    if (!nextStatus) {
+      throw new BadRequestException(
+        `Keputusan compliance pada tahap ${existing.status} harus salah satu dari: ${Object.keys(routing).join(", ")}`,
+      );
+    }
+    const actorId = resolveUserId(user);
 
     return this.applyWorkflow(
       id,
@@ -611,16 +766,42 @@ export class ComplaintsService {
     );
   }
 
-  // Finance review — FinanceStaff. Approval refund tetap di modul statement-refunds.
+  // Finance review — FinanceStaff. Melayani tahap FINANCE_STAFF_REVIEW (alur
+  // level, lanjut ke FinanceManager) maupun FINANCE_REVIEW/REFUND_PROCESS
+  // (legacy). Approval refund tetap di modul statement-refunds.
   async financeReview(id: number, user: AuthedUser, dto: ComplaintFinanceReviewDto) {
     const existing = await this.loadOpen(id);
-    if (existing.status !== "FINANCE_REVIEW" && existing.status !== "REFUND_PROCESS") {
+    const levelFlow = existing.status === "FINANCE_STAFF_REVIEW";
+    if (
+      !levelFlow &&
+      existing.status !== "FINANCE_REVIEW" &&
+      existing.status !== "REFUND_PROCESS"
+    ) {
       throw new BadRequestException(
-        "Finance review hanya untuk complaint berstatus FINANCE_REVIEW atau REFUND_PROCESS",
+        "Finance review hanya untuk complaint berstatus FINANCE_STAFF_REVIEW, FINANCE_REVIEW, atau REFUND_PROCESS",
+      );
+    }
+    // Kosakata keputusan berbeda per tahap — jangan biarkan nilai legacy masuk
+    // ke alur level (atau sebaliknya) dan menghasilkan jejak audit yang rancu.
+    const allowed = levelFlow
+      ? ["APPROVE", "RETURN"]
+      : ["NO_REFUND", "REFUND_REQUIRED"];
+    if (!allowed.includes(dto.decision)) {
+      throw new BadRequestException(
+        `Keputusan finance pada tahap ${existing.status} harus salah satu dari: ${allowed.join(", ")}`,
       );
     }
     const actorId = resolveUserId(user);
-    const nextStatus = dto.decision === "REFUND_REQUIRED" ? "REFUND_PROCESS" : "RESOLVED";
+    // RETURN kembali ke COO — koreksi yang diminta Finance adalah koreksi
+    // keputusan, bukan permintaan data nasabah baru, jadi tidak dilempar ke
+    // ComplaintHandling.
+    const nextStatus = levelFlow
+      ? dto.decision === "APPROVE"
+        ? "FINANCE_MANAGER_REVIEW"
+        : "COO_REVIEW"
+      : dto.decision === "REFUND_REQUIRED"
+        ? "REFUND_PROCESS"
+        : "RESOLVED";
 
     return this.applyWorkflow(
       id,
@@ -638,7 +819,15 @@ export class ComplaintsService {
 
   // Resolve — ComplaintHandling, setelah nasabah diinformasikan
   async resolve(id: number, user: AuthedUser, dto: ResolveComplaintDto) {
-    await this.loadOpen(id);
+    const existing = await this.loadOpen(id);
+    // Tiket yang sedang dipegang COO/Finance/Compliance tidak boleh
+    // diselesaikan mendahului gilirannya. Status legacy tidak dibatasi supaya
+    // tiket lama tetap bisa ditutup seperti sebelum migrasi 0070.
+    if (LEVEL_FLOW_STAGES.includes(existing.status)) {
+      throw new BadRequestException(
+        `Pengaduan masih menunggu keputusan tahap ${existing.status} — belum dapat diselesaikan.`,
+      );
+    }
     const actorId = resolveUserId(user);
 
     return this.applyWorkflow(

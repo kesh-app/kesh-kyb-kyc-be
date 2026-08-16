@@ -27,6 +27,9 @@ const REPORT_READ_ROLES = [
   'Auditor',
   'ComplaintHandling',
   'OperationSupervisor',
+  // COO ikut alur pengaduan → boleh baca/unduh report COMPLAINTS saja
+  // (dibatasi report-access.ts) dan sengaja tidak ada di GENERATE.
+  'COO',
   'FinanceStaff',
   'FinanceManager',
 ] as const;

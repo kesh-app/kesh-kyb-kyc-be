@@ -67,6 +67,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
   let auditorToken: string;
   let operationSupervisorToken: string;
   let complaintHandlingToken: string;
+  let cooToken: string;
 
   // Application IDs yang diakumulasi lintas describe block
   // pg driver mengembalikan BIGINT sebagai string — simpan sebagai string
@@ -223,6 +224,24 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       .send({ email: complaintEmail, password: 'Test@123456' });
     expect(loginComplaint.status).toBe(201);
     complaintHandlingToken = loginComplaint.body.access_token;
+
+    // Buat COO test user (layer review direksi di alur pengaduan berbasis level)
+    const cooEmail = `coo${SUFFIX}@test.local`;
+    await request(app.getHttpServer())
+      .post(`${BASE}/users/admins`)
+      .set('Authorization', `Bearer ${sysAdminToken}`)
+      .send({
+        email: cooEmail,
+        fullName: `Test COO ${SUFFIX}`,
+        role: 'COO',
+        password: 'Test@123456',
+      })
+      .expect(201);
+    const loginCoo = await request(app.getHttpServer())
+      .post(`${BASE}/auth/login`)
+      .send({ email: cooEmail, password: 'Test@123456' });
+    expect(loginCoo.status).toBe(201);
+    cooToken = loginCoo.body.access_token;
   }, 30000);
 
   afterAll(async () => {
@@ -10421,9 +10440,33 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return String(res.body.id);
     }
 
-    // Helper: bawa complaint baru sampai status tertentu lewat workflow resmi
+    /**
+     * Bawa complaint baru sampai status tertentu.
+     *
+     * Status alur baru dicapai lewat endpoint resmi. Status legacy
+     * (AML_REVIEW/FINANCE_REVIEW/REFUND_PROCESS) sudah tidak bisa dicapai lewat
+     * API sejak migration 0070 — routing supervisor selalu ke COO — jadi tiket
+     * dibawa sejauh mungkin lewat API lalu statusnya di-set langsung ke DB.
+     * Ini sekaligus mensimulasikan tiket yang dibuat sebelum migrasi:
+     * coo_reviewed_at tetap NULL sehingga routing legacy yang berlaku.
+     */
     async function complaintAt(status: string) {
-      const id = await newComplaint();
+      const LEGACY_STATUSES = ['AML_REVIEW', 'AML_HOLD', 'FINANCE_REVIEW', 'REFUND_PROCESS'];
+      const levelByStatus: Record<string, string> = {
+        RESOLVED: 'LEVEL_1',
+        COMPLAINT_HANDLING_FINALIZATION: 'LEVEL_1',
+        FINANCE_STAFF_REVIEW: 'LEVEL_2',
+        FINANCE_MANAGER_REVIEW: 'LEVEL_2',
+        COMPLIANCE_REVIEW: 'LEVEL_3',
+      };
+      const overrides: Record<string, any> = levelByStatus[status]
+        ? { complaint_level: levelByStatus[status] }
+        : {};
+      if (overrides.complaint_level === 'LEVEL_3') {
+        overrides.level_3_risk_category = 'COMPLIANCE_RISK';
+      }
+
+      const id = await newComplaint(overrides);
       if (status === 'OPEN') return id;
 
       await request(app.getHttpServer())
@@ -10433,17 +10476,48 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(201);
       if (status === 'OPERATION_INVESTIGATION') return id;
 
-      const resultByStatus: Record<string, string> = {
-        AML_REVIEW: 'NEED_AML_REVIEW',
-        FINANCE_REVIEW: 'NEED_FINANCE_REVIEW',
-        RESOLVED: 'SUCCESS',
-      };
       await request(app.getHttpServer())
         .post(`${BASE}/complaints/${id}/operation-investigation`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
-        .send({ result: resultByStatus[status], notes: `Routing ke ${status} untuk test.` })
+        .send({ result: 'SUCCESS', notes: `Routing ke ${status} untuk test.` })
         .expect(201);
-      return id;
+
+      if (LEGACY_STATUSES.includes(status)) {
+        await pgPool.query(
+          `UPDATE complaints SET status = $2, coo_reviewed_at = NULL WHERE id = $1`,
+          [id, status],
+        );
+        return id;
+      }
+      if (status === 'COO_REVIEW') return id;
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/coo-review`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .send({ decision: 'APPROVE', notes: `Disetujui COO untuk mencapai ${status}.` })
+        .expect(201);
+      if (status === 'FINANCE_STAFF_REVIEW' || status === 'COMPLIANCE_REVIEW') return id;
+      if (status === 'COMPLAINT_HANDLING_FINALIZATION') return id;
+
+      if (status === 'FINANCE_MANAGER_REVIEW') {
+        await request(app.getHttpServer())
+          .post(`${BASE}/complaints/${id}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ decision: 'APPROVE', notes: 'Diteruskan ke Finance Manager untuk test.' })
+          .expect(201);
+        return id;
+      }
+
+      if (status === 'RESOLVED') {
+        await request(app.getHttpServer())
+          .post(`${BASE}/complaints/${id}/resolve`)
+          .set('Authorization', `Bearer ${complaintHandlingToken}`)
+          .send({ resolution_notes: 'Diselesaikan ComplaintHandling untuk test.' })
+          .expect(201);
+        return id;
+      }
+
+      throw new Error(`complaintAt: status ${status} belum didukung helper`);
     }
 
     // ── Search & create ──────────────────────────────────────
@@ -10777,7 +10851,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
     // ── Investigasi transaksi ────────────────────────────────
 
-    it('Y-25: OperationSupervisor SUCCESS → RESOLVED', async () => {
+    // Sejak migration 0070 supervisor tidak lagi memilih tujuan berikutnya —
+    // setiap investigasi yang selesai naik ke COO apa pun hasilnya.
+    it('Y-25: OperationSupervisor SUCCESS → COO_REVIEW', async () => {
       const id = await complaintAt('OPERATION_INVESTIGATION');
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints/${id}/operation-investigation`)
@@ -10785,7 +10861,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ result: 'SUCCESS', notes: 'Dana sudah diterima bank tujuan.' })
         .expect(201);
 
-      expect(res.body.status).toBe('RESOLVED');
+      expect(res.body.status).toBe('COO_REVIEW');
       expect(res.body.operation_investigation_result).toBe('SUCCESS');
       expect(res.body.operation_investigated_by).not.toBeNull();
       expect(res.body.operation_investigated_at).not.toBeNull();
@@ -10801,34 +10877,35 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('WAITING_BANK_CONFIRMATION');
     });
 
-    it('Y-27: OperationSupervisor RETURNED → FINANCE_REVIEW', async () => {
+    it('Y-27: OperationSupervisor RETURNED → COO_REVIEW (result tersimpan apa adanya)', async () => {
       const id = await complaintAt('OPERATION_INVESTIGATION');
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints/${id}/operation-investigation`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ result: 'RETURNED', notes: 'Dana dikembalikan ke rekening perusahaan.' })
         .expect(201);
-      expect(res.body.status).toBe('FINANCE_REVIEW');
+      expect(res.body.status).toBe('COO_REVIEW');
+      expect(res.body.operation_investigation_result).toBe('RETURNED');
     });
 
-    it('Y-28: OperationSupervisor NEED_AML_REVIEW → AML_REVIEW', async () => {
+    it('Y-28: OperationSupervisor NEED_AML_REVIEW → COO_REVIEW (tujuan tidak lagi dipilih manual)', async () => {
       const id = await complaintAt('OPERATION_INVESTIGATION');
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints/${id}/operation-investigation`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ result: 'NEED_AML_REVIEW', notes: 'Indikasi transaksi mencurigakan.' })
         .expect(201);
-      expect(res.body.status).toBe('AML_REVIEW');
+      expect(res.body.status).toBe('COO_REVIEW');
     });
 
-    it('Y-29: OperationSupervisor NEED_FINANCE_REVIEW → FINANCE_REVIEW', async () => {
+    it('Y-29: OperationSupervisor NEED_FINANCE_REVIEW → COO_REVIEW (tujuan tidak lagi dipilih manual)', async () => {
       const id = await complaintAt('OPERATION_INVESTIGATION');
       const res = await request(app.getHttpServer())
         .post(`${BASE}/complaints/${id}/operation-investigation`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
         .send({ result: 'NEED_FINANCE_REVIEW', notes: 'Perlu pengecekan dampak keuangan.' })
         .expect(201);
-      expect(res.body.status).toBe('FINANCE_REVIEW');
+      expect(res.body.status).toBe('COO_REVIEW');
     });
 
     it('Y-30: ComplaintHandling tidak bisa operation-investigation → 403', async () => {
@@ -10912,17 +10989,33 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       const invest = await request(app.getHttpServer())
         .post(`${BASE}/complaints/${id}/operation-investigation`)
         .set('Authorization', `Bearer ${operationSupervisorToken}`)
-        .send({ result: 'NEED_AML_REVIEW', notes: 'Perlu review AML untuk cek nama aktor.' })
+        .send({ result: 'NEED_AML_REVIEW', notes: 'Perlu review lanjutan untuk cek nama aktor.' })
         .expect(201);
       expect(invest.body.operation_investigated_by_name).toBeTruthy();
 
-      const aml = await request(app.getHttpServer())
-        .post(`${BASE}/complaints/${id}/aml-review`)
-        .set('Authorization', `Bearer ${complianceToken}`)
-        .send({ decision: 'APPROVE', notes: 'Kembali ke investigasi operasional.' })
+      // LEVEL_2 → COO APPROVE meneruskan ke Finance Staff lalu Finance Manager.
+      const coo = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/coo-review`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .send({ decision: 'APPROVE', notes: 'Disetujui COO untuk cek nama aktor.' })
         .expect(201);
-      expect(aml.body.aml_reviewed_by_name).toBeTruthy();
-      expect(aml.body.status).toBe('OPERATION_INVESTIGATION');
+      expect(coo.body.coo_reviewed_by_name).toBeTruthy();
+      expect(coo.body.status).toBe('FINANCE_STAFF_REVIEW');
+
+      const fin = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ decision: 'APPROVE', notes: 'Disetujui Finance Staff untuk cek nama aktor.' })
+        .expect(201);
+      expect(fin.body.finance_reviewed_by_name).toBeTruthy();
+
+      const finMgr = await request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/finance-manager-review`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE', notes: 'Disetujui Finance Manager untuk cek nama aktor.' })
+        .expect(201);
+      expect(finMgr.body.finance_manager_reviewed_by_name).toBeTruthy();
+      expect(finMgr.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
 
       const resolve = await request(app.getHttpServer())
         .post(`${BASE}/complaints/${id}/resolve`)
@@ -11423,9 +11516,9 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       });
 
       it('YR-02: pengaduan RESOLVED lalu CLOSED → receipt_state CLOSED', async () => {
-        // operation-investigation dengan hasil SUCCESS sudah memindahkan status
-        // ke RESOLVED (routing di complaints.service), jadi tidak perlu memanggil
-        // /resolve lagi — panggilan kedua justru 400.
+        // complaintAt('RESOLVED') menempuh alur LEVEL_1 penuh sampai
+        // ComplaintHandling memanggil /resolve, jadi tiket sudah RESOLVED —
+        // memanggil /resolve lagi justru 400.
         const id = await complaintAt('RESOLVED');
 
         const afterResolve = await request(app.getHttpServer())
@@ -11586,6 +11679,835 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         // Resi/detail menampilkan nilai yang benar-benar tersimpan, bukan hasil pemotongan.
         expect(detail.body.complaint_no).toBe(legacyNo);
       });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════
+  // YC. Complaints — alur COO berbasis complaint_level (migration 0070)
+  // ══════════════════════════════════════════════════════════
+  describe('YC. Complaints — alur COO berbasis level', () => {
+    let ycSeq = 0;
+
+    const post = (id: string, path: string, token: string, body: any) =>
+      request(app.getHttpServer())
+        .post(`${BASE}/complaints/${id}/${path}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+
+    const detail = (id: string, token = complaintHandlingToken) =>
+      request(app.getHttpServer())
+        .get(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${token}`);
+
+    type Level = 'LEVEL_1' | 'LEVEL_2' | 'LEVEL_3';
+
+    /** Tiket baru pada level tertentu, status OPEN. */
+    async function newYc(level: Level) {
+      ycSeq += 1;
+      const created = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-YC${ycSeq}`,
+          category: 'TRANSFER',
+          channel: 'WALK_IN',
+          priority: 'MEDIUM',
+          complaint_level: level,
+          ...(level === 'LEVEL_3' ? { level_3_risk_category: 'COMPLIANCE_RISK' } : {}),
+          complaint_notes: `Pengaduan ${level} untuk uji alur COO berbasis level.`,
+        })
+        .expect(201);
+      return String(created.body.id);
+    }
+
+    /** Tiket baru pada level tertentu, sudah diverifikasi → OPERATION_INVESTIGATION. */
+    async function atInvestigation(level: Level) {
+      const id = await newYc(level);
+      const verified = await post(id, 'verify-data', complaintHandlingToken, {
+        data_verification_status: 'COMPLETE',
+      }).expect(201);
+      expect(verified.body.status).toBe('OPERATION_INVESTIGATION');
+      return id;
+    }
+
+    /** Tiket baru pada level tertentu, sudah sampai COO_REVIEW. */
+    async function atCooReview(level: Level) {
+      const id = await atInvestigation(level);
+      const investigated = await post(id, 'operation-investigation', operationSupervisorToken, {
+        result: 'SUCCESS',
+        notes: 'Investigasi operasional selesai, dinaikkan ke COO.',
+      }).expect(201);
+      expect(investigated.body.status).toBe('COO_REVIEW');
+      return id;
+    }
+
+    /** COO APPROVE → status berikutnya sesuai level. */
+    const cooApprove = (id: string) =>
+      post(id, 'coo-review', cooToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui COO, diteruskan sesuai level pengaduan.',
+      });
+
+    // ── Role COO ─────────────────────────────────────────────
+
+    it('YC-01: COO terdaftar sebagai role resmi dan bisa login', async () => {
+      const me = await request(app.getHttpServer())
+        .get(`${BASE}/auth/me`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .expect(200);
+      expect(me.body.role).toBe('COO');
+    });
+
+    it('YC-02: COO bisa list & baca detail pengaduan', async () => {
+      const id = await atCooReview('LEVEL_1');
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/complaints?limit=100`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .expect(200);
+      expect(Array.isArray(list.body.data)).toBe(true);
+
+      const res = await detail(id, cooToken).expect(200);
+      expect(res.body.status).toBe('COO_REVIEW');
+      expect(res.body.linked_customer).toBeTruthy();
+      // Ringkasan transaksi ikut di detail (bisa null kalau tidak ada transfer cocok)
+      expect(res.body).toHaveProperty('linked_transfer');
+    });
+
+    it('YC-03: COO tidak punya akses modul di luar pengaduan → 403', async () => {
+      for (const path of [
+        '/transfers',
+        '/watchlist/entries',
+        '/monitoring/cases',
+        '/users/admins',
+      ]) {
+        const res = await request(app.getHttpServer())
+          .get(`${BASE}${path}`)
+          .set('Authorization', `Bearer ${cooToken}`);
+        expect(res.status).toBe(403);
+      }
+    });
+
+    it('YC-04: COO tidak bisa membuat pengaduan / verify-data / investigasi → 403', async () => {
+      const id = await atCooReview('LEVEL_1');
+      await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-COO-NEW`,
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'COO seharusnya tidak boleh membuat pengaduan.',
+        })
+        .expect(403);
+      await post(id, 'verify-data', cooToken, { data_verification_status: 'COMPLETE' }).expect(403);
+      await post(id, 'operation-investigation', cooToken, {
+        result: 'SUCCESS',
+        notes: 'COO seharusnya tidak boleh investigasi.',
+      }).expect(403);
+      await post(id, 'finance-review', cooToken, {
+        decision: 'APPROVE',
+        notes: 'COO seharusnya tidak boleh finance review.',
+      }).expect(403);
+      await post(id, 'finance-manager-review', cooToken, {
+        decision: 'APPROVE',
+        notes: 'COO seharusnya tidak boleh approval finance manager.',
+      }).expect(403);
+      await post(id, 'aml-review', cooToken, {
+        decision: 'APPROVE',
+        notes: 'COO seharusnya tidak boleh compliance review.',
+      }).expect(403);
+      await post(id, 'resolve', cooToken, { resolution_notes: 'COO tidak boleh resolve.' }).expect(403);
+      await post(id, 'close', cooToken, { closing_notes: 'COO tidak boleh close.' }).expect(403);
+    });
+
+    it('YC-05: COO boleh baca report COMPLAINTS, tidak boleh generate report apa pun', async () => {
+      await request(app.getHttpServer())
+        .get(`${BASE}/reports`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`${BASE}/reports/generate`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .send({ report_type: 'COMPLAINTS' })
+        .expect(403);
+    });
+
+    // ── Hasil investigasi supervisor ─────────────────────────
+
+    it('YC-06: hasil investigasi apa pun yang SELESAI naik ke COO_REVIEW, termasuk FAILED', async () => {
+      // FAILED = investigasi tuntas dengan kesimpulan negatif, bukan investigasi
+      // yang belum selesai — tetap butuh keputusan COO.
+      for (const level of ['LEVEL_1', 'LEVEL_2', 'LEVEL_3'] as Level[]) {
+        const id = await atInvestigation(level);
+        const res = await post(id, 'operation-investigation', operationSupervisorToken, {
+          result: 'FAILED',
+          notes: `Dana tidak dapat ditelusuri (${level}).`,
+        }).expect(201);
+        expect(res.body.status).toBe('COO_REVIEW');
+        expect(res.body.operation_investigation_result).toBe('FAILED');
+        expect(res.body.operation_investigated_at).not.toBeNull();
+      }
+    });
+
+    it('YC-07: PENDING = investigasi belum selesai → WAITING_BANK_CONFIRMATION, bisa dilanjutkan', async () => {
+      const id = await atInvestigation('LEVEL_2');
+      const pending = await post(id, 'operation-investigation', operationSupervisorToken, {
+        result: 'PENDING',
+        notes: 'Menunggu konfirmasi bank penerima.',
+      }).expect(201);
+      expect(pending.body.status).toBe('WAITING_BANK_CONFIRMATION');
+      // COO belum boleh menyentuh tiket yang investigasinya belum tuntas
+      await post(id, 'coo-review', cooToken, {
+        decision: 'APPROVE',
+        notes: 'Belum masuk tahap COO.',
+      }).expect(400);
+
+      const done = await post(id, 'operation-investigation', operationSupervisorToken, {
+        result: 'FAILED',
+        notes: 'Konfirmasi bank diterima, dana tidak ditemukan.',
+      }).expect(201);
+      expect(done.body.status).toBe('COO_REVIEW');
+    });
+
+    // ── LEVEL 1 ──────────────────────────────────────────────
+
+    it('YC-10: LEVEL_1 — Supervisor selesai → COO_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_1');
+      const res = await detail(id).expect(200);
+      expect(res.body.status).toBe('COO_REVIEW');
+      expect(res.body.operation_investigated_at).not.toBeNull();
+    });
+
+    it('YC-11: LEVEL_1 — COO APPROVE → COMPLAINT_HANDLING_FINALIZATION', async () => {
+      const id = await atCooReview('LEVEL_1');
+      const res = await cooApprove(id).expect(201);
+      expect(res.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
+      expect(res.body.coo_decision).toBe('APPROVE');
+      expect(res.body.coo_reviewed_at).not.toBeNull();
+      expect(res.body.coo_reviewed_by_name).toBeTruthy();
+    });
+
+    it('YC-12: LEVEL_1 — Finance & Compliance tidak punya aksi', async () => {
+      const id = await atCooReview('LEVEL_1');
+      await cooApprove(id).expect(201);
+
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Finance tidak berperan di LEVEL_1.',
+      }).expect(400);
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Finance Manager tidak berperan di LEVEL_1.',
+      }).expect(400);
+      await post(id, 'aml-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Compliance tidak berperan di LEVEL_1.',
+      }).expect(400);
+    });
+
+    it('YC-13: LEVEL_1 — ComplaintHandling resolve lalu close', async () => {
+      const id = await atCooReview('LEVEL_1');
+      await cooApprove(id).expect(201);
+
+      const resolved = await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Nasabah sudah menerima penjelasan dan dana.',
+        customer_communication_notes: 'Disampaikan via telepon.',
+      }).expect(201);
+      expect(resolved.body.status).toBe('RESOLVED');
+
+      const closed = await post(id, 'close', complaintHandlingToken, {
+        closing_notes: 'Tiket LEVEL_1 ditutup.',
+      }).expect(201);
+      expect(closed.body.status).toBe('CLOSED');
+    });
+
+    // ── LEVEL 2 ──────────────────────────────────────────────
+
+    it('YC-20: LEVEL_2 — COO APPROVE → FINANCE_STAFF_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_2');
+      const res = await cooApprove(id).expect(201);
+      expect(res.body.status).toBe('FINANCE_STAFF_REVIEW');
+    });
+
+    it('YC-21: LEVEL_2 — FinanceStaff APPROVE → FINANCE_MANAGER_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      const res = await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Dampak finansial sudah diverifikasi.',
+      }).expect(201);
+      expect(res.body.status).toBe('FINANCE_MANAGER_REVIEW');
+      expect(res.body.finance_decision).toBe('APPROVE');
+      expect(res.body.finance_reviewed_by_name).toBeTruthy();
+    });
+
+    it('YC-22: LEVEL_2 — FinanceManager APPROVE → COMPLAINT_HANDLING_FINALIZATION, kolom FinanceStaff tidak tertimpa', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      const staff = await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Catatan Finance Staff yang harus tetap utuh.',
+      }).expect(201);
+
+      const res = await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui Finance Manager.',
+      }).expect(201);
+      expect(res.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
+      expect(res.body.finance_manager_decision).toBe('APPROVE');
+      expect(res.body.finance_manager_reviewed_by_name).toBeTruthy();
+      // Jejak FinanceStaff tetap terpisah dan tidak tertimpa oleh manager
+      expect(res.body.finance_review_notes).toBe('Catatan Finance Staff yang harus tetap utuh.');
+      expect(String(res.body.finance_reviewed_by)).toBe(String(staff.body.finance_reviewed_by));
+      expect(String(res.body.finance_manager_reviewed_by)).not.toBe(
+        String(res.body.finance_reviewed_by),
+      );
+    });
+
+    it('YC-23: LEVEL_2 — ComplaintHandling finalisasi (resolve + close)', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui Finance Staff.',
+      }).expect(201);
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui Finance Manager.',
+      }).expect(201);
+
+      const resolved = await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Refund telah diproses dan dikomunikasikan ke nasabah.',
+      }).expect(201);
+      expect(resolved.body.status).toBe('RESOLVED');
+      const closed = await post(id, 'close', complaintHandlingToken, {
+        closing_notes: 'Tiket LEVEL_2 ditutup.',
+      }).expect(201);
+      expect(closed.body.status).toBe('CLOSED');
+    });
+
+    it('YC-24: LEVEL_2 — Compliance tidak punya aksi', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      await post(id, 'aml-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Compliance tidak berperan di LEVEL_2.',
+      }).expect(400);
+    });
+
+    it('YC-25: LEVEL_2 — FinanceStaff RETURN → COO_REVIEW (catatan wajib)', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+
+      await post(id, 'finance-review', financeStaffToken, { decision: 'RETURN' }).expect(400);
+
+      const res = await post(id, 'finance-review', financeStaffToken, {
+        decision: 'RETURN',
+        notes: 'Nominal dampak finansial belum sesuai dokumen.',
+      }).expect(201);
+      expect(res.body.status).toBe('COO_REVIEW');
+      expect(res.body.finance_decision).toBe('RETURN');
+    });
+
+    it('YC-26: LEVEL_2 — FinanceManager RETURN → FINANCE_STAFF_REVIEW (catatan wajib)', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Diteruskan ke manager.',
+      }).expect(201);
+
+      await post(id, 'finance-manager-review', financeManagerToken, { decision: 'RETURN' }).expect(400);
+
+      const res = await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'RETURN',
+        notes: 'Lampiran perhitungan kurang lengkap.',
+      }).expect(201);
+      expect(res.body.status).toBe('FINANCE_STAFF_REVIEW');
+      expect(res.body.finance_manager_decision).toBe('RETURN');
+    });
+
+    it('YC-27: LEVEL_2 — keputusan legacy NO_REFUND ditolak di tahap FINANCE_STAFF_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      const res = await post(id, 'finance-review', financeStaffToken, {
+        decision: 'NO_REFUND',
+        notes: 'Kosakata legacy tidak berlaku di alur level.',
+      }).expect(400);
+      expect(res.body.message).toMatch(/APPROVE, RETURN/);
+    });
+
+    // ── LEVEL 3 ──────────────────────────────────────────────
+
+    it('YC-30: LEVEL_3 — COO APPROVE → COMPLIANCE_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_3');
+      const res = await cooApprove(id).expect(201);
+      expect(res.body.status).toBe('COMPLIANCE_REVIEW');
+    });
+
+    it('YC-31: LEVEL_3 — Compliance APPROVE → COMPLAINT_HANDLING_FINALIZATION', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      const res = await post(id, 'aml-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Tidak ditemukan indikasi pencucian uang.',
+      }).expect(201);
+      expect(res.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
+      expect(res.body.compliance_reviewed_by_name).toBeTruthy();
+    });
+
+    it('YC-32: LEVEL_3 — Compliance REJECT tidak menutup tiket, tetap ke finalisasi', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      const res = await post(id, 'aml-review', complianceToken, {
+        decision: 'REJECT',
+        notes: 'Pengaduan tidak terbukti.',
+      }).expect(201);
+      expect(res.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
+      expect(res.body.aml_decision).toBe('REJECT');
+
+      // Penutupan tetap lewat ComplaintHandling setelah komunikasi ke nasabah
+      const resolved = await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Hasil penolakan sudah disampaikan ke nasabah.',
+      }).expect(201);
+      expect(resolved.body.status).toBe('RESOLVED');
+    });
+
+    it('YC-33: LEVEL_3 — Compliance RETURN → COO_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      const ret = await post(id, 'compliance-review', complianceToken, {
+        decision: 'RETURN',
+        notes: 'Perlu penegasan keputusan direksi.',
+      }).expect(201);
+      expect(ret.body.status).toBe('COO_REVIEW');
+    });
+
+    it('YC-33b: LEVEL_3 — Compliance HOLD → COMPLIANCE_HOLD (bukan AML_HOLD), RESUME → COMPLIANCE_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+
+      const hold = await post(id, 'compliance-review', complianceToken, {
+        decision: 'HOLD',
+        notes: 'Menunggu dokumen tambahan dari nasabah.',
+      }).expect(201);
+      expect(hold.body.status).toBe('COMPLIANCE_HOLD');
+      // AML_HOLD tetap milik tiket legacy saja
+      expect(hold.body.status).not.toBe('AML_HOLD');
+
+      // Saat ditahan, hanya RESUME yang sah
+      const wrong = await post(id, 'compliance-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Belum boleh langsung approve saat ditahan.',
+      }).expect(400);
+      expect(wrong.body.message).toMatch(/RESUME/);
+
+      const resumed = await post(id, 'compliance-review', complianceToken, {
+        decision: 'RESUME',
+        notes: 'Dokumen sudah diterima, review dilanjutkan.',
+      }).expect(201);
+      expect(resumed.body.status).toBe('COMPLIANCE_REVIEW');
+      expect(resumed.body.aml_decision).toBe('RESUME');
+
+      const approve = await post(id, 'compliance-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Dokumen lengkap, disetujui.',
+      }).expect(201);
+      expect(approve.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
+    });
+
+    it('YC-33c: Finance tidak punya aksi saat tiket COMPLIANCE_HOLD, dan CH belum bisa resolve', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      await post(id, 'compliance-review', complianceToken, {
+        decision: 'HOLD',
+        notes: 'Ditahan sementara.',
+      }).expect(201);
+
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Finance tidak berperan.',
+      }).expect(400);
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Finance Manager tidak berperan.',
+      }).expect(400);
+      await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Masih ditahan Compliance.',
+      }).expect(400);
+    });
+
+    it('YC-33d: REJECT Compliance menyimpan keputusan + alasan untuk dikomunikasikan ComplaintHandling', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      const rejected = await post(id, 'compliance-review', complianceToken, {
+        decision: 'REJECT',
+        notes: 'Pengaduan tidak terbukti berdasarkan hasil analisis transaksi.',
+      }).expect(201);
+      expect(rejected.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
+
+      const res = await detail(id).expect(200);
+      expect(res.body.aml_decision).toBe('REJECT');
+      expect(res.body.compliance_decision).toBe('REJECT');
+      expect(res.body.compliance_notes).toContain('tidak terbukti');
+      expect(res.body.compliance_reviewed_by_name).toBeTruthy();
+      expect(res.body.compliance_reviewed_at).not.toBeNull();
+    });
+
+    it('YC-33e: alias lama /aml-review masih melayani tahap COMPLIANCE_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      const res = await post(id, 'aml-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui lewat rute lama.',
+      }).expect(201);
+      expect(res.body.status).toBe('COMPLAINT_HANDLING_FINALIZATION');
+    });
+
+    it('YC-34: LEVEL_3 — Finance tidak punya aksi', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Finance tidak berperan di LEVEL_3.',
+      }).expect(400);
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Finance Manager tidak berperan di LEVEL_3.',
+      }).expect(400);
+    });
+
+    it('YC-35: LEVEL_3 — ComplaintHandling finalisasi (resolve + close)', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      await post(id, 'aml-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui compliance.',
+      }).expect(201);
+      await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Hasil review compliance sudah disampaikan.',
+      }).expect(201);
+      const closed = await post(id, 'close', complaintHandlingToken, {
+        closing_notes: 'Tiket LEVEL_3 ditutup.',
+      }).expect(201);
+      expect(closed.body.status).toBe('CLOSED');
+    });
+
+    // ── COO RETURN ───────────────────────────────────────────
+
+    it('YC-40: COO RETURN_TO_SUPERVISOR → OPERATION_INVESTIGATION, jejak investigasi lama tetap ada', async () => {
+      const id = await atCooReview('LEVEL_2');
+      const before = await detail(id).expect(200);
+      expect(before.body.operation_investigation_notes).toBeTruthy();
+
+      const res = await post(id, 'coo-review', cooToken, {
+        decision: 'RETURN_TO_SUPERVISOR',
+        notes: 'Bukti mutasi rekening belum dilampirkan.',
+      }).expect(201);
+      expect(res.body.status).toBe('OPERATION_INVESTIGATION');
+      expect(res.body.coo_decision).toBe('RETURN_TO_SUPERVISOR');
+      // Hasil investigasi sebelumnya tidak dihapus
+      expect(res.body.operation_investigation_notes).toBe(
+        before.body.operation_investigation_notes,
+      );
+      expect(res.body.operation_investigated_at).not.toBeNull();
+
+      // Supervisor bisa memperbaiki dan menaikkan ulang ke COO
+      const again = await post(id, 'operation-investigation', operationSupervisorToken, {
+        result: 'SUCCESS',
+        notes: 'Bukti mutasi rekening sudah dilampirkan.',
+      }).expect(201);
+      expect(again.body.status).toBe('COO_REVIEW');
+    });
+
+    it('YC-41: coo-review tanpa notes → 400 (catatan wajib untuk kedua keputusan)', async () => {
+      const id = await atCooReview('LEVEL_1');
+      await post(id, 'coo-review', cooToken, { decision: 'RETURN_TO_SUPERVISOR' }).expect(400);
+      await post(id, 'coo-review', cooToken, { decision: 'APPROVE' }).expect(400);
+      await post(id, 'coo-review', cooToken, { decision: 'REJECT', notes: 'Bukan pilihan sah.' })
+        .expect(400);
+    });
+
+    // ── Kunci tahap ──────────────────────────────────────────
+
+    it('YC-50: Supervisor tidak bisa mengubah hasil setelah tiket di COO_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_1');
+      const res = await post(id, 'operation-investigation', operationSupervisorToken, {
+        result: 'FAILED',
+        notes: 'Tidak boleh mengubah setelah naik ke COO.',
+      }).expect(400);
+      expect(res.body.message).toMatch(/Tahap investigasi operasional sudah selesai/);
+    });
+
+    it('YC-51: COO tidak bisa mengubah keputusan setelah tiket lanjut ke tahap berikutnya', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      const res = await post(id, 'coo-review', cooToken, {
+        decision: 'RETURN_TO_SUPERVISOR',
+        notes: 'Sudah lewat tahap COO.',
+      }).expect(400);
+      expect(res.body.message).toMatch(/COO_REVIEW/);
+    });
+
+    it('YC-52: FinanceStaff tidak bisa mengubah setelah tiket di FINANCE_MANAGER_REVIEW', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Diteruskan ke manager.',
+      }).expect(201);
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'RETURN',
+        notes: 'Sudah lewat tahap Finance Staff.',
+      }).expect(400);
+    });
+
+    it('YC-53: FinanceManager tidak bisa mengubah setelah tiket di finalisasi', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Diteruskan ke manager.',
+      }).expect(201);
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui.',
+      }).expect(201);
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'RETURN',
+        notes: 'Sudah lewat tahap Finance Manager.',
+      }).expect(400);
+    });
+
+    it('YC-54: Compliance tidak bisa mengubah setelah tiket di finalisasi', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await cooApprove(id).expect(201);
+      await post(id, 'aml-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Disetujui.',
+      }).expect(201);
+      await post(id, 'aml-review', complianceToken, {
+        decision: 'REJECT',
+        notes: 'Sudah lewat tahap compliance.',
+      }).expect(400);
+    });
+
+    it('YC-55: ComplaintHandling tidak bisa resolve saat tiket masih di tahap role lain', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Belum giliran ComplaintHandling.',
+      }).expect(400);
+
+      await cooApprove(id).expect(201);
+      await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Masih di Finance Staff.',
+      }).expect(400);
+    });
+
+    it('YC-56: complaint_level terkunci setelah investigasi dimulai', async () => {
+      const id = await atCooReview('LEVEL_1');
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ complaint_level: 'LEVEL_3', level_3_risk_category: 'LEGAL_RISK' })
+        .expect(400);
+      expect(res.body.message).toMatch(/terkunci/);
+
+      // Masih bisa diubah selagi tiket di tangan ComplaintHandling
+      const fresh = await request(app.getHttpServer())
+        .post(`${BASE}/complaints`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({
+          customer_application_id: Number(indivAppIdOk),
+          transaction_reference: `TRX-${SUFFIX}-YC-LVL`,
+          complaint_level: 'LEVEL_1',
+          complaint_notes: 'Level masih boleh diubah selagi OPEN.',
+        })
+        .expect(201);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${fresh.body.id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({ complaint_level: 'LEVEL_2' })
+        .expect(200);
+    });
+
+    // ── PATCH generik tidak boleh memindahkan tahap ──────────
+
+    /** PATCH lalu baca ulang status dari DB — status harus tidak bergerak. */
+    async function patchStatusMustNotMove(
+      id: string,
+      token: string,
+      target: string,
+      before: string,
+    ) {
+      await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: target, priority: 'HIGH' })
+        .expect(200);
+
+      const after = await detail(id).expect(200);
+      expect(after.body.status).toBe(before);
+      // Field non-workflow tetap tersimpan
+      expect(after.body.priority).toBe('HIGH');
+    }
+
+    it('YC-57: ComplaintHandling tidak bisa PATCH COO_REVIEW → RESOLVED', async () => {
+      const id = await atCooReview('LEVEL_1');
+      await patchStatusMustNotMove(id, complaintHandlingToken, 'RESOLVED', 'COO_REVIEW');
+      // Tiket tetap milik COO — resolve juga tetap ditolak
+      await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Masih di COO.',
+      }).expect(400);
+    });
+
+    it('YC-58: ComplaintHandling tidak bisa PATCH OPERATION_INVESTIGATION → FINANCE_MANAGER_REVIEW', async () => {
+      const id = await atInvestigation('LEVEL_2');
+      await patchStatusMustNotMove(
+        id,
+        complaintHandlingToken,
+        'FINANCE_MANAGER_REVIEW',
+        'OPERATION_INVESTIGATION',
+      );
+      // FinanceManager tetap tidak punya aksi karena tahapnya memang belum tiba
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Tahap belum tiba.',
+      }).expect(400);
+    });
+
+    it('YC-59: bypass SystemAdmin/Director juga tidak bisa memindahkan tahap lewat PATCH', async () => {
+      const sysId = await atCooReview('LEVEL_2');
+      await patchStatusMustNotMove(sysId, sysAdminToken, 'CLOSED', 'COO_REVIEW');
+
+      const dirId = await atCooReview('LEVEL_2');
+      await patchStatusMustNotMove(dirId, directorToken, 'COMPLAINT_HANDLING_FINALIZATION', 'COO_REVIEW');
+    });
+
+    it('YC-59b: PATCH tetap bisa mengubah metadata non-workflow', async () => {
+      const id = await newYc('LEVEL_1');
+      const res = await request(app.getHttpServer())
+        .patch(`${BASE}/complaints/${id}`)
+        .set('Authorization', `Bearer ${complaintHandlingToken}`)
+        .send({
+          priority: 'LOW',
+          channel: 'EMAIL',
+          customer_communication_notes: 'Nasabah dihubungi via email.',
+        })
+        .expect(200);
+      expect(res.body.priority).toBe('LOW');
+      expect(res.body.channel).toBe('EMAIL');
+      expect(res.body.customer_communication_notes).toContain('email');
+      expect(res.body.status).toBe('OPEN');
+    });
+
+    // ── Audit ────────────────────────────────────────────────
+
+    it('YC-60: setiap tahap menyimpan keputusan, catatan, aktor (nama), dan timestamp', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      await post(id, 'finance-review', financeStaffToken, {
+        decision: 'APPROVE',
+        notes: 'Catatan Finance Staff.',
+      }).expect(201);
+      await post(id, 'finance-manager-review', financeManagerToken, {
+        decision: 'APPROVE',
+        notes: 'Catatan Finance Manager.',
+      }).expect(201);
+      await post(id, 'resolve', complaintHandlingToken, {
+        resolution_notes: 'Selesai.',
+      }).expect(201);
+      await post(id, 'close', complaintHandlingToken, { closing_notes: 'Ditutup.' }).expect(201);
+
+      const res = await detail(id).expect(200);
+      for (const field of [
+        'data_verified_at',
+        'operation_investigated_at',
+        'coo_reviewed_at',
+        'finance_reviewed_at',
+        'finance_manager_reviewed_at',
+        'resolved_at',
+        'closed_at',
+      ]) {
+        expect(res.body[field]).not.toBeNull();
+      }
+      for (const field of [
+        'created_by_name',
+        'data_verified_by_name',
+        'operation_investigated_by_name',
+        'coo_reviewed_by_name',
+        'finance_reviewed_by_name',
+        'finance_manager_reviewed_by_name',
+        'resolved_by_name',
+        'closed_by_name',
+      ]) {
+        expect(res.body[field]).toBeTruthy();
+        // Nama aktor, bukan ID numerik
+        expect(String(res.body[field])).not.toMatch(/^\d+$/);
+      }
+      expect(res.body.coo_notes).toBeTruthy();
+      expect(res.body.finance_manager_notes).toBe('Catatan Finance Manager.');
+    });
+
+    it('YC-61: list complaint memuat keputusan COO & Finance Manager', async () => {
+      const id = await atCooReview('LEVEL_2');
+      await cooApprove(id).expect(201);
+      const res = await request(app.getHttpServer())
+        .get(`${BASE}/complaints?status=FINANCE_STAFF_REVIEW&limit=100`)
+        .set('Authorization', `Bearer ${cooToken}`)
+        .expect(200);
+      const row = res.body.data.find((c: any) => String(c.id) === String(id));
+      expect(row).toBeDefined();
+      expect(row.coo_decision).toBe('APPROVE');
+      expect(row).toHaveProperty('finance_manager_decision');
+    });
+
+    // ── Kompatibilitas tiket lama ────────────────────────────
+
+    it('YC-70: tiket dengan status legacy tetap bisa dibaca dan diselesaikan jalur lamanya', async () => {
+      // Simulasikan tiket pra-0070: sudah di FINANCE_REVIEW tanpa jejak COO.
+      const id = await atCooReview('LEVEL_2');
+      await pgPool.query(
+        `UPDATE complaints SET status = 'FINANCE_REVIEW', coo_reviewed_at = NULL WHERE id = $1`,
+        [id],
+      );
+
+      const res = await detail(id).expect(200);
+      expect(res.body.status).toBe('FINANCE_REVIEW');
+      expect(res.body.complaint_no).toBeTruthy();
+
+      // Routing legacy tetap berlaku: NO_REFUND → RESOLVED
+      const legacy = await post(id, 'finance-review', financeStaffToken, {
+        decision: 'NO_REFUND',
+        notes: 'Tidak perlu refund (jalur legacy).',
+      }).expect(201);
+      expect(legacy.body.status).toBe('RESOLVED');
+    });
+
+    it('YC-71: tiket legacy AML_REVIEW memakai routing lama (APPROVE → OPERATION_INVESTIGATION)', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await pgPool.query(
+        `UPDATE complaints SET status = 'AML_REVIEW', coo_reviewed_at = NULL WHERE id = $1`,
+        [id],
+      );
+      const res = await post(id, 'aml-review', complianceToken, {
+        decision: 'APPROVE',
+        notes: 'Jalur legacy kembali ke investigasi.',
+      }).expect(201);
+      expect(res.body.status).toBe('OPERATION_INVESTIGATION');
+    });
+
+    it('YC-72: RETURN ditolak pada tahap AML_REVIEW legacy', async () => {
+      const id = await atCooReview('LEVEL_3');
+      await pgPool.query(
+        `UPDATE complaints SET status = 'AML_REVIEW', coo_reviewed_at = NULL WHERE id = $1`,
+        [id],
+      );
+      await post(id, 'aml-review', complianceToken, {
+        decision: 'RETURN',
+        notes: 'RETURN tidak tersedia di tahap legacy.',
+      }).expect(400);
     });
   });
 

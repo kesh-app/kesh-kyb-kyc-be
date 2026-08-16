@@ -26,6 +26,14 @@ export const COMPLAINT_STATUSES = [
   'WAITING_CUSTOMER_DATA',
   'OPERATION_INVESTIGATION',
   'WAITING_BANK_CONFIRMATION',
+  // Alur berbasis complaint_level (migration 0070)
+  'COO_REVIEW',
+  'FINANCE_STAFF_REVIEW',
+  'FINANCE_MANAGER_REVIEW',
+  'COMPLIANCE_REVIEW',
+  'COMPLIANCE_HOLD',
+  'COMPLAINT_HANDLING_FINALIZATION',
+  // Legacy — tetap diterima agar tiket lama bisa difilter & diselesaikan
   'AML_REVIEW',
   'AML_HOLD',
   'FINANCE_REVIEW',
@@ -90,8 +98,12 @@ export class UpdateComplaintDto {
   @IsOptional() @IsString() @MaxLength(5000)
   customer_communication_notes?: string;
 
-  @IsOptional() @IsIn(COMPLAINT_STATUSES as any)
-  status?: string;
+  // `status` sengaja TIDAK ada di sini. Perpindahan tahap hanya boleh lewat
+  // endpoint workflow (verify-data, operation-investigation, coo-review,
+  // finance-review, finance-manager-review, compliance-review, resolve, close)
+  // supaya setiap transisi selalu punya keputusan + catatan + aktor + waktu.
+  // ValidationPipe whitelist membuang field ini kalau tetap dikirim, jadi
+  // SystemAdmin/Director pun tidak bisa memotong alur lewat PATCH generik.
 
   @IsOptional() @IsString() @MaxLength(5000)
   resolution_notes?: string;
@@ -136,16 +148,39 @@ export class OperationInvestigationDto {
   notes!: string;
 }
 
+// Kosakata per tahap (ditegakkan di service):
+//   COMPLIANCE_REVIEW      → APPROVE | REJECT | HOLD | RETURN
+//   COMPLIANCE_HOLD        → RESUME
+//   AML_REVIEW / AML_HOLD  → APPROVE | REJECT | HOLD   (legacy)
 export class AmlReviewDto {
-  @IsIn(['APPROVE', 'REJECT', 'HOLD'])
+  @IsIn(['APPROVE', 'REJECT', 'HOLD', 'RETURN', 'RESUME'])
   decision!: string;
 
   @IsString() @IsNotEmpty() @MaxLength(5000)
   notes!: string;
 }
 
+// NO_REFUND/REFUND_REQUIRED = tahap legacy FINANCE_REVIEW/REFUND_PROCESS.
+// APPROVE/RETURN = tahap FINANCE_STAFF_REVIEW pada alur level. Ditegakkan di service.
 export class ComplaintFinanceReviewDto {
-  @IsIn(['NO_REFUND', 'REFUND_REQUIRED'])
+  @IsIn(['NO_REFUND', 'REFUND_REQUIRED', 'APPROVE', 'RETURN'])
+  decision!: string;
+
+  @IsString() @IsNotEmpty() @MaxLength(5000)
+  notes!: string;
+}
+
+export class CooReviewDto {
+  @IsIn(['APPROVE', 'RETURN_TO_SUPERVISOR'])
+  decision!: string;
+
+  // Wajib untuk kedua keputusan — jejak alasan direksi harus selalu ada.
+  @IsString() @IsNotEmpty() @MaxLength(5000)
+  notes!: string;
+}
+
+export class FinanceManagerReviewDto {
+  @IsIn(['APPROVE', 'RETURN'])
   decision!: string;
 
   @IsString() @IsNotEmpty() @MaxLength(5000)

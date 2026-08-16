@@ -18,6 +18,7 @@ export type UserRow = {
     | "FrontDesk"
     | "ComplaintHandling"
     | "OperationSupervisor"
+    | "COO"
     | "ComplianceStaff"
     | "ComplianceLead"
     | "Auditor"

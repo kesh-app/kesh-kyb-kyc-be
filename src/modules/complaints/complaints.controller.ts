@@ -19,7 +19,9 @@ import {
   AmlReviewDto,
   CloseComplaintDto,
   ComplaintFinanceReviewDto,
+  CooReviewDto,
   CreateComplaintDto,
+  FinanceManagerReviewDto,
   ListComplaintsQueryDto,
   OperationInvestigationDto,
   ResolveComplaintDto,
@@ -32,6 +34,7 @@ import {
 const VIEW_ROLES = [
   "ComplaintHandling",
   "OperationSupervisor",
+  "COO",
   "ComplianceLead",
   "FinanceStaff",
   "FinanceManager",
@@ -41,9 +44,11 @@ const VIEW_ROLES = [
 // Pembagian aksi (di luar SystemAdmin/Director yang bypass di RolesGuard):
 //   ComplaintHandling  → create, update, verify-data, resolve, close
 //   OperationSupervisor→ operation-investigation
-//   ComplianceLead     → aml-review
+//   COO                → coo-review (hanya ini; tidak ada aksi lain di sistem)
+//   ComplianceLead     → compliance-review / aml-review (COMPLIANCE_REVIEW,
+//                        COMPLIANCE_HOLD, dan AML_REVIEW/AML_HOLD legacy)
 //   FinanceStaff       → finance-review (approval refund tetap di statement-refunds)
-//   FinanceManager     → read-only di modul ini
+//   FinanceManager     → finance-manager-review
 //   Auditor            → read-only
 @Controller("complaints")
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -135,8 +140,20 @@ export class ComplaintsController {
     return this.svc.operationInvestigation(id, req.user, dto);
   }
 
-  // AML / COMPLIANCE REVIEW
-  @Post(":id/aml-review")
+  // REVIEW COO — tujuan setelah APPROVE ditentukan complaint_level
+  @Post(":id/coo-review")
+  @Roles("COO")
+  async cooReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: CooReviewDto,
+  ) {
+    return this.svc.cooReview(id, req.user, dto);
+  }
+
+  // COMPLIANCE REVIEW — satu handler, dua nama rute: `compliance-review` untuk
+  // alur berbasis level, `aml-review` dipertahankan untuk konsumen lama.
+  @Post([":id/compliance-review", ":id/aml-review"])
   @Roles("ComplianceLead")
   async amlReview(
     @Req() req: any,
@@ -155,6 +172,17 @@ export class ComplaintsController {
     @Body() dto: ComplaintFinanceReviewDto,
   ) {
     return this.svc.financeReview(id, req.user, dto);
+  }
+
+  // FINANCE MANAGER REVIEW — persetujuan layer kedua LEVEL_2
+  @Post(":id/finance-manager-review")
+  @Roles("FinanceManager")
+  async financeManagerReview(
+    @Req() req: any,
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: FinanceManagerReviewDto,
+  ) {
+    return this.svc.financeManagerReview(id, req.user, dto);
   }
 
   // RESOLVE

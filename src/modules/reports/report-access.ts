@@ -10,26 +10,32 @@ import { REPORT_TYPES } from './dto';
 /** Boleh semua jenis report. RolesGuard sudah meloloskan SystemAdmin/Director. */
 const FULL_ACCESS_ROLES: readonly string[] = ['SystemAdmin', 'Director', 'ComplianceLead'];
 
-/** Read-only: boleh melihat & mengunduh semua, tidak boleh generate. */
-const READ_ONLY_ROLES: readonly string[] = ['Auditor'];
+/** Read-only: boleh melihat & mengunduh jatahnya, tidak boleh generate. */
+const READ_ONLY_ROLES: readonly string[] = ['Auditor', 'COO'];
 
 /** Divisi non-compliance hanya melihat jenis report miliknya sendiri. */
 const ROLE_REPORT_TYPES: Readonly<Record<string, readonly string[]>> = {
   ComplaintHandling: ['COMPLAINTS'],
   OperationSupervisor: ['COMPLAINTS'],
+  // COO ikut alur pengaduan, jadi hanya report COMPLAINTS — bukan seluruh
+  // Report Center. Read-only: tidak ikut generate.
+  COO: ['COMPLAINTS'],
   FinanceStaff: ['TRANSFERS'],
   FinanceManager: ['TRANSFERS'],
 };
 
 /**
  * Jenis report yang boleh dilihat/diunduh role ini. Array kosong = tidak punya
- * akses Report Center sama sekali.
+ * akses Report Center sama sekali. Jatah per divisi menang atas akses luas,
+ * supaya role read-only tetap bisa dibatasi ke jenis tertentu.
  */
 export function allowedReportTypes(role: string): readonly string[] {
+  const own = ROLE_REPORT_TYPES[role];
+  if (own) return own;
   if (FULL_ACCESS_ROLES.includes(role) || READ_ONLY_ROLES.includes(role)) {
     return REPORT_TYPES;
   }
-  return ROLE_REPORT_TYPES[role] ?? [];
+  return [];
 }
 
 export function canReadReports(role: string): boolean {
