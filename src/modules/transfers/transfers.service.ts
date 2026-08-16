@@ -205,6 +205,33 @@ export class TransfersService {
     }
   }
 
+  /**
+   * "Lainnya" pada Sumber Dana — sama persis dengan aturan KYC/KYB (0047):
+   * nilai dropdown TIDAK PERNAH diganti teks bebas; keterangannya disimpan
+   * terpisah di source_of_funds_other.
+   *
+   * `effectiveSourceOfFunds` adalah nilai yang akan tersimpan setelah operasi
+   * ini — pada PATCH bisa berasal dari baris lama kalau payload tidak
+   * menyentuh source_of_funds.
+   */
+  private static isLainnya(v: unknown): boolean {
+    return typeof v === "string" && v.trim().toLowerCase() === "lainnya";
+  }
+
+  private resolveSourceOfFundsOther(
+    effectiveSourceOfFunds: unknown,
+    raw: unknown,
+  ): string | null {
+    if (!TransfersService.isLainnya(effectiveSourceOfFunds)) return null;
+    const v = typeof raw === "string" ? raw.trim() : "";
+    if (!v) {
+      throw new BadRequestException(
+        "Keterangan lainnya wajib diisi untuk Sumber Dana.",
+      );
+    }
+    return v;
+  }
+
   // ---------------------------------------------------------------------------
   // INSERT satu baris transfer (DRAFT). Dipakai oleh create() dan bulkCreate().
   // `db` bisa Pool atau PoolClient (transaksi). Tidak melakukan audit/monitoring.
@@ -256,6 +283,7 @@ export class TransfersService {
         requested_execution_date,
         additional_info,
         source_of_funds,
+        source_of_funds_other,
         transaction_purpose,
         batch_id,
         beneficiary_mobile_number,
@@ -263,7 +291,7 @@ export class TransfersService {
       )
       VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32, now()
+        $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33, now()
       )
       RETURNING *`,
       [
@@ -301,6 +329,10 @@ export class TransfersService {
         dto.requested_execution_date ?? null,
         JSON.stringify(additionalInfo),
         dto.source_of_funds ?? null,
+        this.resolveSourceOfFundsOther(
+          dto.source_of_funds,
+          dto.source_of_funds_other,
+        ),
         dto.transaction_purpose ?? null,
         batchId,
         // No. HP penerima — wajib untuk BI-Fast Qlola pada bulk baru, opsional
@@ -563,6 +595,10 @@ export class TransfersService {
         requested_execution_date=COALESCE($23, requested_execution_date),
         additional_info=COALESCE($24, additional_info),
         source_of_funds=COALESCE($25, source_of_funds),
+        -- Sengaja TANPA COALESCE: kalau sumber dana pindah dari "Lainnya" ke
+        -- pilihan biasa, keterangan lamanya harus benar-benar hilang. COALESCE
+        -- akan menahan nilai basi itu tetap tersimpan.
+        source_of_funds_other=$28,
         transaction_purpose=COALESCE($26, transaction_purpose),
         updated_at=now()
       WHERE id=$1
@@ -597,6 +633,15 @@ export class TransfersService {
         dto.source_of_funds ?? null,
         dto.transaction_purpose ?? null,
         dto.beneficiary_relationship_to_sender,
+        // $28 — keterangan "Lainnya". Sumber dana efektif = nilai baru kalau
+        // dikirim, kalau tidak nilai lama; keterangannya pun begitu, supaya
+        // PATCH parsial yang tidak menyentuh sumber dana tidak menghapusnya.
+        this.resolveSourceOfFundsOther(
+          dto.source_of_funds ?? row.source_of_funds,
+          dto.source_of_funds_other !== undefined
+            ? dto.source_of_funds_other
+            : row.source_of_funds_other,
+        ),
       ],
     );
 
@@ -1765,7 +1810,7 @@ export class TransfersService {
          -- panggil detail. requested_transfer_at sengaja tidak ikut: hanya
          -- dipakai di detail/report, list tidak menampilkannya.
          t.transaction_date,
-         t.source_of_funds, t.transaction_purpose,
+         t.source_of_funds, t.source_of_funds_other, t.transaction_purpose,
          COALESCE(p.full_name, b.legal_name) AS sender_name,
          CASE WHEN p.cif_relationship_type = 'WIC' THEN NULL ELSE COALESCE(p.cif_no, b.cif_no) END AS sender_cif_no,
          p.cif_relationship_type AS sender_cif_relationship_type,

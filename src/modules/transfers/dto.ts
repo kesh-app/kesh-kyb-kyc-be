@@ -124,6 +124,13 @@ export class CreateTransferDto {
   @IsOptional() @IsString() @MaxLength(255)
   source_of_funds?: string;
 
+  // Keterangan manual saat source_of_funds = "Lainnya". Wajib/dikosongkan
+  // ditentukan di service (butuh nilai source_of_funds efektif, yang saat PATCH
+  // bisa berasal dari baris lama) — di sini hanya bentuk & panjangnya.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsOptional() @IsString() @MaxLength(255)
+  source_of_funds_other?: string;
+
   @IsOptional() @IsString() @MaxLength(255)
   transaction_purpose?: string;
 }
@@ -169,6 +176,13 @@ export class BulkTransferItemDto {
 
   @IsOptional() @IsString() @MaxLength(255)
   source_of_funds?: string;
+
+  // Aturan "Lainnya" yang sama seperti transfer tunggal — bulk memakai jalur
+  // insert yang sama (insertTransferRow). UI Bulk Transfer saat ini belum
+  // menangkap Sumber Dana sama sekali, jadi praktiknya selalu undefined.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsOptional() @IsString() @MaxLength(255)
+  source_of_funds_other?: string;
 
   @IsOptional() @IsString() @MaxLength(255)
   transaction_purpose?: string;

@@ -9323,6 +9323,211 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         ufTransferId = String(res.body.id);
       });
 
+      // ── UFO: keterangan "Lainnya" (migration 0071) ──────────────────
+      // Nilai dropdown source_of_funds TIDAK PERNAH diganti teks bebas;
+      // keterangannya disimpan terpisah di source_of_funds_other.
+      describe('UFO. source_of_funds_other — keterangan "Lainnya"', () => {
+        let ufoSeq = 0;
+
+        const makeBody = (over: Record<string, any> = {}) => {
+          ufoSeq += 1;
+          return {
+            amount: 60_000,
+            sender_application_id: Number(indivAppIdOk),
+            beneficiaryBankName: 'Bank BRI',
+            beneficiaryAccountNumber: '9988776655',
+            beneficiaryAccountName: `PT Penerima UFO ${ufoSeq}`,
+            beneficiary_relationship_to_sender: 'Keluarga',
+            ...over,
+          };
+        };
+
+        const createTf = (over: Record<string, any> = {}) =>
+          request(app.getHttpServer())
+            .post(`${BASE}/transfers`)
+            .set('Authorization', `Bearer ${frontDeskToken}`)
+            .send(makeBody(over));
+
+        const patchTf = (id: string, over: Record<string, any> = {}) =>
+          request(app.getHttpServer())
+            .patch(`${BASE}/transfers/${id}`)
+            .set('Authorization', `Bearer ${frontDeskToken}`)
+            .send(makeBody(over));
+
+        const detailTf = (id: string) =>
+          request(app.getHttpServer())
+            .get(`${BASE}/transfers/${id}`)
+            .set('Authorization', `Bearer ${financeManagerToken}`);
+
+        it('UFO-01: sumber dana selain "Lainnya" → 201 tanpa keterangan, other NULL', async () => {
+          const res = await createTf({ source_of_funds: 'Gaji' }).expect(201);
+          expect(res.body.source_of_funds).toBe('Gaji');
+          expect(res.body.source_of_funds_other).toBeNull();
+        });
+
+        it('UFO-02: selain "Lainnya" + keterangan basi terkirim → keterangan tetap NULL', async () => {
+          const res = await createTf({
+            source_of_funds: 'Gaji',
+            source_of_funds_other: 'sisa ketikan dari pilihan sebelumnya',
+          }).expect(201);
+          expect(res.body.source_of_funds).toBe('Gaji');
+          expect(res.body.source_of_funds_other).toBeNull();
+        });
+
+        it('UFO-03: "Lainnya" tanpa keterangan → 400', async () => {
+          const res = await createTf({ source_of_funds: 'Lainnya' }).expect(400);
+          expect(res.body.message).toMatch(/Keterangan lainnya wajib diisi untuk Sumber Dana/);
+        });
+
+        it('UFO-04: "Lainnya" dengan keterangan berisi spasi saja → 400', async () => {
+          await createTf({
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: '     ',
+          }).expect(400);
+        });
+
+        it('UFO-05: "Lainnya" dengan keterangan valid → 201, dropdown dipertahankan', async () => {
+          const res = await createTf({
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'Hasil penjualan aset',
+          }).expect(201);
+          // Nilai dropdown tidak tertimpa teks bebas
+          expect(res.body.source_of_funds).toBe('Lainnya');
+          expect(res.body.source_of_funds_other).toBe('Hasil penjualan aset');
+
+          const detail = await detailTf(String(res.body.id)).expect(200);
+          expect(detail.body.source_of_funds).toBe('Lainnya');
+          expect(detail.body.source_of_funds_other).toBe('Hasil penjualan aset');
+        });
+
+        it('UFO-06: keterangan di-trim sebelum disimpan', async () => {
+          const res = await createTf({
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: '   Hasil investasi properti   ',
+          }).expect(201);
+          expect(res.body.source_of_funds_other).toBe('Hasil investasi properti');
+        });
+
+        it('UFO-07: edit "Lainnya" → pilihan biasa menghapus keterangan (tidak menyisakan nilai basi)', async () => {
+          const created = await createTf({
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'Hasil investasi',
+          }).expect(201);
+          const id = String(created.body.id);
+
+          const updated = await patchTf(id, { source_of_funds: 'Gaji' }).expect(200);
+          expect(updated.body.source_of_funds).toBe('Gaji');
+          expect(updated.body.source_of_funds_other).toBeNull();
+
+          const detail = await detailTf(id).expect(200);
+          expect(detail.body.source_of_funds_other).toBeNull();
+        });
+
+        it('UFO-08: edit pilihan biasa → "Lainnya" mewajibkan keterangan', async () => {
+          const created = await createTf({ source_of_funds: 'Gaji' }).expect(201);
+          const id = String(created.body.id);
+
+          await patchTf(id, { source_of_funds: 'Lainnya' }).expect(400);
+          await patchTf(id, {
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: '   ',
+          }).expect(400);
+
+          const ok = await patchTf(id, {
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'Hasil penjualan kendaraan',
+          }).expect(200);
+          expect(ok.body.source_of_funds).toBe('Lainnya');
+          expect(ok.body.source_of_funds_other).toBe('Hasil penjualan kendaraan');
+        });
+
+        it('UFO-09: transfer REVISION_REQUIRED — keterangan bertahan lalu bisa diperbarui', async () => {
+          const created = await createTf({
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'Hasil investasi',
+          }).expect(201);
+          const id = String(created.body.id);
+
+          // Jalur revisi resmi: submit → supervisor APPROVE → finance RETURN
+          await request(app.getHttpServer())
+            .post(`${BASE}/transfers/${id}/submit`)
+            .set('Authorization', `Bearer ${frontDeskToken}`)
+            .expect(201);
+          await request(app.getHttpServer())
+            .post(`${BASE}/transfers/${id}/supervisor-review`)
+            .set('Authorization', `Bearer ${operationSupervisorToken}`)
+            .send({ action: 'APPROVE', notes: 'ok' })
+            .expect(201);
+          await request(app.getHttpServer())
+            .post(`${BASE}/transfers/${id}/finance-review`)
+            .set('Authorization', `Bearer ${financeStaffToken}`)
+            .send({ action: 'RETURN', notes: 'Mohon perjelas sumber dana yang dimaksud.' })
+            .expect(201);
+
+          // Form edit membaca detail — keduanya harus utuh untuk direstore
+          const beforeEdit = await detailTf(id).expect(200);
+          expect(beforeEdit.body.status).toBe('REVISION_REQUIRED');
+          expect(beforeEdit.body.source_of_funds).toBe('Lainnya');
+          expect(beforeEdit.body.source_of_funds_other).toBe('Hasil investasi');
+
+          const revised = await patchTf(id, {
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'Hasil investasi reksa dana',
+          }).expect(200);
+          expect(revised.body.source_of_funds).toBe('Lainnya');
+          expect(revised.body.source_of_funds_other).toBe('Hasil investasi reksa dana');
+        });
+
+        it('UFO-10: baris legacy "Lainnya" tanpa keterangan tetap terbaca', async () => {
+          const created = await createTf({
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'akan dikosongkan langsung di DB',
+          }).expect(201);
+          const id = String(created.body.id);
+
+          // Simulasikan baris pra-0071: dropdown "Lainnya", keterangan NULL.
+          await pgPool.query(
+            `UPDATE transfers SET source_of_funds_other = NULL WHERE id = $1`,
+            [id],
+          );
+
+          const detail = await detailTf(id).expect(200);
+          expect(detail.body.source_of_funds).toBe('Lainnya');
+          expect(detail.body.source_of_funds_other).toBeNull();
+
+          // Tapi begitu diedit ulang, keterangan jadi wajib.
+          await patchTf(id, { source_of_funds: 'Lainnya' }).expect(400);
+        });
+
+        it('UFO-11: klien lama tanpa source_of_funds_other tetap jalan selama bukan "Lainnya"', async () => {
+          const res = await createTf({
+            source_of_funds: 'Warisan',
+            transaction_purpose: 'Pembelian rumah',
+          }).expect(201);
+          expect(res.body.source_of_funds).toBe('Warisan');
+          expect(res.body.source_of_funds_other).toBeNull();
+        });
+
+        it('UFO-12: source_of_funds_other tidak mengubah hasil RBA (RBA membaca data KYC, bukan transfer)', async () => {
+          const before = await request(app.getHttpServer())
+            .get(`${BASE}/applications/${indivAppIdOk}`)
+            .set('Authorization', `Bearer ${complianceToken}`)
+            .expect(200);
+          const beforeRisk = before.body.risk?.risk_score ?? null;
+
+          await createTf({
+            source_of_funds: 'Lainnya',
+            source_of_funds_other: 'Pendapatan lain/Lainnya Investasi Hibah teks acak',
+          }).expect(201);
+
+          const after = await request(app.getHttpServer())
+            .get(`${BASE}/applications/${indivAppIdOk}`)
+            .set('Authorization', `Bearer ${complianceToken}`)
+            .expect(200);
+          expect(after.body.risk?.risk_score ?? null).toBe(beforeRisk);
+        });
+      });
+
       it('UF-02: GET /transfers/:id → mengembalikan source_of_funds + transaction_purpose', async () => {
         const res = await request(app.getHttpServer())
           .get(`${BASE}/transfers/${ufTransferId}`)

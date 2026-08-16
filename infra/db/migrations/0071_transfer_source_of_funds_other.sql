@@ -1,0 +1,23 @@
+-- 0071_transfer_source_of_funds_other.sql
+-- Pencatatan Transfer — kolom pendamping "Keterangan Sumber Dana Lainnya".
+--
+-- Sebelum ini, memilih "Lainnya" pada Sumber Dana membuat FE menimpa
+-- transfers.source_of_funds dengan teks bebas yang diketik user, sehingga nilai
+-- dropdown-nya hilang. Aturan yang sudah berlaku di KYC/KYB (migration 0047)
+-- adalah sebaliknya: kolom *_other TIDAK PERNAH menggantikan nilai dropdown.
+-- Kolom ini menyelaraskan transfer dengan aturan tersebut.
+--
+--   source_of_funds       = 'Lainnya'                 (nilai dropdown, tetap)
+--   source_of_funds_other = 'Hasil penjualan aset'    (keterangan manual)
+--
+-- Untuk pilihan selain "Lainnya": source_of_funds_other = NULL.
+--
+-- Aditif dan nullable. TIDAK ada backfill: baris lama yang terlanjur menyimpan
+-- teks bebas di source_of_funds dibiarkan apa adanya supaya tetap bisa dibaca —
+-- tidak ada deskripsi yang dikarang untuk data historis. Baris lama dengan
+-- source_of_funds='Lainnya' dan source_of_funds_other NULL tetap valid; detail
+-- baru diwajibkan saat baris itu diedit/diajukan ulang.
+--
+-- Idempotent: aman dijalankan ulang.
+
+ALTER TABLE transfers ADD COLUMN IF NOT EXISTS source_of_funds_other TEXT;
