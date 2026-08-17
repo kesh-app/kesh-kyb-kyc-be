@@ -40,6 +40,15 @@ export class AuthService {
     const ok = await this.users.verifyPassword(password, u.password_hash);
     if (!ok) throw new UnauthorizedException('Invalid credentials');
 
+    // Akun nonaktif tidak boleh dapat token. Dicek SETELAH password terbukti
+    // benar supaya status akun tidak bocor ke penebak password.
+    // Catatan: token yang SUDAH terbit tetap sah sampai kedaluwarsa (8 jam) —
+    // JwtStrategy sengaja tidak menyentuh DB per-request. Untuk pencabutan
+    // seketika, guard-nya harus pindah ke sana.
+    if (u.is_active === false) {
+      throw new UnauthorizedException('Account is inactive');
+    }
+
     try {
       await this.users.touchLastLogin(u.id);
     } catch (err) {

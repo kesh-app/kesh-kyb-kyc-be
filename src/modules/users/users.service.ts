@@ -29,6 +29,9 @@ export type UserRow = {
   branch_id: number | null;
   last_login_at: Date | null;
   created_at: Date;
+  // Kolomnya sudah lama ada di tabel dan ikut terbawa `SELECT *`, tapi belum
+  // pernah dideklarasikan di sini — akibatnya jalur login tidak bisa mengeceknya.
+  is_active: boolean;
 };
 
 @Injectable()

@@ -12,6 +12,8 @@
     "db:seed:regions": "node scripts/import-wilayah.cjs",
     "test:unit": "jest --testEnvironment node --testRegex \"src/.*\\.spec\\.ts$\" --transform \"{\\\"^.+\\\\.ts$\\\":\\\"ts-jest\\\"}\" --forceExit",
     "test:e2e": "jest --config test/e2e/jest-e2e.json --forceExit --detectOpenHandles",
+    "test:reset-script": "jest --testEnvironment node --testMatch \"**/scripts/reset-business-data.test.cjs\"",
+    "test:sanity-user-cleanup": "jest --testEnvironment node --testMatch \"**/scripts/deactivate-sanity-users.test.cjs\" --forceExit",
     "pm2:start": "pm2 start ecosystem.config.cjs --env development",
     "pm2:restart": "pm2 restart ecosystem.config.cjs --env development",
     "pm2:logs": "pm2 logs kesh-kyb-kyc-be-dev",
