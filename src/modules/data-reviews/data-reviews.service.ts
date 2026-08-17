@@ -300,7 +300,7 @@ export class DataReviewsService {
   }
 
   // ---------------------------------------------------------------------------
-  // INITIATE / REQUEST — ComplianceLead/SystemAdmin/Director
+  // INITIATE / REQUEST — ComplianceLead/FrontDesk/SystemAdmin/Director
   // ---------------------------------------------------------------------------
   async initiate(appId: number, user: AuthedUser, dto: InitiateDataReviewDto) {
     const app = await this.getApplication(appId);
@@ -331,11 +331,14 @@ export class DataReviewsService {
         actorId,
       ],
     );
-    await this.notifyReviewRole(
-      appId,
-      "FrontDesk",
-      `Aplikasi #${appId} — Compliance meminta pengkinian data`,
-    );
+    // Kalau FrontDesk sendiri yang initiate, tidak perlu notify diri sendiri.
+    if (user.role !== "FrontDesk") {
+      await this.notifyReviewRole(
+        appId,
+        "FrontDesk",
+        `Aplikasi #${appId} — Compliance meminta pengkinian data`,
+      );
+    }
     return rows[0];
   }
 

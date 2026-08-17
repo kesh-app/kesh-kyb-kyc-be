@@ -425,6 +425,39 @@ export class StatementRefundsService {
   }
 
   // ---------------------------------------------------------------------------
+  // RECEIPT — hanya untuk refund yang benar-benar APPROVED (satu-satunya status
+  // terminal yang bisa dicapai lewat API saat ini; BALANCE_CREDITED belum ada
+  // jalur pencapaiannya, lihat catatan balanceCreditStatus()). Gate ini
+  // ditegakkan di backend, bukan hanya visibilitas FE.
+  // ---------------------------------------------------------------------------
+  async getReceipt(id: number) {
+    const row = await this.getById(id);
+    if (row.status !== "APPROVED") {
+      throw new BadRequestException(
+        "Refund belum berstatus APPROVED — bukti refund belum dapat dicetak.",
+      );
+    }
+    return {
+      id: row.id,
+      public_id: row.public_id,
+      refund_no: row.refund_no,
+      status: row.status,
+      statement_date: row.statement_date,
+      approved_at: row.approved_at,
+      complaint_no: row.complaint_no,
+      original_transfer_reference_no: row.original_transfer_reference_no,
+      original_transfer_amount: row.original_transfer_amount,
+      customer_name: row.partner?.display_name ?? row.complaint_customer_name ?? null,
+      amount: row.amount,
+      currency: row.currency,
+      bank_name: row.bank_name,
+      bank_account_no: row.bank_account_no,
+      reason: row.finance_notes ?? row.investigation_notes ?? null,
+      approved_by_name: row.approved_by_name,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // UPDATE — hanya field pencatatan, dan hanya sebelum keputusan finance
   // ---------------------------------------------------------------------------
   async update(id: number, user: AuthedUser, dto: UpdateStatementRefundDto) {

@@ -56,10 +56,10 @@ export class DataReviewsController {
     return this.svc.getStatus(id);
   }
 
-  // INITIATE / REQUEST — ComplianceLead yang meminta pengkinian data, kapan saja
+  // INITIATE / REQUEST — ComplianceLead atau FrontDesk, kapan saja
   // (tidak harus menunggu jatuh tempo).
   @Post("initiate")
-  @Roles("ComplianceLead")
+  @Roles("ComplianceLead", "FrontDesk")
   async initiate(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,

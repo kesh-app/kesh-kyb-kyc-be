@@ -51,6 +51,15 @@ const EDITABLE_STATUSES = ["DRAFT", "REVISION_REQUIRED"];
 const WIC_TRANSFER_MAX_AMOUNT = 100_000_000;
 const WIC_LIMIT_ERROR = "Walk-In Customer (WIC) memiliki limit transaksi maksimal Rp100.000.000.";
 
+// EDD wajib level TRANSAKSI (bukan level customer/KYC) — independen dari
+// WIC_TRANSFER_MAX_AMOUNT, HIGH_VALUE_THRESHOLD (monitoring.service.ts, LTKM
+// supporting-only), dan CASH_THRESHOLD (LTKT). Amount >= threshold ini
+// otomatis menahan transfer di PENDING_COMPLIANCE_REVIEW (red flag
+// AMOUNT_EDD_THRESHOLD, lihat submit()) sampai ComplianceLead memutuskan —
+// TIDAK mengklasifikasikan LTKM dan TIDAK mengubah application_edd
+// permanen milik customer.
+const TRANSFER_EDD_AMOUNT_THRESHOLD = 50_000_000;
+
 // Tanggal Transaksi & Tanggal Diminta lahir dari jam PostgreSQL saat transfer
 // DISETUJUI (decide() APPROVE oleh FinanceManager) — bukan saat create, submit,
 // atau review antara. Tipe kolom menentukan fungsinya: transaction_date
@@ -888,9 +897,20 @@ export class TransfersService {
     const matchHits = hits.filter(
       (h) => classifyScreeningHit(null, Number(h.match_score)) === "MATCH",
     );
+    // EDD wajib transaksi — nominal saja, independen dari watchlist hit.
+    const amountRequiresEdd = Number(row.amount) >= TRANSFER_EDD_AMOUNT_THRESHOLD;
 
-    if (matchHits.length > 0) {
-      const redFlags = this.buildWatchlistRedFlags(matchHits);
+    if (matchHits.length > 0 || amountRequiresEdd) {
+      const redFlags = matchHits.length > 0 ? this.buildWatchlistRedFlags(matchHits) : [];
+      if (amountRequiresEdd) redFlags.push("AMOUNT_EDD_THRESHOLD");
+
+      const notesParts: string[] = [];
+      if (matchHits.length > 0) notesParts.push(this.buildWatchlistNotes(matchHits));
+      if (amountRequiresEdd) {
+        notesParts.push(
+          "Wajib EDD otomatis: nominal transaksi memenuhi ambang batas Rp50.000.000.",
+        );
+      }
 
       const flagged = await this.pool.query(
         `UPDATE transfers SET
@@ -907,12 +927,12 @@ export class TransfersService {
         `INSERT INTO transfer_compliance_reviews
            (transfer_id, status, red_flags, report_notes, reported_by, reported_at)
          VALUES ($1, 'OPEN', $2::jsonb, $3, $4, now())`,
-        [id, JSON.stringify(redFlags), this.buildWatchlistNotes(matchHits), actorId],
+        [id, JSON.stringify(redFlags), notesParts.join(" "), actorId],
       );
 
       await this.audit(
         actorId,
-        "TRANSFER_SUBMIT_WATCHLIST_HIT",
+        matchHits.length > 0 ? "TRANSFER_SUBMIT_WATCHLIST_HIT" : "TRANSFER_SUBMIT_AMOUNT_EDD",
         String(id),
         row,
         { ...flagged.rows[0], watchlist_hits: hits },
@@ -925,7 +945,9 @@ export class TransfersService {
       await this.notifyTransferRole(
         id,
         "ComplianceLead",
-        `Transfer ${flagged.rows[0].partner_reference_no ?? id} — beneficiary kena watchlist hit`,
+        matchHits.length > 0
+          ? `Transfer ${flagged.rows[0].partner_reference_no ?? id} — beneficiary kena watchlist hit`
+          : `Transfer ${flagged.rows[0].partner_reference_no ?? id} — wajib EDD (nominal ≥ Rp50.000.000)`,
         "Menunggu review compliance sebelum lanjut ke Operation Supervisor.",
       );
 

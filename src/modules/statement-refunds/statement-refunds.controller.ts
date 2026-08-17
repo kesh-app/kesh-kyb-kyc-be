@@ -35,17 +35,25 @@ import {
 export class StatementRefundsController {
   constructor(private readonly svc: StatementRefundsService) {}
 
-  // LIST — Finance kerja, Compliance & Auditor read-only
+  // LIST — Finance kerja, Compliance/Auditor/FrontDesk read-only
   @Get()
-  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "Auditor")
+  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "Auditor", "FrontDesk")
   async list(@Query() query: ListStatementRefundsQueryDto) {
     return this.svc.list(query);
   }
 
   @Get(":id")
-  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "Auditor")
+  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "Auditor", "FrontDesk")
   async detail(@Param("id", ParseIntPipe) id: number) {
     return this.svc.getById(id);
+  }
+
+  // RECEIPT — hanya refund APPROVED. FrontDesk boleh cetak, tapi tetap
+  // read-only (tidak ada aksi Finance di route ini).
+  @Get(":id/receipt")
+  @Roles("FinanceStaff", "FinanceManager", "ComplianceLead", "Auditor", "FrontDesk")
+  async receipt(@Param("id", ParseIntPipe) id: number) {
+    return this.svc.getReceipt(id);
   }
 
   // CREATE — pencatatan mutasi refund dari rekening koran (maker = FinanceStaff)

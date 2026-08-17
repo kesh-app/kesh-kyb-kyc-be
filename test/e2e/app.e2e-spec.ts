@@ -8905,6 +8905,15 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .post(`${BASE}/transfers/${trId}/submit`)
           .set('Authorization', `Bearer ${frontDeskToken}`)
           .expect(201);
+        // >= Rp50.000.000 wajib EDD (lihat blok TE) → submit() menahan di
+        // PENDING_COMPLIANCE_REVIEW. ComplianceLead lanjutkan dulu supaya
+        // status kembali SUBMITTED sebelum SystemAdmin memutus — nominal ini
+        // sendiri tidak relevan dengan yang diuji (transaction_date bucket).
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${trId}/compliance-review`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ action: 'APPROVE_TO_CONTINUE' })
+          .expect(201);
         // SystemAdmin punya full access → boleh memutus langsung dari SUBMITTED.
         const decided = await request(app.getHttpServer())
           .post(`${BASE}/transfers/${trId}/decision`)
@@ -16089,11 +16098,21 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(status.body.status).toBe('DRAFT');
     });
 
-    it('ZP-05b: FrontDesk tidak dapat initiate pengkinian (milik ComplianceLead) → 403', async () => {
+    it('ZP-05b: FrontDesk juga dapat initiate pengkinian → 201 DRAFT', async () => {
       const appId = await makeReviewApp('IF', 'LOW', '2020-01-01T00:00:00.000Z');
-      await request(app.getHttpServer())
+      const res = await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/initiate`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({})
+        .expect(201);
+      expect(res.body.status).toBe('DRAFT');
+    });
+
+    it('ZP-05c: Auditor tidak dapat initiate pengkinian → 403', async () => {
+      const appId = await makeReviewApp('IFA', 'LOW', '2020-01-01T00:00:00.000Z');
+      await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${auditorToken}`)
         .send({})
         .expect(403);
     });
@@ -16825,39 +16844,150 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
     });
 
-    it('SR-14c: FrontDesk & OperationSupervisor terblokir dari seluruh endpoint refund → 403', async () => {
+    it('SR-14c: OperationSupervisor terblokir dari seluruh endpoint refund → 403', async () => {
       const { id } = await matchedRefund('S14D');
-      for (const token of [frontDeskToken, operationSupervisorToken]) {
-        const auth = `Bearer ${token}`;
-        await request(app.getHttpServer())
-          .get(`${BASE}/statement-refunds`)
-          .set('Authorization', auth)
-          .expect(403);
-        await request(app.getHttpServer())
-          .get(`${BASE}/statement-refunds/${id}`)
-          .set('Authorization', auth)
-          .expect(403);
-        await createRefund(refundPayload(), token).expect(403);
-        await request(app.getHttpServer())
-          .patch(`${BASE}/statement-refunds/${id}`)
-          .set('Authorization', auth)
-          .send({ bank_name: 'X' })
-          .expect(403);
-        await request(app.getHttpServer())
-          .post(`${BASE}/statement-refunds/${id}/match`)
-          .set('Authorization', auth)
-          .send({ original_transfer_id: 1 })
-          .expect(403);
-        await request(app.getHttpServer())
-          .post(`${BASE}/statement-refunds/${id}/submit`)
-          .set('Authorization', auth)
-          .expect(403);
-        await request(app.getHttpServer())
-          .post(`${BASE}/statement-refunds/${id}/decision`)
-          .set('Authorization', auth)
-          .send({ decision: 'APPROVED' })
-          .expect(403);
-      }
+      const auth = `Bearer ${operationSupervisorToken}`;
+      await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds`)
+        .set('Authorization', auth)
+        .expect(403);
+      await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', auth)
+        .expect(403);
+      await createRefund(refundPayload(), operationSupervisorToken).expect(403);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', auth)
+        .send({ bank_name: 'X' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/match`)
+        .set('Authorization', auth)
+        .send({ original_transfer_id: 1 })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', auth)
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', auth)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}/receipt`)
+        .set('Authorization', auth)
+        .expect(403);
+    });
+
+    // ── FrontDesk: read-only, termasuk receipt — K-01..K-06, K-09..K-11 ──────
+    it('SR-14d: FrontDesk dapat GET list & detail refund', async () => {
+      const { id } = await matchedRefund('S14FD');
+      const list = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(Array.isArray(list.body.data)).toBe(true);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(detail.body.id).toBe(id);
+    });
+
+    it('SR-14e: FrontDesk tidak dapat create/edit/match/submit/decision refund → 403', async () => {
+      const { id } = await matchedRefund('S14FE');
+      const auth = `Bearer ${frontDeskToken}`;
+      await createRefund(refundPayload(), frontDeskToken).expect(403);
+      await request(app.getHttpServer())
+        .patch(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', auth)
+        .send({ bank_name: 'X' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/match`)
+        .set('Authorization', auth)
+        .send({ original_transfer_id: 1 })
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', auth)
+        .expect(403);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', auth)
+        .send({ decision: 'APPROVED' })
+        .expect(403);
+    });
+
+    it('SR-14f: FinanceStaff & FinanceManager existing capabilities tidak berubah oleh akses FrontDesk', async () => {
+      const { id } = await matchedRefund('S14FF');
+      await request(app.getHttpServer())
+        .patch(`${BASE}/statement-refunds/${id}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ bank_name: 'Bank KESH Updated' })
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED', finance_notes: 'OK' })
+        .expect(201);
+      expect(res.body.status).toBe('APPROVED');
+    });
+
+    // ── Receipt — hanya APPROVED, gate di backend (K-09..K-11) ───────────────
+    it('SR-14g: FrontDesk dapat GET receipt untuk refund APPROVED', async () => {
+      const { id } = await matchedRefund('S14G');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVED', finance_notes: 'OK' })
+        .expect(201);
+
+      const receipt = await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}/receipt`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(receipt.body.status).toBe('APPROVED');
+      expect(receipt.body.refund_no).toMatch(/^KESH-RFD-/);
+      expect(receipt.body.approved_by_name).toBeTruthy();
+    });
+
+    it('SR-14h: FrontDesk tidak bisa GET receipt untuk refund yang masih PENDING_APPROVAL → 400', async () => {
+      const { id } = await matchedRefund('S14H');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}/receipt`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(400);
+    });
+
+    it('SR-14i: FrontDesk tidak bisa GET receipt untuk refund REJECTED → 400', async () => {
+      const { id } = await pendingRefund('S14I');
+      await request(app.getHttpServer())
+        .post(`${BASE}/statement-refunds/${id}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'REJECTED', reason: 'Data tidak cocok' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .get(`${BASE}/statement-refunds/${id}/receipt`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(400);
     });
 
     // ── Decision ────────────────────────────────────────────────────────────
@@ -17971,6 +18101,164 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         );
         expect(afterForce.length).toBe(0);
       });
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // TE. Transfer EDD Amount Threshold — amount >= Rp50.000.000 pada submit()
+  // menahan transfer di PENDING_COMPLIANCE_REVIEW dengan red flag
+  // AMOUNT_EDD_THRESHOLD (independen dari watchlist hit). TIDAK
+  // mengklasifikasikan LTKM, TIDAK mengubah application_edd customer.
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('TE. Transfer EDD Amount Threshold', () => {
+    let teSenderAppId: string;
+
+    beforeAll(async () => {
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `TRF EDD Threshold ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3166${SUFFIX}`,
+          address_identity: 'Jl. EDD Threshold No. 1',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0879${SUFFIX}`,
+          occupation: 'Wiraswasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      teSenderAppId = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [
+        teSenderAppId,
+      ]);
+    }, 30000);
+
+    async function createDraft(amount: number, beneficiaryName: string): Promise<string> {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          amount,
+          sender_application_id: Number(teSenderAppId),
+          beneficiaryBankName: 'Bank Test',
+          beneficiaryAccountNumber: '9988776655',
+          beneficiaryAccountName: beneficiaryName,
+          beneficiary_relationship_to_sender: 'Keluarga',
+        })
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    function submitTransfer(txId: string) {
+      return request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/submit`)
+        .set('Authorization', `Bearer ${financeStaffToken}`);
+    }
+
+    it('TE-01: amount 49.999.999 → SUBMITTED, tidak ada red flag EDD', async () => {
+      const txId = await createDraft(49_999_999, `EDD Below ${SUFFIX}`);
+      const res = await submitTransfer(txId).expect(201);
+      expect(res.body.status).toBe('SUBMITTED');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.compliance_review_status).toBeNull();
+    });
+
+    it('TE-02: amount 50.000.000 (boundary tepat) → PENDING_COMPLIANCE_REVIEW + AMOUNT_EDD_THRESHOLD', async () => {
+      const txId = await createDraft(50_000_000, `EDD Boundary A ${SUFFIX}`);
+      const res = await submitTransfer(txId).expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.compliance_review_status).toBe('OPEN');
+      expect(detail.body.latest_compliance_review.red_flags).toEqual(
+        expect.arrayContaining(['AMOUNT_EDD_THRESHOLD']),
+      );
+      expect(detail.body.latest_compliance_review.report_notes).toContain('EDD');
+    });
+
+    it('TE-03: amount 50.000.001 → PENDING_COMPLIANCE_REVIEW + AMOUNT_EDD_THRESHOLD', async () => {
+      const txId = await createDraft(50_000_001, `EDD Boundary B ${SUFFIX}`);
+      const res = await submitTransfer(txId).expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.latest_compliance_review.red_flags).toEqual(
+        expect.arrayContaining(['AMOUNT_EDD_THRESHOLD']),
+      );
+    });
+
+    it('TE-04: AMOUNT_EDD_THRESHOLD tidak mengubah application_edd.edd_required customer', async () => {
+      const txId = await createDraft(75_000_000, `EDD NonPermanent ${SUFFIX}`);
+      await submitTransfer(txId).expect(201);
+
+      const eddRows = await pgPool.query(
+        `SELECT edd_required FROM application_edd WHERE application_id=$1`,
+        [teSenderAppId],
+      );
+      if ((eddRows.rowCount ?? 0) > 0) {
+        expect(eddRows.rows[0].edd_required).not.toBe(true);
+      }
+    });
+
+    it('TE-05: ComplianceLead tetap bisa APPROVE_TO_CONTINUE transfer wajib-EDD-amount', async () => {
+      const txId = await createDraft(60_000_000, `EDD Continue ${SUFFIX}`);
+      await submitTransfer(txId).expect(201);
+
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/compliance-review`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({ action: 'APPROVE_TO_CONTINUE' })
+        .expect(201);
+      expect(res.body.status).toBe('SUBMITTED');
+    });
+
+    it('TE-06: bulk child transfer amount >= 50.000.000 mengikuti rule EDD yang sama', async () => {
+      const bulk = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/bulk`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({
+          sender_application_id: Number(teSenderAppId),
+          qlola_debit_account: '1234567890123',
+          qlola_sender_name: `EDD Bulk Sender ${SUFFIX}`,
+          items: [
+            {
+              amount: 55_000_000,
+              beneficiaryBankName: 'Bank Test',
+              beneficiaryAccountNumber: '1231231231',
+              beneficiaryAccountName: `EDD Bulk Child ${SUFFIX}`,
+              beneficiary_relationship_to_sender: 'Keluarga',
+              beneficiary_mobile_number: '081234567890',
+            },
+          ],
+        })
+        .expect(201);
+      const childId = String(bulk.body.transfers[0].id);
+
+      const res = await submitTransfer(childId).expect(201);
+      expect(res.body.status).toBe('PENDING_COMPLIANCE_REVIEW');
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${childId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.latest_compliance_review.red_flags).toEqual(
+        expect.arrayContaining(['AMOUNT_EDD_THRESHOLD']),
+      );
     });
   });
 

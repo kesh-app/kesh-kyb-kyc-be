@@ -297,6 +297,9 @@ export const TRANSFER_RED_FLAG_CODES = [
   // Diisi otomatis oleh screening beneficiary saat submit (bukan input manual).
   'WATCHLIST_HIT',
   'DTTOT_HIT',
+  // Diisi otomatis saat submit bila amount >= Rp50.000.000 (bukan input manual).
+  // EDD wajib TRANSAKSI ini — bukan LTKM, bukan application_edd customer.
+  'AMOUNT_EDD_THRESHOLD',
   'DOCUMENT_OR_INFORMATION_UNUSUAL',
   'OTHER',
 ] as const;

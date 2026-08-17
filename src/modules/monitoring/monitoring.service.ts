@@ -96,7 +96,7 @@ const MONITORING_ALERT_TEMPLATES: Record<string, AlertTemplate> = {
       "Transaksi oleh nasabah/merchant kategori risiko tinggi sehingga wajib EDD.",
     parameters: [
       "PEP/Sanction/Adverse News",
-      "Transaksi ≥ Rp500 juta/hari",
+      "Kategori risiko tinggi (RBA)",
       "Rapid movement of funds",
     ],
     analysis:
