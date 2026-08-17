@@ -405,9 +405,11 @@ export class ApplicationsService {
   // (e.g. source_of_funds = "Lainnya") is preserved for strict RBA scoring; the
   // typed description lives separately in the matching *_other column.
 
-  /** True only when the dropdown value is exactly "Lainnya" (case-insensitive). */
+  /** Accept UI enum and its canonical RBA label ending in "/Lainnya". */
   private isLainnya(v: unknown): boolean {
-    return typeof v === "string" && v.trim().toLowerCase() === "lainnya";
+    if (typeof v !== "string") return false;
+    const normalized = v.trim().toLowerCase();
+    return normalized === "lainnya" || normalized.endsWith("/lainnya");
   }
 
   private cleanText(v: unknown): string | null {
@@ -878,6 +880,57 @@ export class ApplicationsService {
       dto.pob || null,
       dto.dob || null,
     ];
+    const applySharedWicFields = async (
+      executor: { query: (sql: string, params?: any[]) => Promise<any> },
+      pid: number,
+    ) => {
+      const values: Array<[string, any]> = [];
+      const add = (column: string, value: any) => values.push([column, value]);
+      const addDto = (key: string, column = key) => {
+        if (Object.prototype.hasOwnProperty.call(dto, key)) {
+          add(column, typeof dto[key] === "string" && dto[key].trim() === "" ? null : (dto[key] ?? null));
+        }
+      };
+      for (const key of [
+        "full_name", "alias", "ktp_number", "sim_number", "passport_number",
+        "address_residential", "street_address", "house_number", "rt_rw",
+        "apartment_block", "address_landmark", "pob", "dob", "nationality",
+        "phone", "occupation", "industry_category", "company_name",
+        "company_address", "monthly_income_range", "gender", "email",
+        "signature_uri", "source_of_funds", "business_relationship_purpose",
+        "distribution_channel", "pep_self_declared",
+      ]) addDto(key);
+      if (Object.prototype.hasOwnProperty.call(dto, "address_identity") ||
+          ["street_address", "house_number", "rt_rw", "apartment_block", "address_landmark",
+           "province_code", "city_code", "district_code", "village_code"].some((key) =>
+            Object.prototype.hasOwnProperty.call(dto, key))) {
+        add("address_identity", effectiveAddressIdentity);
+      }
+      for (const level of ["province", "city", "district", "village"]) {
+        const codeKey = level + "_code";
+        if (Object.prototype.hasOwnProperty.call(dto, codeKey)) {
+          add(codeKey, dto[codeKey] || null);
+          add(level + "_name", regionNames[level + "_name"] || null);
+        }
+      }
+      for (const [main, other] of [
+        ["occupation", "occupation_other"],
+        ["industry_category", "industry_category_other"],
+        ["source_of_funds", "source_of_funds_other"],
+        ["business_relationship_purpose", "business_relationship_purpose_other"],
+        ["wic_transaction_purpose", "wic_transaction_purpose_other"],
+        ["wic_recipient_relationship", "wic_recipient_relationship_other"],
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(dto, main)) add(other, indivOther[other]);
+      }
+      if (!values.length) return;
+      await executor.query(
+        "UPDATE persons SET " +
+          values.map(([column], index) => column + " = $" + (index + 1)).join(", ") +
+          " WHERE id = $" + (values.length + 1),
+        [...values.map(([, value]) => value), pid],
+      );
+    };
 
     const client = await this.pool.connect();
     try {
@@ -981,6 +1034,7 @@ export class ApplicationsService {
           );
         }
         await client.query(wicPersonUpdateSql, wicPersonUpdateParams(personId!));
+        await applySharedWicFields(client, personId!);
       } else if (!personHasCif) {
         const existingCif = await this.resolveCifForIdentity(
           dto.identity_number,
@@ -1036,6 +1090,7 @@ export class ApplicationsService {
               wicPersonUpdateSql,
               wicPersonUpdateParams(personId),
             );
+            await applySharedWicFields(this.pool, personId);
           } else if (!pRows[0]?.cif_no) {
             const existingCif = await this.resolveCifForIdentity(
               dto.identity_number,
@@ -1093,7 +1148,11 @@ export class ApplicationsService {
     ip?: string,
   ) {
     const { rows: apps } = await this.pool.query(
-      `SELECT id, type, status, person_id FROM applications WHERE id=$1`,
+      `SELECT a.id, a.type, a.status, a.person_id,
+              p.cif_relationship_type, p.identity_type
+         FROM applications a
+         LEFT JOIN persons p ON p.id = a.person_id
+        WHERE a.id=$1`,
       [appId],
     );
     const app = apps[0];
@@ -1172,99 +1231,56 @@ export class ApplicationsService {
       );
     }
 
+    const hasKey = (key: string) =>
+      Object.prototype.hasOwnProperty.call(dto, key);
     const relType = this.normalizeCifRelationshipType(
-      dto.cif_relationship_type,
+      hasKey("cif_relationship_type")
+        ? dto.cif_relationship_type
+        : app.cif_relationship_type,
     );
 
     const regionNames = await this.resolveRegionNames(dto);
-    const effectiveAddressIdentity: string | null =
-      dto.address_identity ||
-      [
-        dto.street_address,
-        dto.house_number ? `No. ${dto.house_number}` : null,
-        dto.rt_rw ? `RT/RW ${dto.rt_rw}` : null,
-        dto.apartment_block,
-        regionNames.village_name,
-        regionNames.district_name,
-        regionNames.city_name,
-        regionNames.province_name,
-        dto.address_landmark ? `Patokan: ${dto.address_landmark}` : null,
-      ]
-        .filter(Boolean)
-        .join(", ") ||
-      null;
-
-    await this.pool.query(
-      `UPDATE persons SET
-          alias = $1,
-          ktp_number = $2,
-          identity_number = COALESCE($3, identity_number),
-          sim_number = $4,
-          passport_number = $5,
-          province_code = $6,
-          province_name = $7,
-          city_code = $8,
-          city_name = $9,
-          district_code = $10,
-          district_name = $11,
-          village_code = $12,
-          village_name = $13,
-          street_address = $14,
-          house_number = $15,
-          rt_rw = $16,
-          apartment_block = $17,
-          address_landmark = $18,
-          address_identity = $19,
-          nationality = $20,
-          occupation = $21,
-          industry_category = $22,
-          company_name = $23,
-          company_address = $24,
-          monthly_income_range = $25,
-          source_of_funds = $26,
-          business_relationship_purpose = $27,
-          distribution_channel = $28
-       WHERE id = $29`,
-      [
-        clean(dto.alias),
-        clean(dto.ktp_number),
-        clean(dto.ktp_number),
-        clean(dto.sim_number),
-        clean(dto.passport_number),
-        clean(dto.province_code),
-        regionNames.province_name,
-        clean(dto.city_code),
-        regionNames.city_name,
-        clean(dto.district_code),
-        regionNames.district_name,
-        clean(dto.village_code),
-        regionNames.village_name,
-        clean(dto.street_address),
-        clean(dto.house_number),
-        clean(dto.rt_rw),
-        clean(dto.apartment_block),
-        clean(dto.address_landmark),
-        effectiveAddressIdentity,
-        clean(dto.nationality),
-        clean(dto.occupation),
-        clean(dto.industry_category),
-        clean(dto.company_name),
-        clean(dto.company_address),
-        clean(dto.monthly_income_range),
-        clean(dto.source_of_funds),
-        clean(dto.business_relationship_purpose),
-        clean(dto.distribution_channel),
-        app.person_id,
-      ],
-    );
+    // Shared CDD sends a true PATCH. Updating only supplied keys prevents a save
+    // or refetch from clearing unrelated fields on legacy/sparse WIC records.
+    const changes: Array<[string, any]> = [];
+    const add = (column: string, value: any) => changes.push([column, value]);
+    for (const key of [
+      "full_name", "alias", "identity_type", "identity_number", "ktp_number",
+      "sim_number", "passport_number", "address_identity", "address_residential",
+      "street_address", "house_number", "rt_rw", "apartment_block",
+      "address_landmark", "pob", "dob", "nationality", "phone", "occupation",
+      "industry_category", "company_name", "company_address",
+      "monthly_income_range", "gender", "email", "signature_uri",
+      "source_of_funds", "business_relationship_purpose", "distribution_channel",
+      "pep_self_declared",
+    ]) {
+      if (hasKey(key)) add(key, clean(dto[key]));
+    }
+    if (hasKey("ktp_number") && !hasKey("identity_number") &&
+        (dto.identity_type ?? app.identity_type) === "KTP") {
+      add("identity_number", clean(dto.ktp_number));
+    }
+    for (const level of ["province", "city", "district", "village"]) {
+      const codeKey = `${level}_code`;
+      if (hasKey(codeKey)) {
+        add(codeKey, clean(dto[codeKey]));
+        add(`${level}_name`, regionNames[`${level}_name`] ?? null);
+      }
+    }
+    if (changes.length) {
+      await this.pool.query(
+        `UPDATE persons
+            SET ${changes.map(([column], index) => `${column} = $${index + 1}`).join(", ")}
+          WHERE id = $${changes.length + 1}`,
+        [...changes.map(([, value]) => value), app.person_id],
+      );
+    }
 
     // WIC minimum CDD fields (Tujuan Transaksi & Hubungan dengan Penerima) are
     // only touched when the PATCH body actually carries the key. Omitting them
     // must PRESERVE the values saved at create time — otherwise an unrelated
     // edit on the detail page would wipe them and block WIC submit. An explicit
     // value (including empty → null) is still honoured when sent.
-    const hasKey = (k: string) =>
-      Object.prototype.hasOwnProperty.call(dto, k);
     if (hasKey("wic_transaction_purpose")) {
       await this.pool.query(
         `UPDATE persons SET wic_transaction_purpose = $1 WHERE id = $2`,
@@ -1278,17 +1294,17 @@ export class ApplicationsService {
       );
     }
 
-    // "Lainnya" companions. occupation/source_of_funds/business purpose/industry
-    // follow the same full-replace semantics as their main columns above; the WIC
-    // pairs are conditional (preserve when the main key is omitted).
+    // "Lainnya" companions follow the same partial semantics as their main
+    // columns: omitting the dropdown preserves both values.
     await this.applyOtherFieldsPatch(app.person_id, dto, [
-      { main: "occupation", other: "occupation_other" },
-      { main: "source_of_funds", other: "source_of_funds_other" },
+      { main: "occupation", other: "occupation_other", mainConditional: true },
+      { main: "source_of_funds", other: "source_of_funds_other", mainConditional: true },
       {
         main: "business_relationship_purpose",
         other: "business_relationship_purpose_other",
+        mainConditional: true,
       },
-      { main: "industry_category", other: "industry_category_other" },
+      { main: "industry_category", other: "industry_category_other", mainConditional: true },
       {
         main: "wic_transaction_purpose",
         other: "wic_transaction_purpose_other",
@@ -1336,8 +1352,8 @@ export class ApplicationsService {
   /**
    * Update Informasi Identitas Badan Usaha (KYB) untuk aplikasi DRAFT /
    * REVISION_REQUIRED. Bersifat PATCH parsial: hanya key yang dikirim yang
-   * diubah — berbeda dari updateIndividualCdd yang full-replace, karena kolom
-   * badan usaha banyak yang NOT NULL dan FE revisi hanya mengirim yang diedit.
+   * diubah — sama seperti updateIndividualCdd; FE revisi hanya mengirim field
+   * yang benar-benar diedit.
    *
    * Risiko/RBA TIDAK dihitung ulang di sini: createBusiness pun tidak
    * menghitungnya. Skor baru terbentuk saat submit (screenAndComputeRisk), jadi

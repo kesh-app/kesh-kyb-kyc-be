@@ -150,7 +150,7 @@ export class CreateIndividualDto {
 
   @IsOptional()
   @IsString()
-  monthly_income_range?: string;
+  monthly_income_range?: string | null;
 
   @ValidateIf((o) => o.cif_relationship_type !== "WIC")
   @IsIn(["M", "F", "O"])

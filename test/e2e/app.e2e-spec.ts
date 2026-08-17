@@ -7389,6 +7389,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
     it('RW-01: WIC with identity + signature/biometric docs → submit 200', async () => {
       const appId = await createWic(`3399100${SUFFIX}`);
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set(...auth())
+        .expect(200);
+      expect(detail.body.person.monthly_income_range).toBeNull();
       await addDoc(appId, 'WIC_IDENTITY_DOCUMENT');
       await addDoc(appId, 'WIC_SIGNATURE_BIOMETRIC');
 
@@ -7712,6 +7717,109 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(200);
       expect(detail2.body.person.cif_no).toBe(cif);
       expect(detail2.body.person.cif_relationship_type).toBe('OUR_CUSTOMER');
+    });
+
+    it('RW-15: create WIC persists the full shared CDD field set without issuing CIF', async () => {
+      const nik = '3392500' + SUFFIX;
+      const appId = await createWicRaw(nik, {
+        alias: 'Alias WIC Lengkap',
+        address_residential: 'Jl. Domisili WIC No. 2',
+        phone: '08125' + SUFFIX,
+        email: 'wic.full.' + SUFFIX + '@example.test',
+        nationality: 'Indonesia',
+        gender: 'F',
+        occupation: 'Karyawan',
+        industry_category: 'Makanan dan Minuman',
+        company_name: 'PT WIC Lengkap',
+        company_address: 'Jl. Tempat Kerja No. 3',
+        monthly_income_range: 'Rata-rata Rp5 juta sampai Rp10 juta per bulan',
+        source_of_funds: 'Lainnya',
+        source_of_funds_other: 'Honor konsultasi',
+        business_relationship_purpose: 'Lainnya',
+        business_relationship_purpose_other: 'Pembayaran keluarga',
+        distribution_channel: 'Aplikasi Digital',
+        wic_transaction_purpose: 'Pembayaran kebutuhan',
+        wic_recipient_relationship: 'Keluarga',
+      });
+
+      const detail = await request(app.getHttpServer())
+        .get(BASE + '/applications/' + appId)
+        .set(...auth())
+        .expect(200);
+      expect(detail.body.person).toMatchObject({
+        cif_relationship_type: 'WIC',
+        cif_no: null,
+        alias: 'Alias WIC Lengkap',
+        address_residential: 'Jl. Domisili WIC No. 2',
+        phone: '08125' + SUFFIX,
+        email: 'wic.full.' + SUFFIX + '@example.test',
+        nationality: 'Indonesia',
+        gender: 'F',
+        occupation: 'Karyawan',
+        industry_category: 'Makanan dan Minuman',
+        company_name: 'PT WIC Lengkap',
+        source_of_funds: 'Lainnya',
+        source_of_funds_other: 'Honor konsultasi',
+        business_relationship_purpose: 'Lainnya',
+        business_relationship_purpose_other: 'Pembayaran keluarga',
+        distribution_channel: 'Aplikasi Digital',
+      });
+    });
+
+    it('RW-16: editing sparse legacy WIC with shared fields is partial and preserves classification', async () => {
+      const appId = await createWic('3392600' + SUFFIX);
+      await request(app.getHttpServer())
+        .patch(BASE + '/applications/' + appId)
+        .set(...auth())
+        .send({
+          alias: 'Legacy kini lengkap',
+          phone: '08126' + SUFFIX,
+          source_of_funds: 'Lainnya',
+          source_of_funds_other: 'Pendapatan proyek',
+        })
+        .expect(200);
+
+      const detail = await request(app.getHttpServer())
+        .get(BASE + '/applications/' + appId)
+        .set(...auth())
+        .expect(200);
+      expect(detail.body.person.cif_relationship_type).toBe('WIC');
+      expect(detail.body.person.cif_no).toBeNull();
+      expect(detail.body.person.alias).toBe('Legacy kini lengkap');
+      expect(detail.body.person.phone).toBe('08126' + SUFFIX);
+      expect(detail.body.person.source_of_funds_other).toBe('Pendapatan proyek');
+      expect(detail.body.person.wic_transaction_purpose).toBe('Pembelian barang');
+      expect(detail.body.person.wic_recipient_relationship).toBe('Keluarga');
+    });
+
+    it('RW-17: reused WIC identity persists newly supplied shared CDD fields', async () => {
+      const nik = '3392700' + SUFFIX;
+      await createWicRaw(nik, {
+        wic_transaction_purpose: 'Pembayaran pertama',
+        wic_recipient_relationship: 'Keluarga',
+      });
+      const app2 = await createWicRaw(nik, {
+        alias: 'Alias Reuse WIC',
+        phone: '08127' + SUFFIX,
+        occupation: 'Wiraswasta',
+        source_of_funds: 'Gaji',
+        wic_transaction_purpose: 'Pembayaran kedua',
+        wic_recipient_relationship: 'Rekan bisnis',
+      });
+      const detail = await request(app.getHttpServer())
+        .get(BASE + '/applications/' + app2)
+        .set(...auth())
+        .expect(200);
+      expect(detail.body.person).toMatchObject({
+        cif_relationship_type: 'WIC',
+        cif_no: null,
+        alias: 'Alias Reuse WIC',
+        phone: '08127' + SUFFIX,
+        occupation: 'Wiraswasta',
+        source_of_funds: 'Gaji',
+        wic_transaction_purpose: 'Pembayaran kedua',
+        wic_recipient_relationship: 'Rekan bisnis',
+      });
     });
   });
 
@@ -10415,6 +10523,82 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(result.rba_calculation_status).toBe('INCOMPLETE');
         const unmapped = result.rba_unmapped_parameters ?? [];
         expect(unmapped.some((u: any) => u.parameter === 'Bidang Industri')).toBe(true);
+      });
+
+      it('V3-12: Our Customer dengan monthly_income_range null dapat create dan submit', async () => {
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            monthly_income_range: null,
+            identity_number: `323012${SUFFIX}`,
+          }))
+          .expect(201);
+        const appId = String(create.body.id);
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${appId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+        expect(detail.body.person.monthly_income_range).toBeNull();
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ doc_type: 'INDIVIDUAL_KTP_PHOTO', file_uri: 'https://storage.test/income-optional-ktp.jpg' })
+          .expect(201);
+        await uploadFacePhotoDocs(appId);
+        const submitted = await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}/submit`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+        expect(['SUBMITTED', 'IN_REVIEW']).toContain(submitted.body.status);
+        expect(submitted.body.risk.rba_components.components).not.toHaveProperty('income');
+        expect(submitted.body.risk.rba_components.components).not.toHaveProperty('monthly_income_range');
+      });
+
+      it('V3-13: PATCH omission preserves monthly_income_range; explicit null clears it', async () => {
+        const value = 'Rata-rata lebih dari Rp20 juta sampai Rp50 juta per bulan';
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({ monthly_income_range: value, identity_number: `323013${SUFFIX}` }))
+          .expect(201);
+        const appId = String(create.body.id);
+
+        await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ alias: 'Income patch omission' })
+          .expect(200);
+        let detail = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${appId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+        expect(detail.body.person.monthly_income_range).toBe(value);
+
+        await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({ monthly_income_range: null })
+          .expect(200);
+        detail = await request(app.getHttpServer())
+          .get(`${BASE}/applications/${appId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+        expect(detail.body.person.monthly_income_range).toBeNull();
+      });
+
+      it('V3-14: making income optional does not weaken unrelated required fields', async () => {
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send(baseBody({
+            occupation: undefined,
+            monthly_income_range: null,
+            identity_number: `323014${SUFFIX}`,
+          }))
+          .expect(400);
       });
     });
   });
@@ -16832,6 +17016,37 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(changeRows).toHaveLength(1);
       expect(changeRows[0].promoted_at).not.toBeNull();
       expect(changeRows[0].before_data.address_identity).toContain('Jakarta');
+    });
+
+    it('ZDR-07b: monthly_income_range populated → null tetap staged sampai APPROVE', async () => {
+      const { appId, personId } = await makeApprovedIndividual('A7B');
+      const oldValue = 'Rata-rata Rp5 juta sampai Rp10 juta per bulan';
+      await pgPool.query(
+        `UPDATE persons SET monthly_income_range=$1 WHERE id=$2`,
+        [oldValue, personId],
+      );
+      const reviewId = await initiate(appId);
+
+      const staged = await stagePerson(reviewId, { monthly_income_range: null }).expect(200);
+      expect(staged.body.change.before_data.monthly_income_range).toBe(oldValue);
+      expect(staged.body.change.after_data.monthly_income_range).toBeNull();
+
+      const draft = await getDraft(reviewId).expect(200);
+      expect(draft.body.current.person.monthly_income_range).toBe(oldValue);
+      expect(draft.body.proposed.person.monthly_income_range).toBeNull();
+      const beforeApproval = await pgPool.query(
+        `SELECT monthly_income_range FROM persons WHERE id=$1`,
+        [personId],
+      );
+      expect(beforeApproval.rows[0].monthly_income_range).toBe(oldValue);
+
+      await submitReview(appId).expect(201);
+      await decide(appId, { decision: 'APPROVED' }).expect(201);
+      const afterApproval = await pgPool.query(
+        `SELECT monthly_income_range FROM persons WHERE id=$1`,
+        [personId],
+      );
+      expect(afterApproval.rows[0].monthly_income_range).toBeNull();
     });
 
     // ── ZD-08..ZD-10: akumulasi, no-op, dan submit kosong ───────────────────
