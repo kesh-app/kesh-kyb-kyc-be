@@ -54,7 +54,7 @@ export class UploadsService implements OnModuleInit {
     if (this.isObs()) {
       return this.obs!.uploadBuffer(buf, mime, ext, objectKey);
     }
-    return this.uploadLocal(buf, mime, ext);
+    return this.uploadLocal(buf, mime, ext, objectKey);
   }
 
   async deleteObject(key: string): Promise<void> {
@@ -62,6 +62,29 @@ export class UploadsService implements OnModuleInit {
       return this.obs!.deleteObject(key);
     }
     return this.deleteLocal(key);
+  }
+
+  /**
+   * Salin objek ke key baru. Dipakai promosi Pengkinian Data: berkas yang
+   * di-upload ke prefix staging dipindahkan ke key final saat Compliance
+   * menyetujui. Sengaja copy, bukan move — objek staging baru dibersihkan
+   * setelah commit DB sukses, sehingga kegagalan di tengah tidak menghilangkan
+   * satu-satunya salinan berkas.
+   */
+  async copyObject(sourceKey: string, destKey: string): Promise<string> {
+    if (this.isObs()) {
+      await this.obs!.copyObject(sourceKey, destKey);
+      return destKey;
+    }
+    return this.copyLocal(sourceKey, destKey);
+  }
+
+  private async copyLocal(sourceKey: string, destKey: string): Promise<string> {
+    const src = this.resolveLocalKey(sourceKey);
+    const dest = this.resolveLocalKey(destKey);
+    await fs.mkdir(path.dirname(dest.filePath), { recursive: true });
+    await fs.copyFile(src.filePath, dest.filePath);
+    return dest.key;
   }
 
   /**
@@ -81,7 +104,19 @@ export class UploadsService implements OnModuleInit {
     buf: Buffer,
     mime: string,
     ext = '',
+    objectKey?: string,
   ): Promise<{ key: string; url: string; meta: any }> {
+    if (objectKey) {
+      const target = this.resolveLocalKey(objectKey);
+      await fs.mkdir(path.dirname(target.filePath), { recursive: true });
+      await fs.writeFile(target.filePath, buf);
+      return {
+        key: target.key,
+        url: `${this.baseUrl}/${target.key}`,
+        meta: { mime },
+      };
+    }
+
     const now = new Date();
     const year = String(now.getUTCFullYear());
     const month = String(now.getUTCMonth() + 1).padStart(2, '0');
@@ -101,13 +136,33 @@ export class UploadsService implements OnModuleInit {
   }
 
   private async deleteLocal(key: string): Promise<void> {
-    const localBase = this.uploadDir.replace(/\\/g, '/').replace(/^\.?\//, '');
-    const rel = key.replace(/^uploads\//, `${localBase}/`);
-    const filePath = path.resolve(process.cwd(), rel);
+    const { filePath } = this.resolveLocalKey(key);
     try {
       await fs.unlink(filePath);
     } catch {
       // ignore if file doesn't exist
     }
+  }
+
+  /**
+   * Resolve an object key inside UPLOAD_DIR. Caller-provided object keys are
+   * used by data-review staging, so traversal must be rejected even though the
+   * current callers generate the keys server-side.
+   */
+  private resolveLocalKey(key: string): { filePath: string; key: string } {
+    const normalized = String(key || '')
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+      .replace(/^uploads\//, '');
+    if (!normalized || normalized.split('/').includes('..')) {
+      throw new Error('Invalid local storage object key');
+    }
+
+    const base = path.resolve(process.cwd(), this.uploadDir);
+    const filePath = path.resolve(base, ...normalized.split('/'));
+    if (filePath !== base && !filePath.startsWith(base + path.sep)) {
+      throw new Error('Local storage object key escapes UPLOAD_DIR');
+    }
+    return { filePath, key: `uploads/${normalized}` };
   }
 }

@@ -1720,6 +1720,34 @@ export class ApplicationsService {
     }
   }
 
+  /**
+   * Gerbang integritas untuk mutasi LANGSUNG ke data CDD milik aplikasi yang
+   * sudah final (APPROVED/REJECTED).
+   *
+   * Sampai sebelum ADR-047, dokumen/party/EDD bisa diubah kapan saja tanpa
+   * gate status sama sekali — termasuk pada nasabah yang sudah disetujui, tanpa
+   * jejak review apa pun. Perubahan pada nasabah aktif sekarang wajib lewat
+   * alur Pengkinian Data (draft → submit → Compliance approve → promosi).
+   *
+   * Sengaja berbasis STATUS, bukan role: SystemAdmin/Director boleh melewati
+   * RolesGuard, tapi tidak boleh melewati aturan integritas domain. Tidak ada
+   * jalur darurat khusus di sistem ini, jadi tidak ada pengecualian di sini.
+   */
+  private async assertMutableApplication(appId: number, what: string) {
+    const { rows } = await this.pool.query(
+      `SELECT status FROM applications WHERE id=$1`,
+      [appId],
+    );
+    if (!rows[0]) throw new NotFoundException("Application not found");
+    const status = rows[0].status;
+    if (status === "APPROVED" || status === "REJECTED") {
+      throw new BadRequestException(
+        `${what} tidak dapat diubah langsung pada aplikasi berstatus ${status}. ` +
+          `Gunakan alur Pengkinian Data (draft pengkinian) agar perubahan melewati review Compliance.`,
+      );
+    }
+  }
+
   async addDocument(
     appId: number,
     dto: { doc_type: string; file_uri: string; extracted_json?: any },
@@ -1729,6 +1757,7 @@ export class ApplicationsService {
       [appId],
     );
     if (!apps[0]) throw new NotFoundException("Application not found");
+    await this.assertMutableApplication(appId, "Dokumen");
 
     // Dokumen tidak punya workflow review — record hanya dibuat setelah file
     // berhasil di-upload ke storage, jadi status langsung UPLOADED (sukses).
@@ -2872,9 +2901,10 @@ export class ApplicationsService {
         "Parties only apply to BUSINESS applications",
       );
 
+    // Tanpa gate status: ini jalur BACA, bukan mutasi.
     const { rows } = await this.pool.query(
       `${PARTY_ROW_SELECT}
-       WHERE bp.business_id = $1
+       WHERE bp.business_id = $1 AND bp.is_active = TRUE
        ORDER BY bp.created_at DESC`,
       [app.business_id],
     );
@@ -2893,6 +2923,8 @@ export class ApplicationsService {
       throw new BadRequestException(
         "Parties only apply to BUSINESS applications",
       );
+
+    await this.assertMutableApplication(appId, "Data pengurus/pemegang saham");
 
     // Normalise KTP number (strip non-digits) consistent with createIndividual
     if (dto.identity_type === "KTP")
@@ -3033,6 +3065,8 @@ export class ApplicationsService {
       throw new BadRequestException(
         "Parties only apply to BUSINESS applications",
       );
+
+    await this.assertMutableApplication(appId, "Data pengurus/pemegang saham");
 
     const { rows: partyRows } = await this.pool.query(
       `SELECT bp.id, bp.person_id, bp.role, bp.cif_no,
@@ -3183,8 +3217,15 @@ export class ApplicationsService {
         "Parties only apply to BUSINESS applications",
       );
 
+    await this.assertMutableApplication(appId, "Data pengurus/pemegang saham");
+
+    // Soft delete, bukan DELETE keras. Kolom is_active sudah ada sejak migrasi
+    // 0005 dan dibaca trigger CDD, tapi endpoint ini dulu menghapus barisnya —
+    // menghilangkan CIF, relasi dokumen, dan jejak audit party secara permanen.
     const { rows } = await this.pool.query(
-      `DELETE FROM business_parties WHERE id=$1 AND business_id=$2 RETURNING id`,
+      `UPDATE business_parties SET is_active=FALSE, updated_at=now()
+        WHERE id=$1 AND business_id=$2 AND is_active=TRUE
+        RETURNING id`,
       [partyId, app.business_id],
     );
     if (!rows[0]) throw new NotFoundException("Party not found");
@@ -3555,6 +3596,7 @@ export class ApplicationsService {
   }
 
   async deleteDocument(appId: number, docId: number) {
+    await this.assertMutableApplication(appId, "Dokumen");
     const doc = await this.getDocument(appId, docId);
     await this.pool.query(`DELETE FROM documents WHERE id=$1`, [docId]);
     return doc;
@@ -3654,6 +3696,12 @@ export class ApplicationsService {
       [appId],
     );
     if (!apps[0]) throw new NotFoundException("Application not found");
+
+    // Gate status DI SINI, setelah RBAC section: pelanggaran role tetap harus
+    // terbaca sebagai 403, bukan tertutup 400 status. EDD onboarding (status
+    // pra-keputusan) tidak terpengaruh — yang ditutup hanya perubahan langsung
+    // pada nasabah yang sudah final, yang wajib lewat Pengkinian Data.
+    await this.assertMutableApplication(appId, "Data EDD");
 
     // Baca state saat ini untuk merge
     const { rows: existing } = await this.pool.query(

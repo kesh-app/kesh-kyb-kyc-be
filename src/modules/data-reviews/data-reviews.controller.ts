@@ -1,23 +1,34 @@
 import {
+  BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
+  InternalServerErrorException,
   Param,
   ParseIntPipe,
+  Patch,
   Post,
   Query,
   Req,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
   ValidationPipe,
 } from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 import { JwtAuthGuard } from "../auth/jwt.guard";
 import { RolesGuard } from "../auth/roles.guard";
 import { Roles } from "../auth/roles.decorator";
 import { DataReviewsService } from "./data-reviews.service";
+import { DataReviewDraftsService } from "./data-review-drafts.service";
+import { UploadsService } from "../uploads/uploads.service";
 import {
   InitiateDataReviewDto,
   DataReviewDecisionDto,
   ListDataReviewsQueryDto,
+  StagePartyDraftDto,
+  StageDocumentDraftDto,
 } from "./dto";
 
 // Worklist Pengkinian Data untuk menu FE.
@@ -85,5 +96,187 @@ export class DataReviewsController {
     @Body() dto: DataReviewDecisionDto,
   ) {
     return this.svc.decision(id, req.user, dto);
+  }
+}
+
+// Draft Pengkinian Data (ADR-047). Perubahan di sini HANYA masuk change-set —
+// tabel live (persons/business_entities/business_parties/documents/
+// application_edd) tidak tersentuh sampai Compliance menyetujui.
+//
+// Sengaja terpisah dari endpoint CDD biasa: endpoint lama tetap otoritatif
+// untuk onboarding & alur REVISION_REQUIRED, dan applications.status TETAP
+// APPROVED sepanjang siklus pengkinian.
+@Controller("data-reviews/:reviewId")
+@UseGuards(JwtAuthGuard, RolesGuard)
+export class DataReviewDraftsController {
+  constructor(
+    private readonly drafts: DataReviewDraftsService,
+    private readonly uploads: UploadsService,
+  ) {}
+
+  // Read model: review + current + proposed + changes. Satu panggilan untuk
+  // form Frontline maupun layar diff Compliance.
+  @Get("draft")
+  @Roles("FrontDesk", "ComplianceLead", "Auditor")
+  async getDraft(@Param("reviewId", ParseIntPipe) reviewId: number) {
+    return this.drafts.getDraft(reviewId);
+  }
+
+  @Get("changes")
+  @Roles("FrontDesk", "ComplianceLead", "Auditor")
+  async listChanges(@Param("reviewId", ParseIntPipe) reviewId: number) {
+    const rows = await this.drafts.activeChanges(reviewId);
+    return { data: rows.map((r) => this.drafts.presentChange(r)) };
+  }
+
+  // ── Staging (FrontDesk saja; ComplianceLead mereview, tidak menyunting) ──
+  @Patch("draft/person")
+  @Roles("FrontDesk")
+  async stagePerson(
+    @Req() req: any,
+    @Param("reviewId", ParseIntPipe) reviewId: number,
+    @Body() body: any,
+  ) {
+    const { expected_version, ...patch } = body ?? {};
+    return this.drafts.stagePerson(reviewId, req.user, patch, expected_version);
+  }
+
+  @Patch("draft/business")
+  @Roles("FrontDesk")
+  async stageBusiness(
+    @Req() req: any,
+    @Param("reviewId", ParseIntPipe) reviewId: number,
+    @Body() body: any,
+  ) {
+    const { expected_version, ...patch } = body ?? {};
+    return this.drafts.stageBusiness(reviewId, req.user, patch, expected_version);
+  }
+
+  @Post("draft/parties")
+  @Roles("FrontDesk")
+  async stageParty(
+    @Req() req: any,
+    @Param("reviewId", ParseIntPipe) reviewId: number,
+    @Body() dto: StagePartyDraftDto,
+  ) {
+    return this.drafts.stageParty(reviewId, req.user, dto);
+  }
+
+  @Post("draft/documents")
+  @Roles("FrontDesk")
+  async stageDocument(
+    @Req() req: any,
+    @Param("reviewId", ParseIntPipe) reviewId: number,
+    @Body() dto: StageDocumentDraftDto,
+  ) {
+    return this.drafts.stageDocument(reviewId, req.user, dto);
+  }
+
+  /** Upload bytes directly into the review staging prefix, then stage ADD/REPLACE. */
+  @Post("draft/documents/upload")
+  @Roles("FrontDesk")
+  @UseInterceptors(
+    FileInterceptor("file", {
+      limits: {
+        fileSize: Number(process.env.MAX_UPLOAD_MB || 10) * 1024 * 1024,
+      },
+      fileFilter: (_req, file, cb) => {
+        const allowed = ["image/png", "image/jpeg", "image/webp", "application/pdf"];
+        if (!allowed.includes(file.mimetype)) {
+          return cb(new BadRequestException("File type not allowed"), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  async uploadDraftDocument(
+    @Req() req: any,
+    @Param("reviewId", ParseIntPipe) reviewId: number,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: StageDocumentDraftDto,
+  ) {
+    if (!file) throw new BadRequestException("No file uploaded");
+    if (!dto || !["ADD", "REPLACE"].includes(dto.operation)) {
+      throw new BadRequestException("Upload dokumen hanya mendukung ADD atau REPLACE.");
+    }
+    if (dto.operation === "ADD" && !dto.doc_type) {
+      throw new BadRequestException("doc_type wajib diisi.");
+    }
+    if (dto.operation === "REPLACE" && !dto.target_id) {
+      throw new BadRequestException("target_id wajib untuk REPLACE dokumen.");
+    }
+
+    await this.drafts.assertCanEdit(reviewId, req.user, dto.expected_version);
+
+    const extByMime: Record<string, string> = {
+      "image/png": "png",
+      "image/jpeg": "jpg",
+      "image/webp": "webp",
+      "application/pdf": "pdf",
+    };
+    const ext = extByMime[file.mimetype] ?? "bin";
+    const objectKey = this.drafts.stagingObjectKey(
+      reviewId,
+      dto.doc_type ?? "DOC",
+      `.${ext}`,
+    );
+
+    let uploaded: { key: string; url: string; meta?: any };
+    try {
+      uploaded = await this.uploads.uploadBuffer(
+        file.buffer,
+        file.mimetype,
+        ext,
+        objectKey,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new InternalServerErrorException(`File storage failed: ${message}`);
+    }
+
+    try {
+      const staged = await this.drafts.stageDocument(reviewId, req.user, {
+        ...dto,
+        file_uri: this.uploads.isObs() ? uploaded.key : uploaded.url,
+        staged_object_key: uploaded.key,
+      });
+      const accessibleUrl = await this.uploads
+        .getSignedUrl(uploaded.key)
+        .catch(() => uploaded.url);
+      return {
+        ...staged,
+        upload: {
+          key: uploaded.key,
+          url: accessibleUrl,
+          mime: file.mimetype,
+          size: file.size ?? null,
+          original_name: file.originalname ?? null,
+        },
+      };
+    } catch (err) {
+      await this.uploads.deleteObject(uploaded.key).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  @Patch("draft/edd")
+  @Roles("FrontDesk")
+  async stageEdd(
+    @Req() req: any,
+    @Param("reviewId", ParseIntPipe) reviewId: number,
+    @Body() body: any,
+  ) {
+    const { expected_version, ...patch } = body ?? {};
+    return this.drafts.stageEdd(reviewId, req.user, patch, expected_version);
+  }
+
+  @Delete("draft/changes/:changeId")
+  @Roles("FrontDesk")
+  async discard(
+    @Req() req: any,
+    @Param("reviewId", ParseIntPipe) reviewId: number,
+    @Param("changeId", ParseIntPipe) changeId: number,
+  ) {
+    return this.drafts.discardChange(reviewId, changeId, req.user);
   }
 }

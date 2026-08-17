@@ -4,7 +4,7 @@ import {
   BadRequestException,
   NotFoundException,
 } from "@nestjs/common";
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 import { resolveUserId } from "../../common/auth.util";
 import {
   InitiateDataReviewDto,
@@ -12,8 +12,11 @@ import {
   ListDataReviewsQueryDto,
 } from "./dto";
 import { NotificationsService } from "../notifications/notifications.service";
+import { DataReviewDraftsService } from "./data-review-drafts.service";
+import { UploadsService } from "../uploads/uploads.service";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
+type Db = Pool | PoolClient;
 
 // Periode pengkinian data berdasarkan tingkat risiko (dari first submitted date).
 const RISK_YEARS: Record<string, number> = { HIGH: 1, MEDIUM: 2, LOW: 3 };
@@ -31,6 +34,8 @@ export class DataReviewsService {
   constructor(
     @Inject("PG_POOL") private readonly pool: Pool,
     private readonly notifications: NotificationsService,
+    private readonly drafts: DataReviewDraftsService,
+    private readonly uploads: UploadsService,
   ) {}
 
   private async notifyReviewRole(appId: number, role: string, title: string, body?: string) {
@@ -44,8 +49,8 @@ export class DataReviewsService {
     });
   }
 
-  private async getApplication(appId: number) {
-    const { rows } = await this.pool.query(
+  private async getApplication(appId: number, db: Db = this.pool) {
+    const { rows } = await db.query(
       `SELECT a.id, a.status, a.submitted_at, a.first_submitted_at,
               COALESCE(ar.override_level, ar.risk_level) AS risk_level
          FROM applications a
@@ -73,21 +78,23 @@ export class DataReviewsService {
     return { base, dueAt };
   }
 
-  private async fetchLatestReview(appId: number) {
-    const { rows } = await this.pool.query(
-      `SELECT * FROM application_data_reviews
-        WHERE application_id = $1 ORDER BY id DESC LIMIT 1`,
+  private async fetchLatestReview(appId: number, db: Db = this.pool) {
+    const { rows } = await db.query(
+      `SELECT r.*, COALESCE(u_init.name, u_init.email) AS initiated_by_name
+         FROM application_data_reviews r
+         LEFT JOIN users u_init ON u_init.id = r.initiated_by
+        WHERE r.application_id = $1 ORDER BY r.id DESC LIMIT 1`,
       [appId],
     );
     return rows[0] ?? null;
   }
 
-  private async resolveReviewNo(): Promise<string> {
+  private async resolveReviewNo(db: Db = this.pool): Promise<string> {
     for (let i = 0; i < 5; i++) {
       const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
       const rand = Math.random().toString(36).toUpperCase().slice(2, 7).padEnd(5, "0");
       const candidate = `KESH-DR-${date}-${rand}`;
-      const dup = await this.pool.query(
+      const dup = await db.query(
         `SELECT 1 FROM application_data_reviews WHERE review_no = $1 LIMIT 1`,
         [candidate],
       );
@@ -282,7 +289,13 @@ export class DataReviewsService {
       is_due: isDue,
       status,
       active_review: active
-        ? { id: active.id, review_no: active.review_no, status: active.status }
+        ? {
+            id: active.id,
+            review_no: active.review_no,
+            status: active.status,
+            initiated_by_name: active.initiated_by_name,
+            initiated_at: active.initiated_at,
+          }
         : null,
       last_review: latest
         ? {
@@ -303,23 +316,61 @@ export class DataReviewsService {
   // INITIATE / REQUEST — ComplianceLead/FrontDesk/SystemAdmin/Director
   // ---------------------------------------------------------------------------
   async initiate(appId: number, user: AuthedUser, dto: InitiateDataReviewDto) {
-    const app = await this.getApplication(appId);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Serialize initiation for one application. An advisory lock avoids
+      // conflicting with the FK check performed by the insert connection.
+      await client.query(
+        `SELECT pg_advisory_xact_lock((47047::bigint << 32) + $1::bigint)`,
+        [appId],
+      );
+      const result = await this.initiateUnderLock(appId, user, dto);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
 
-    // Bila sudah ada review aktif → kembalikan yang ada (idempoten).
+  private async initiateUnderLock(
+    appId: number,
+    user: AuthedUser,
+    dto: InitiateDataReviewDto,
+  ) {
+    const app = await this.getApplication(appId);
+    if (app.status !== "APPROVED") {
+      throw new BadRequestException(
+        `Pengkinian Data hanya dapat dimulai untuk aplikasi berstatus APPROVED (status saat ini: ${app.status}).`,
+      );
+    }
+
+    // Bila sudah ada review aktif → kembalikan yang ada (idempoten). FE
+    // membedakan pesan "baru dimulai" vs "sudah berjalan" lewat `created`.
     const latest = await this.fetchLatestReview(appId);
     if (latest && ACTIVE_STATUSES.includes(latest.status)) {
-      return latest;
+      return { ...latest, created: false };
     }
 
     const { base, dueAt } = this.computeDue(app);
     const reviewNo = await this.resolveReviewNo();
     const actorId = resolveUserId(user);
 
+    // Baseline diambil SAAT inisiasi: kalau data live bergerak di luar review
+    // ini sebelum promosi, digest tidak lagi cocok dan approval ditolak 409
+    // (persons/business_entities/documents tidak punya updated_at, jadi digest
+    // isi adalah sinyal drift terkuat yang tersedia).
+    const baselineDigest = await this.drafts.computeBaselineDigest(appId);
+
     const { rows } = await this.pool.query(
       `INSERT INTO application_data_reviews
          (application_id, review_no, review_type, risk_level_at_review,
-          base_submitted_at, due_at, status, initiated_by, initiated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,'DRAFT',$7, now())
+          base_submitted_at, due_at, status, initiated_by, initiated_at,
+          baseline_digest, baseline_captured_at, changes_model)
+       VALUES ($1,$2,$3,$4,$5,$6,'DRAFT',$7, now(), $8, now(), 'V2')
        RETURNING *`,
       [
         appId,
@@ -329,6 +380,7 @@ export class DataReviewsService {
         base ? base.toISOString() : null,
         dueAt ? dueAt.toISOString() : null,
         actorId,
+        baselineDigest,
       ],
     );
     // Kalau FrontDesk sendiri yang initiate, tidak perlu notify diri sendiri.
@@ -339,7 +391,11 @@ export class DataReviewsService {
         `Aplikasi #${appId} — Compliance meminta pengkinian data`,
       );
     }
-    return rows[0];
+    const { rows: actorRows } = await this.pool.query(
+      `SELECT COALESCE(name, email) AS name FROM users WHERE id = $1`,
+      [actorId],
+    );
+    return { ...rows[0], initiated_by_name: actorRows[0]?.name ?? null, created: true };
   }
 
   // ---------------------------------------------------------------------------
@@ -353,9 +409,21 @@ export class DataReviewsService {
       );
     }
 
+    // Review V2 wajib membawa perubahan nyata. ADD yang dibatalkan dan UPDATE
+    // yang nilainya kembali sama dengan live sudah dibuang saat staging, jadi
+    // sisa baris aktif memang perubahan sungguhan. Review V1 (dibuat sebelum
+    // arsitektur change-set) dilewati — stagingnya memang belum pernah ada.
+    if (latest.changes_model !== "V1") {
+      const effective = await this.drafts.effectiveChanges(Number(latest.id));
+      if (effective.length === 0) {
+        throw new BadRequestException("Tidak ada perubahan data untuk diajukan.");
+      }
+    }
+
     const { rows } = await this.pool.query(
       `UPDATE application_data_reviews
-          SET status='SUBMITTED', submitted_by=$2, submitted_at=now(), updated_at=now()
+          SET status='SUBMITTED', submitted_by=$2, submitted_at=now(),
+              submitted_version=version, updated_at=now()
         WHERE id=$1
         RETURNING *`,
       [latest.id, resolveUserId(user)],
@@ -387,6 +455,34 @@ export class DataReviewsService {
       throw new BadRequestException("reason wajib diisi untuk aksi ini.");
     }
 
+    // APPROVED pada review V2 adalah BATAS PROMOSI: satu-satunya titik data
+    // live KYC/KYB berubah. Semua penerapan terjadi dalam satu transaksi —
+    // gagal sebagian berarti tidak ada yang berubah dan review tidak APPROVED.
+    // RETURN_FOR_REVISION & REJECTED tidak pernah menyentuh data live.
+    if (dto.decision === "APPROVED" && latest.changes_model !== "V1") {
+      const result = await this.drafts.promote(Number(latest.id), user, {
+        expectedVersion: dto.expected_version,
+        reason,
+        copyObject: (from, to) => this.uploads.copyObject(from, to),
+      });
+
+      // Objek staging dibersihkan hanya SETELAH commit sukses, best-effort.
+      // Gagal bersih-bersih tidak boleh membatalkan promosi yang sudah sah.
+      for (const copy of result.docCopies) {
+        const staged = await this.pool.query(
+          `SELECT staged_object_key FROM application_data_review_changes WHERE id=$1`,
+          [copy.changeId],
+        );
+        const key = staged.rows[0]?.staged_object_key;
+        if (key) {
+          await this.uploads.deleteObject(key).catch(() => undefined);
+        }
+      }
+
+      await this.notifications.resolveForObject("data_review", appId);
+      return { ...result.review, promoted_changes: result.promotedCount };
+    }
+
     const NEXT: Record<string, string> = {
       APPROVED: "APPROVED",
       RETURN_FOR_REVISION: "RETURNED_FOR_REVISION",
@@ -395,8 +491,9 @@ export class DataReviewsService {
 
     const { rows } = await this.pool.query(
       `UPDATE application_data_reviews
-          SET status=$2, reviewed_by=$3, reviewed_at=now(),
-              decision_notes=$4, updated_at=now()
+          SET status=$2::varchar, reviewed_by=$3, reviewed_at=now(),
+              decision_notes=$4, updated_at=now(),
+              approved_at=CASE WHEN $2::varchar='APPROVED' THEN now() ELSE approved_at END
         WHERE id=$1
         RETURNING *`,
       [latest.id, NEXT[dto.decision], resolveUserId(user), reason],

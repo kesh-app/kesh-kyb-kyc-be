@@ -5754,14 +5754,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.edd_completed).toBe(true);
     });
 
-    it('O-13: FrontDesk PATCH /edd bagian I-III → 200 (Frontline dapat mengisi I–III)', async () => {
+    // Sejak ADR-047 aplikasi yang sudah APPROVED (lihat O-09 di atas) tidak
+    // lagi menerima perubahan EDD LANGSUNG — harus lewat draft Pengkinian Data
+    // supaya perubahan pada nasabah aktif tetap melewati review Compliance.
+    // Kemampuan Frontline mengisi bagian I–IV sendiri tetap diuji O-06..O-08,
+    // yang berjalan sebelum aplikasi disetujui.
+    it('O-13: FrontDesk PATCH /edd pada aplikasi APPROVED → 400 (wajib lewat Pengkinian Data)', async () => {
       const res = await request(app.getHttpServer())
         .patch(`${BASE}/applications/${eddHighAppId}/edd`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .send({ additional_information: { notes: 'catatan tambahan dari frontdesk' } })
-        .expect(200);
+        .expect(400);
 
-      expect(res.body.edd_completed).toBe(true);
+      expect(res.body.message).toContain('Pengkinian Data');
     });
 
     it('O-13c: ComplianceLead PATCH /edd bagian I-III → 403 (bagian I-III hanya untuk FrontDesk)', async () => {
@@ -16017,6 +16022,24 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       return appId;
     }
 
+    /**
+     * Sejak ADR-047 submit menolak review tanpa perubahan efektif. Tes lama di
+     * blok ini menguji TRANSISI STATUS, bukan isi perubahan — jadi cukup satu
+     * usulan sepele supaya review tidak kosong.
+     */
+    async function stageAnyChange(appId: string) {
+      const { rows } = await pgPool.query(
+        `SELECT id FROM application_data_reviews
+          WHERE application_id=$1 ORDER BY id DESC LIMIT 1`,
+        [appId],
+      );
+      await request(app.getHttpServer())
+        .patch(`${BASE}/data-reviews/${rows[0].id}/draft/person`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({ occupation: 'Wiraswasta' })
+        .expect(200);
+    }
+
     it('ZP-01: HIGH → due_at = first_submitted_at + 1 tahun', async () => {
       const appId = await makeReviewApp('H', 'HIGH', '2020-01-15T00:00:00.000Z');
       const res = await request(app.getHttpServer())
@@ -16087,6 +16110,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(res.body.status).toBe('DRAFT');
       expect(res.body.review_no).toMatch(/^KESH-DR-\d{8}-[A-Z0-9]{5}$/);
       expect(res.body.review_type).toBe('MANUAL');
+      expect(res.body.created).toBe(true);
+      expect(res.body.initiated_by_name).toBeTruthy();
 
       // FrontDesk melihat permintaan tersebut lewat status endpoint
       const status = await request(app.getHttpServer())
@@ -16096,6 +16121,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(status.body.active_review).not.toBeNull();
       expect(status.body.active_review.id).toBe(res.body.id);
       expect(status.body.status).toBe('DRAFT');
+      expect(status.body.active_review.initiated_by_name).toBeTruthy();
     });
 
     it('ZP-05b: FrontDesk juga dapat initiate pengkinian → 201 DRAFT', async () => {
@@ -16106,6 +16132,51 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({})
         .expect(201);
       expect(res.body.status).toBe('DRAFT');
+      expect(res.body.created).toBe(true);
+    });
+
+    it('ZP-05d: initiate kedua kali (review masih aktif) → idempoten, created=false', async () => {
+      const appId = await makeReviewApp('IDEMP', 'LOW', '2020-01-01T00:00:00.000Z');
+      const first = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({})
+        .expect(201);
+      expect(first.body.created).toBe(true);
+
+      const second = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .send({})
+        .expect(201);
+      expect(second.body.created).toBe(false);
+      expect(second.body.id).toBe(first.body.id);
+    });
+
+    it('ZP-05e: dua initiate serentak menghasilkan satu review aktif', async () => {
+      const appId = await makeReviewApp('IDEMPC', 'LOW', '2020-01-01T00:00:00.000Z');
+      const initiateRequest = (token: string) =>
+        request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/data-review/initiate`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({});
+
+      const [first, second] = await Promise.all([
+        initiateRequest(complianceToken),
+        initiateRequest(frontDeskToken),
+      ]);
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+      expect(first.body.id).toBe(second.body.id);
+      expect([first.body.created, second.body.created].sort()).toEqual([false, true]);
+
+      const { rows } = await pgPool.query(
+        `SELECT count(*)::int AS n FROM application_data_reviews
+          WHERE application_id=$1 AND status IN
+            ('DRAFT','SUBMITTED','IN_COMPLIANCE_REVIEW','RETURNED_FOR_REVISION')`,
+        [appId],
+      );
+      expect(rows[0].n).toBe(1);
     });
 
     it('ZP-05c: Auditor tidak dapat initiate pengkinian → 403', async () => {
@@ -16124,6 +16195,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({})
         .expect(201);
+      await stageAnyChange(appId);
       const res = await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/submit`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -16151,6 +16223,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({})
         .expect(201);
+      await stageAnyChange(appId);
       await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/submit`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -16171,6 +16244,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${complianceToken}`)
         .send({})
         .expect(201);
+      await stageAnyChange(appId);
       await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/submit`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -16346,6 +16420,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(row.active_review.review_no).toMatch(/^KESH-DR-/);
       expect(row.active_review.initiated_at).not.toBeNull();
 
+      await stageAnyChange(appId);
       await request(app.getHttpServer())
         .post(`${BASE}/applications/${appId}/data-review/submit`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -16405,6 +16480,1004 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${frontDeskToken}`)
         .expect(200);
       expect(byType.body.data.every((r: any) => r.customer_type === 'INDIVIDUAL')).toBe(true);
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ZD. Pengkinian Data — draft/change-set & promosi atomik (ADR-047)
+  //
+  // Invarian yang diuji blok ini: data live KYC/KYB TIDAK berubah sampai
+  // Compliance menyetujui. applications.status tetap APPROVED sepanjang siklus.
+  // ══════════════════════════════════════════════════════════════════════════
+  describe('ZDR. Pengkinian Data — draft & promosi', () => {
+    let zdSeq = 0;
+
+    /** Aplikasi individual APPROVED dengan alamat Jakarta — titik awal semua tes. */
+    async function makeApprovedIndividual(tag: string): Promise<{ appId: string; personId: string }> {
+      const seq = String(++zdSeq).padStart(2, '0');
+      const create = await request(app.getHttpServer())
+        .post(`${BASE}/applications/individual`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .send({
+          full_name: `Pengkinian ZD ${tag} ${SUFFIX}`,
+          ktp_number: TEST_KTP_NUMBER,
+          identity_type: 'KTP',
+          identity_number: `3421${seq}${SUFFIX}`.slice(0, 16),
+          address_identity: 'Jl. Sudirman No. 1, Jakarta',
+          pob: 'Jakarta',
+          dob: '1990-01-01',
+          nationality: 'ID',
+          phone: `0899${seq}${SUFFIX}`.slice(0, 15),
+          occupation: 'Karyawan Swasta',
+          gender: 'M',
+          signature_uri: 'https://storage.test/sig.png',
+        })
+        .expect(201);
+      const appId = String(create.body.id);
+      await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [appId]);
+      const { rows } = await pgPool.query(`SELECT person_id FROM applications WHERE id=$1`, [appId]);
+      return { appId, personId: String(rows[0].person_id) };
+    }
+
+    async function initiate(appId: string, token = frontDeskToken): Promise<string> {
+      const res = await request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/initiate`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({})
+        .expect(201);
+      return String(res.body.id);
+    }
+
+    /** Alamat live saat ini — dibaca langsung dari tabel persons. */
+    async function liveAddress(personId: string): Promise<string> {
+      const { rows } = await pgPool.query(`SELECT address_identity FROM persons WHERE id=$1`, [personId]);
+      return rows[0].address_identity;
+    }
+
+    const stagePerson = (reviewId: string, body: any, token = frontDeskToken) =>
+      request(app.getHttpServer())
+        .patch(`${BASE}/data-reviews/${reviewId}/draft/person`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+
+    const getDraft = (reviewId: string, token = frontDeskToken) =>
+      request(app.getHttpServer())
+        .get(`${BASE}/data-reviews/${reviewId}/draft`)
+        .set('Authorization', `Bearer ${token}`);
+
+    const submitReview = (appId: string, token = frontDeskToken) =>
+      request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/submit`)
+        .set('Authorization', `Bearer ${token}`);
+
+    const decide = (appId: string, body: any, token = complianceToken) =>
+      request(app.getHttpServer())
+        .post(`${BASE}/applications/${appId}/data-review/decision`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+
+    // ── ZD-01..ZD-07: siklus scalar penuh (Jakarta → Bandung) ───────────────
+    it('ZDR-01: aplikasi APPROVED berawal dengan alamat Jakarta', async () => {
+      const { personId } = await makeApprovedIndividual('A1');
+      expect(await liveAddress(personId)).toContain('Jakarta');
+    });
+
+    it('ZDR-02: FrontDesk stage perubahan alamat → tersimpan sebagai change-set, BUKAN live', async () => {
+      const { appId, personId } = await makeApprovedIndividual('A2');
+      const reviewId = await initiate(appId);
+
+      const res = await stagePerson(reviewId, {
+        address_identity: 'Jl. Asia Afrika No. 8, Bandung',
+      }).expect(200);
+      expect(res.body.change).toBeTruthy();
+      expect(res.body.change.entity_type).toBe('PERSON');
+      expect(res.body.change.operation).toBe('UPDATE');
+      expect(res.body.change.before_data.address_identity).toContain('Jakarta');
+      expect(res.body.change.after_data.address_identity).toContain('Bandung');
+      expect(res.body.version).toBe(2);
+
+      // INVARIAN UTAMA: tabel live belum tersentuh.
+      expect(await liveAddress(personId)).toContain('Jakarta');
+    });
+
+    it('ZDR-03: GET /applications/:id normal tetap menampilkan Jakarta sebelum approval', async () => {
+      const { appId } = await makeApprovedIndividual('A3');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { address_identity: 'Jl. Braga, Bandung' }).expect(200);
+
+      const detail = await request(app.getHttpServer())
+        .get(`${BASE}/applications/${appId}`)
+        .set('Authorization', `Bearer ${complianceToken}`)
+        .expect(200);
+      expect(detail.body.person.address_identity).toContain('Jakarta');
+      expect(detail.body.application.status).toBe('APPROVED');
+    });
+
+    it('ZDR-04: draft read model menampilkan current=Jakarta dan proposed=Bandung', async () => {
+      const { appId } = await makeApprovedIndividual('A4');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { address_identity: 'Jl. Braga No. 5, Bandung' }).expect(200);
+
+      const draft = await getDraft(reviewId).expect(200);
+      expect(draft.body.current.person.address_identity).toContain('Jakarta');
+      expect(draft.body.proposed.person.address_identity).toContain('Bandung');
+      expect(draft.body.review.has_pending_changes).toBe(true);
+      expect(draft.body.changes).toHaveLength(1);
+    });
+
+    it('ZDR-05: setelah SUBMIT, data live tetap Jakarta', async () => {
+      const { appId, personId } = await makeApprovedIndividual('A5');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { address_identity: 'Jl. Dago, Bandung' }).expect(200);
+
+      const submitted = await submitReview(appId).expect(201);
+      expect(submitted.body.status).toBe('SUBMITTED');
+      expect(await liveAddress(personId)).toContain('Jakarta');
+    });
+
+    it('ZDR-06: RETURN_FOR_REVISION mempertahankan draft dan TIDAK mengubah live', async () => {
+      const { appId, personId } = await makeApprovedIndividual('A6');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { address_identity: 'Jl. Riau, Bandung' }).expect(200);
+      await submitReview(appId).expect(201);
+
+      await decide(appId, { decision: 'RETURN_FOR_REVISION', reason: 'Lampirkan bukti alamat.' })
+        .expect(201);
+
+      expect(await liveAddress(personId)).toContain('Jakarta');
+
+      // Draft masih utuh — FrontDesk melanjutkan siklus yang sama.
+      const draft = await getDraft(reviewId).expect(200);
+      expect(draft.body.review.status).toBe('RETURNED_FOR_REVISION');
+      expect(draft.body.review.editable).toBe(true);
+      expect(draft.body.proposed.person.address_identity).toContain('Bandung');
+      expect(draft.body.changes).toHaveLength(1);
+    });
+
+    it('ZDR-07: APPROVE mempromosikan perubahan → live berubah jadi Bandung', async () => {
+      const { appId, personId } = await makeApprovedIndividual('A7');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, {
+        address_identity: 'Jl. Asia Afrika No. 8, Bandung',
+        occupation: 'Wiraswasta',
+      }).expect(200);
+      await submitReview(appId).expect(201);
+
+      const approved = await decide(appId, { decision: 'APPROVED' }).expect(201);
+      expect(approved.body.status).toBe('APPROVED');
+      expect(approved.body.approved_at).not.toBeNull();
+
+      expect(await liveAddress(personId)).toContain('Bandung');
+      const { rows } = await pgPool.query(`SELECT occupation FROM persons WHERE id=$1`, [personId]);
+      expect(rows[0].occupation).toBe('Wiraswasta');
+
+      // Aplikasi TIDAK pernah keluar dari APPROVED sepanjang siklus.
+      const { rows: appRows } = await pgPool.query(`SELECT status FROM applications WHERE id=$1`, [appId]);
+      expect(appRows[0].status).toBe('APPROVED');
+
+      // Jejak audit tetap ada setelah promosi.
+      const { rows: changeRows } = await pgPool.query(
+        `SELECT promoted_at, before_data, after_data FROM application_data_review_changes WHERE review_id=$1`,
+        [reviewId],
+      );
+      expect(changeRows).toHaveLength(1);
+      expect(changeRows[0].promoted_at).not.toBeNull();
+      expect(changeRows[0].before_data.address_identity).toContain('Jakarta');
+    });
+
+    // ── ZD-08..ZD-10: akumulasi, no-op, dan submit kosong ───────────────────
+    it('ZDR-08: dua kali stage mengakumulasi, tidak saling menimpa', async () => {
+      const { appId } = await makeApprovedIndividual('A8');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { address_identity: 'Jl. Baru, Bandung' }).expect(200);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+
+      const draft = await getDraft(reviewId).expect(200);
+      expect(draft.body.proposed.person.address_identity).toContain('Bandung');
+      expect(draft.body.proposed.person.occupation).toBe('Wiraswasta');
+    });
+
+    it('ZDR-09: mengembalikan nilai ke sama dengan live membuang usulan (bukan perubahan)', async () => {
+      const { appId } = await makeApprovedIndividual('A9');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+      const back = await stagePerson(reviewId, { occupation: 'Karyawan Swasta' }).expect(200);
+      expect(back.body.change).toBeNull();
+
+      const draft = await getDraft(reviewId).expect(200);
+      expect(draft.body.review.has_pending_changes).toBe(false);
+    });
+
+    it('ZDR-10: submit tanpa perubahan efektif → 400', async () => {
+      const { appId } = await makeApprovedIndividual('A10');
+      await initiate(appId);
+      const res = await submitReview(appId).expect(400);
+      expect(res.body.message).toContain('Tidak ada perubahan data untuk diajukan');
+    });
+
+    // ── ZD-11..ZD-13: RBAC & status draft ───────────────────────────────────
+    it('ZDR-11: ComplianceLead tidak dapat menyunting draft → 403', async () => {
+      const { appId } = await makeApprovedIndividual('A11');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }, complianceToken).expect(403);
+    });
+
+    it('ZDR-12: FrontDesk tidak dapat menyunting draft saat SUBMITTED → 400', async () => {
+      const { appId } = await makeApprovedIndividual('A12');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+      await submitReview(appId).expect(201);
+
+      const res = await stagePerson(reviewId, { occupation: 'Petani' }).expect(400);
+      expect(res.body.message).toContain('tidak dapat diubah saat status SUBMITTED');
+    });
+
+    it('ZDR-13: field di luar allow-list ditolak → 400', async () => {
+      const { appId } = await makeApprovedIndividual('A13');
+      const reviewId = await initiate(appId);
+      const res = await stagePerson(reviewId, { cif_no: 'KSHI00000000000' }).expect(400);
+      expect(res.body.message).toContain('tidak dapat diubah lewat pengkinian data');
+    });
+
+    // ── ZD-14..ZD-16: konkurensi ────────────────────────────────────────────
+    it('ZDR-14: stage dengan expected_version basi → 409 DATA_REVIEW_VERSION_CHANGED', async () => {
+      const { appId } = await makeApprovedIndividual('A14');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200); // version → 2
+
+      const stale = await stagePerson(reviewId, {
+        address_identity: 'Jl. Lain, Bandung',
+        expected_version: 1,
+      }).expect(409);
+      expect(stale.body.code).toBe('DATA_REVIEW_VERSION_CHANGED');
+    });
+
+    it('ZDR-14b: dua stage serentak dengan versi sama → tepat satu menang', async () => {
+      const { appId } = await makeApprovedIndividual('A14B');
+      const reviewId = await initiate(appId);
+
+      const [first, second] = await Promise.all([
+        stagePerson(reviewId, {
+          occupation: 'Wiraswasta',
+          expected_version: 1,
+        }),
+        stagePerson(reviewId, {
+          address_identity: 'Jl. Konkuren, Bandung',
+          expected_version: 1,
+        }),
+      ]);
+
+      expect([first.status, second.status].sort()).toEqual([200, 409]);
+      const conflict = [first, second].find((res) => res.status === 409)!;
+      expect(conflict.body.code).toBe('DATA_REVIEW_VERSION_CHANGED');
+
+      const draft = await getDraft(reviewId).expect(200);
+      expect(draft.body.review.version).toBe(2);
+      expect(draft.body.changes).toHaveLength(1);
+    });
+
+    it('ZDR-15: approval dengan expected_version basi → 409', async () => {
+      const { appId } = await makeApprovedIndividual('A15');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+      await submitReview(appId).expect(201);
+
+      const res = await decide(appId, { decision: 'APPROVED', expected_version: 1 }).expect(409);
+      expect(res.body.code).toBe('DATA_REVIEW_VERSION_CHANGED');
+
+      const { rows } = await pgPool.query(
+        `SELECT status FROM application_data_reviews WHERE id=$1`, [reviewId]);
+      expect(rows[0].status).toBe('SUBMITTED');
+    });
+
+    it('ZDR-16: data live berubah di luar review → approval ditolak 409 BASELINE_CHANGED', async () => {
+      const { appId, personId } = await makeApprovedIndividual('A16');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+      await submitReview(appId).expect(201);
+
+      // Alur lain menyentuh data live setelah baseline diambil.
+      await pgPool.query(`UPDATE persons SET phone='0811999888' WHERE id=$1`, [personId]);
+
+      const res = await decide(appId, { decision: 'APPROVED' }).expect(409);
+      expect(res.body.code).toBe('DATA_REVIEW_BASELINE_CHANGED');
+
+      // Tidak ada promosi sebagian: occupation live tidak ikut berubah.
+      const { rows } = await pgPool.query(`SELECT occupation FROM persons WHERE id=$1`, [personId]);
+      expect(rows[0].occupation).toBe('Karyawan Swasta');
+      const { rows: revRows } = await pgPool.query(
+        `SELECT status FROM application_data_reviews WHERE id=$1`, [reviewId]);
+      expect(revRows[0].status).toBe('SUBMITTED');
+    });
+
+    it('ZDR-17: catatan approval V2 tersimpan di decision_notes', async () => {
+      const { appId } = await makeApprovedIndividual('A17');
+      const reviewId = await initiate(appId);
+      await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+      await submitReview(appId).expect(201);
+
+      const approved = await decide(appId, {
+        decision: 'APPROVED',
+        reason: 'Perubahan telah diverifikasi.',
+      }).expect(201);
+      expect(approved.body.decision_notes).toBe('Perubahan telah diverifikasi.');
+    });
+
+    // ── ZDR-20..ZDR-27: staging PARTY / BO ──────────────────────────────────
+    describe('ZDR-P. Party & BO staging', () => {
+      /** Aplikasi Business APPROVED dengan satu direktur live. */
+      async function makeApprovedBusiness(tag: string) {
+        const seq = String(++zdSeq).padStart(2, '0');
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/business`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({
+            legal_name: `PT Pengkinian ${tag} ${SUFFIX}`,
+            legal_form: 'PT',
+            incorporation_date: '2020-01-01',
+            deed_establishment_number: `AKTA-ZDR${seq}-${SUFFIX}`,
+            business_license_number: `BLZDR${seq}${SUFFIX}`,
+            nib: `NIBZDR${seq}${SUFFIX}`,
+            npwp: npwp15(`7${seq}`),
+            address_line: 'Jl. Bisnis Lama No. 1',
+            city: 'Jakarta',
+            province: 'DKI Jakarta',
+            postal_code: '12345',
+            business_activity: 'Perdagangan Umum',
+            phone: `021${seq}${SUFFIX}`.slice(0, 15),
+          })
+          .expect(201);
+        const appId = String(create.body.id);
+
+        const party = await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/parties`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({
+            role: 'DIRECTOR',
+            full_name: `Direktur Lama ${tag} ${SUFFIX}`,
+            identity_type: 'KTP',
+            identity_number: `3499${seq}${SUFFIX}`.slice(0, 16),
+          })
+          .expect(201);
+
+        await pgPool.query(`UPDATE applications SET status='APPROVED' WHERE id=$1`, [appId]);
+        const { rows } = await pgPool.query(`SELECT business_id FROM applications WHERE id=$1`, [appId]);
+        return { appId, businessId: String(rows[0].business_id), partyId: String(party.body.id ?? party.body.party?.id) };
+      }
+
+      const stageParty = (reviewId: string, body: any, token = frontDeskToken) =>
+        request(app.getHttpServer())
+          .post(`${BASE}/data-reviews/${reviewId}/draft/parties`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(body);
+
+      const liveParties = async (businessId: string) => {
+        const { rows } = await pgPool.query(
+          `SELECT bp.id, bp.role, bp.is_active, p.full_name
+             FROM business_parties bp JOIN persons p ON p.id=bp.person_id
+            WHERE bp.business_id=$1 ORDER BY bp.id`,
+          [businessId],
+        );
+        return rows;
+      };
+
+      it('ZDR-20: staged ADD party tidak terlihat di data live', async () => {
+        const { appId, businessId } = await makeApprovedBusiness('P20');
+        const reviewId = await initiate(appId);
+        const before = await liveParties(businessId);
+
+        const res = await stageParty(reviewId, {
+          operation: 'ADD',
+          data: {
+            role: 'SHAREHOLDER',
+            full_name: `Pemegang Saham Baru ${SUFFIX}`,
+            identity_type: 'KTP',
+            identity_number: `3488${SUFFIX}`.slice(0, 16),
+            ownership_percentage: 30,
+          },
+        }).expect(201);
+        expect(res.body.change.operation).toBe('ADD');
+
+        expect(await liveParties(businessId)).toHaveLength(before.length);
+
+        const draft = await getDraft(reviewId).expect(200);
+        const added = draft.body.proposed.parties.find((p: any) => p._draft_state === 'ADDED');
+        expect(added).toBeTruthy();
+        expect(added.role).toBe('SHAREHOLDER');
+      });
+
+      it('ZDR-21: staged UPDATE party tidak mengubah party live', async () => {
+        const { appId, businessId, partyId } = await makeApprovedBusiness('P21');
+        const reviewId = await initiate(appId);
+
+        await stageParty(reviewId, {
+          operation: 'UPDATE',
+          target_id: Number(partyId),
+          data: { full_name: `Direktur Diperbarui ${SUFFIX}` },
+        }).expect(201);
+
+        const live = await liveParties(businessId);
+        expect(live.find((p: any) => String(p.id) === partyId).full_name).toContain('Direktur Lama');
+
+        const draft = await getDraft(reviewId).expect(200);
+        const updated = draft.body.proposed.parties.find((p: any) => String(p.id) === partyId);
+        expect(updated._draft_state).toBe('UPDATED');
+        expect(updated.full_name).toContain('Diperbarui');
+      });
+
+      it('ZDR-22: staged DELETE tidak menghapus/menonaktifkan party live', async () => {
+        const { appId, businessId, partyId } = await makeApprovedBusiness('P22');
+        const reviewId = await initiate(appId);
+
+        await stageParty(reviewId, { operation: 'DELETE', target_id: Number(partyId) }).expect(201);
+
+        const live = await liveParties(businessId);
+        const target = live.find((p: any) => String(p.id) === partyId);
+        expect(target).toBeTruthy();
+        expect(target.is_active).toBe(true); // masih aktif — belum disetujui
+
+        const draft = await getDraft(reviewId).expect(200);
+        expect(
+          draft.body.proposed.parties.find((p: any) => String(p.id) === partyId)._draft_state,
+        ).toBe('DELETED');
+      });
+
+      it('ZDR-23: APPROVE mempromosikan ADD/UPDATE/DELETE party sekaligus', async () => {
+        const { appId, businessId, partyId } = await makeApprovedBusiness('P23');
+        const reviewId = await initiate(appId);
+
+        await stageParty(reviewId, {
+          operation: 'ADD',
+          data: {
+            role: 'COMMISSIONER',
+            full_name: `Komisaris Baru ${SUFFIX}`,
+            identity_type: 'KTP',
+            identity_number: `3477${SUFFIX}`.slice(0, 16),
+          },
+        }).expect(201);
+        await stageParty(reviewId, {
+          operation: 'DELETE',
+          target_id: Number(partyId),
+        }).expect(201);
+
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(201);
+
+        const live = await liveParties(businessId);
+        // DELETE → soft delete lewat is_active, baris historis tetap ada.
+        const removed = live.find((p: any) => String(p.id) === partyId);
+        expect(removed).toBeTruthy();
+        expect(removed.is_active).toBe(false);
+        // ADD → party baru benar-benar masuk.
+        const added = live.find((p: any) => p.role === 'COMMISSIONER' && p.is_active);
+        expect(added).toBeTruthy();
+        expect(added.full_name).toContain('Komisaris Baru');
+      });
+
+      it('ZDR-24: membatalkan staged ADD sebelum submit → net nol, tidak ada usulan tersisa', async () => {
+        const { appId } = await makeApprovedBusiness('P24');
+        const reviewId = await initiate(appId);
+        const added = await stageParty(reviewId, {
+          operation: 'ADD',
+          data: {
+            role: 'BO',
+            full_name: `BO Sementara ${SUFFIX}`,
+            identity_type: 'KTP',
+            identity_number: `3466${SUFFIX}`.slice(0, 16),
+          },
+        }).expect(201);
+
+        await stageParty(reviewId, {
+          operation: 'DELETE',
+          target_id: Number(added.body.change.id),
+        }).expect(201);
+
+        const draft = await getDraft(reviewId).expect(200);
+        expect(draft.body.review.has_pending_changes).toBe(false);
+        expect(draft.body.proposed.parties.some((p: any) => p._draft_state === 'ADDED')).toBe(false);
+      });
+
+      it('ZDR-25: perubahan eksternal pada person milik party terdeteksi oleh baseline', async () => {
+        const { appId, partyId } = await makeApprovedBusiness('P25');
+        const reviewId = await initiate(appId);
+        await stageParty(reviewId, {
+          operation: 'UPDATE',
+          target_id: Number(partyId),
+          data: { address: 'Jl. Party Baru No. 2' },
+        }).expect(201);
+        await submitReview(appId).expect(201);
+
+        await pgPool.query(
+          `UPDATE persons SET full_name='Berubah di luar review'
+            WHERE id=(SELECT person_id FROM business_parties WHERE id=$1)`,
+          [partyId],
+        );
+
+        const rejected = await decide(appId, { decision: 'APPROVED' }).expect(409);
+        expect(rejected.body.code).toBe('DATA_REVIEW_BASELINE_CHANGED');
+      });
+    });
+
+    // ── ZDR-30..ZDR-35: staging DOCUMENT ────────────────────────────────────
+    describe('ZDR-D. Document staging', () => {
+      const stageDoc = (reviewId: string, body: any, token = frontDeskToken) =>
+        request(app.getHttpServer())
+          .post(`${BASE}/data-reviews/${reviewId}/draft/documents`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(body);
+
+      const liveDocs = async (appId: string) => {
+        const { rows } = await pgPool.query(
+          `SELECT id, doc_type, file_uri FROM documents WHERE application_id=$1 ORDER BY id`,
+          [appId],
+        );
+        return rows;
+      };
+
+      // Dokumen di-seed lewat SQL, bukan endpoint: sejak hardening ADD dokumen
+      // langsung ke aplikasi APPROVED memang ditolak (lihat ZDR-50..52).
+      async function withLiveDoc(tag: string) {
+        const { appId, personId } = await makeApprovedIndividual(tag);
+        const { rows } = await pgPool.query(
+          `INSERT INTO documents (application_id, doc_type, file_uri, status)
+           VALUES ($1,'INDIVIDUAL_NPWP','https://storage.test/npwp-lama.pdf','UPLOADED')
+           RETURNING id`,
+          [appId],
+        );
+        return { appId, personId, docId: String(rows[0].id) };
+      }
+
+      it('ZDR-30: staged ADD dokumen tidak muncul di daftar dokumen live', async () => {
+        const { appId } = await makeApprovedIndividual('D30');
+        const reviewId = await initiate(appId);
+        const before = await liveDocs(appId);
+
+        await stageDoc(reviewId, {
+          operation: 'ADD',
+          doc_type: 'INDIVIDUAL_NPWP',
+          file_uri: 'https://storage.test/_staging/npwp-baru.pdf',
+        }).expect(201);
+
+        expect(await liveDocs(appId)).toHaveLength(before.length);
+
+        const draft = await getDraft(reviewId).expect(200);
+        expect(draft.body.proposed.documents.some((d: any) => d._draft_state === 'ADDED')).toBe(true);
+        expect(draft.body.current.documents).toHaveLength(before.length);
+      });
+
+      it('ZDR-31: staged DELETE membiarkan dokumen live tetap ada', async () => {
+        const { appId, docId } = await withLiveDoc('D31');
+        const reviewId = await initiate(appId);
+
+        await stageDoc(reviewId, { operation: 'DELETE', target_id: Number(docId) }).expect(201);
+
+        const live = await liveDocs(appId);
+        expect(live.some((d: any) => String(d.id) === docId)).toBe(true);
+
+        const draft = await getDraft(reviewId).expect(200);
+        expect(
+          draft.body.proposed.documents.find((d: any) => String(d.id) === docId)._draft_state,
+        ).toBe('DELETED');
+      });
+
+      it('ZDR-32: staged REPLACE menampilkan sebelum/sesudah tanpa menyentuh live', async () => {
+        const { appId, docId } = await withLiveDoc('D32');
+        const reviewId = await initiate(appId);
+
+        const res = await stageDoc(reviewId, {
+          operation: 'REPLACE',
+          target_id: Number(docId),
+          doc_type: 'INDIVIDUAL_NPWP',
+          file_uri: 'https://storage.test/_staging/npwp-2026.pdf',
+        }).expect(201);
+        expect(res.body.change.before_data.file_uri).toContain('npwp-lama.pdf');
+        expect(res.body.change.after_data.file_uri).toContain('npwp-2026.pdf');
+
+        const live = await liveDocs(appId);
+        expect(live.find((d: any) => String(d.id) === docId).file_uri).toContain('npwp-lama.pdf');
+      });
+
+      it('ZDR-33: RETURN mempertahankan usulan dokumen', async () => {
+        const { appId } = await makeApprovedIndividual('D33');
+        const reviewId = await initiate(appId);
+        await stageDoc(reviewId, {
+          operation: 'ADD',
+          doc_type: 'INDIVIDUAL_NPWP',
+          file_uri: 'https://storage.test/_staging/npwp-retur.pdf',
+        }).expect(201);
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'RETURN_FOR_REVISION', reason: 'Dokumen kurang jelas.' })
+          .expect(201);
+
+        const draft = await getDraft(reviewId).expect(200);
+        expect(draft.body.changes).toHaveLength(1);
+        expect(draft.body.changes[0].entity_type).toBe('DOCUMENT');
+      });
+
+      it('ZDR-34: APPROVE mempromosikan ADD dan DELETE dokumen', async () => {
+        const { appId, docId } = await withLiveDoc('D34');
+        const reviewId = await initiate(appId);
+
+        await stageDoc(reviewId, {
+          operation: 'ADD',
+          doc_type: 'INDIVIDUAL_SLIP_GAJI',
+          file_uri: 'https://storage.test/_staging/slip.pdf',
+        }).expect(201);
+        await stageDoc(reviewId, { operation: 'DELETE', target_id: Number(docId) }).expect(201);
+
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(201);
+
+        const live = await liveDocs(appId);
+        expect(live.some((d: any) => String(d.id) === docId)).toBe(false);
+        expect(live.some((d: any) => d.doc_type === 'INDIVIDUAL_SLIP_GAJI')).toBe(true);
+      });
+
+      it('ZDR-35: multipart upload masuk staging lalu dipindahkan saat APPROVE', async () => {
+        const { appId } = await makeApprovedIndividual('D35');
+        const reviewId = await initiate(appId);
+
+        const uploaded = await request(app.getHttpServer())
+          .post(`${BASE}/data-reviews/${reviewId}/draft/documents/upload`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .field('operation', 'ADD')
+          .field('doc_type', 'INDIVIDUAL_NPWP')
+          .attach('file', Buffer.from('%PDF-1.4\nADR-047\n'), {
+            filename: 'npwp-pengkinian.pdf',
+            contentType: 'application/pdf',
+          })
+          .expect(201);
+        expect(uploaded.body.upload.key).toContain('_staging/data-review/');
+        expect(uploaded.body.change.staged_object_key).toBe(uploaded.body.upload.key);
+        expect(await liveDocs(appId)).toHaveLength(0);
+
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(201);
+
+        const docs = await liveDocs(appId);
+        const promoted = docs.find((d: any) => d.doc_type === 'INDIVIDUAL_NPWP');
+        expect(promoted).toBeTruthy();
+        expect(promoted.file_uri).toContain(`/data-review/${reviewId}/`);
+        expect(promoted.file_uri).not.toContain('_staging');
+      });
+    });
+
+    // ── ZDR-40..ZDR-42: staging EDD ─────────────────────────────────────────
+    describe('ZDR-E. EDD staging', () => {
+      const stageEdd = (reviewId: string, body: any, token = frontDeskToken) =>
+        request(app.getHttpServer())
+          .patch(`${BASE}/data-reviews/${reviewId}/draft/edd`)
+          .set('Authorization', `Bearer ${token}`)
+          .send(body);
+
+      it('ZDR-40: staged EDD tidak mengubah application_edd live', async () => {
+        const { appId } = await makeApprovedIndividual('E40');
+        const reviewId = await initiate(appId);
+
+        await stageEdd(reviewId, {
+          additional_information: { catatan: 'Sumber dana diperbarui 2026' },
+        }).expect(200);
+
+        const { rows } = await pgPool.query(
+          `SELECT additional_information FROM application_edd WHERE application_id=$1`, [appId]);
+        if (rows[0]) {
+          expect(JSON.stringify(rows[0].additional_information)).not.toContain('diperbarui 2026');
+        }
+
+        const draft = await getDraft(reviewId).expect(200);
+        expect(draft.body.proposed.edd.additional_information.catatan).toContain('diperbarui 2026');
+      });
+
+      it('ZDR-41: APPROVE mempromosikan perubahan EDD', async () => {
+        const { appId } = await makeApprovedIndividual('E41');
+        const reviewId = await initiate(appId);
+        await stageEdd(reviewId, {
+          additional_information: { catatan: 'EDD dipromosikan' },
+        }).expect(200);
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(201);
+
+        const { rows } = await pgPool.query(
+          `SELECT additional_information FROM application_edd WHERE application_id=$1`, [appId]);
+        expect(rows[0]).toBeTruthy();
+        expect(rows[0].additional_information.catatan).toBe('EDD dipromosikan');
+      });
+
+      it('ZDR-42: bagian EDD milik Compliance (V–VII) ditolak di jalur Frontline → 400', async () => {
+        const { appId } = await makeApprovedIndividual('E42');
+        const reviewId = await initiate(appId);
+        const res = await stageEdd(reviewId, {
+          compliance_decision: { keputusan: 'LANJUT' },
+        }).expect(400);
+        expect(res.body.message).toContain('Frontline hanya bagian I–IV');
+      });
+    });
+
+    // ── ZDR-50..ZDR-55: hardening mutasi langsung pada aplikasi APPROVED ────
+    // Celah P0 dari audit: dokumen/party/EDD dulu bisa diubah langsung pada
+    // nasabah yang sudah disetujui, tanpa review apa pun.
+    describe('ZDR-S. Hardening mutasi langsung', () => {
+      it('ZDR-50: FrontDesk tidak dapat menambah dokumen langsung ke aplikasi APPROVED → 400', async () => {
+        const { appId } = await makeApprovedIndividual('S50');
+        const res = await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ doc_type: 'INDIVIDUAL_NPWP', file_uri: 'https://storage.test/langsung.pdf' })
+          .expect(400);
+        expect(res.body.message).toContain('Pengkinian Data');
+      });
+
+      it('ZDR-51: FrontDesk tidak dapat menghapus dokumen live aplikasi APPROVED → 400', async () => {
+        const { appId } = await makeApprovedIndividual('S51');
+        const { rows } = await pgPool.query(
+          `INSERT INTO documents (application_id, doc_type, file_uri, status)
+           VALUES ($1,'INDIVIDUAL_NPWP','https://storage.test/x.pdf','UPLOADED') RETURNING id`,
+          [appId],
+        );
+        await request(app.getHttpServer())
+          .delete(`${BASE}/applications/${appId}/documents/${rows[0].id}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(400);
+
+        const { rows: still } = await pgPool.query(
+          `SELECT id FROM documents WHERE id=$1`, [rows[0].id]);
+        expect(still).toHaveLength(1);
+      });
+
+      it('ZDR-52: FrontDesk tidak dapat mengubah EDD aplikasi APPROVED → 400', async () => {
+        const { appId } = await makeApprovedIndividual('S52');
+        await request(app.getHttpServer())
+          .patch(`${BASE}/applications/${appId}/edd`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ additional_information: { catatan: 'langsung tanpa review' } })
+          .expect(400);
+      });
+
+      it('ZDR-53: SystemAdmin juga tidak dapat menembus gate status (role bypass ≠ bypass integritas)', async () => {
+        const { appId } = await makeApprovedIndividual('S53');
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/documents`)
+          .set('Authorization', `Bearer ${sysAdminToken}`)
+          .send({ doc_type: 'INDIVIDUAL_NPWP', file_uri: 'https://storage.test/admin.pdf' })
+          .expect(400);
+      });
+
+      it('ZDR-54: aplikasi DRAFT tetap bisa dimutasi langsung (alur onboarding tidak terganggu)', async () => {
+        const seq = String(++zdSeq).padStart(2, '0');
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/individual`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({
+            full_name: `Onboarding Normal ${SUFFIX}`,
+            ktp_number: TEST_KTP_NUMBER,
+            identity_type: 'KTP',
+            identity_number: `3455${seq}${SUFFIX}`.slice(0, 16),
+            address_identity: 'Jl. Onboarding No. 1',
+            pob: 'Jakarta',
+            dob: '1990-01-01',
+            nationality: 'ID',
+            phone: `0866${seq}${SUFFIX}`.slice(0, 15),
+            occupation: 'Karyawan Swasta',
+            gender: 'M',
+            signature_uri: 'https://storage.test/sig.png',
+          })
+          .expect(201);
+
+        await request(app.getHttpServer())
+          .post(`${BASE}/applications/${create.body.id}/documents`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ doc_type: 'INDIVIDUAL_KTP_PHOTO', file_uri: 'https://storage.test/ktp.jpg' })
+          .expect(201);
+
+        const review = await request(app.getHttpServer())
+          .post(`${BASE}/applications/${create.body.id}/data-review/initiate`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({})
+          .expect(400);
+        expect(review.body.message).toContain('berstatus APPROVED');
+      });
+
+      it('ZDR-55: deleteParty langsung memakai soft delete, bukan DELETE keras', async () => {
+        const seq = String(++zdSeq).padStart(2, '0');
+        const create = await request(app.getHttpServer())
+          .post(`${BASE}/applications/business`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({
+            legal_name: `PT Soft Delete ${SUFFIX}`,
+            legal_form: 'PT',
+            incorporation_date: '2020-01-01',
+            deed_establishment_number: `AKTA-SD${seq}-${SUFFIX}`,
+            business_license_number: `BLSD${seq}${SUFFIX}`,
+            nib: `NIBSD${seq}${SUFFIX}`,
+            npwp: npwp15(`8${seq}`),
+            address_line: 'Jl. Soft Delete No. 1',
+            city: 'Jakarta',
+            province: 'DKI Jakarta',
+            postal_code: '12345',
+            business_activity: 'Perdagangan Umum',
+            phone: `022${seq}${SUFFIX}`.slice(0, 15),
+          })
+          .expect(201);
+        const appId = String(create.body.id);
+        const party = await request(app.getHttpServer())
+          .post(`${BASE}/applications/${appId}/parties`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .send({
+            role: 'DIRECTOR',
+            full_name: `Direktur Soft ${SUFFIX}`,
+            identity_type: 'KTP',
+            identity_number: `3444${seq}${SUFFIX}`.slice(0, 16),
+          })
+          .expect(201);
+        const partyId = String(party.body.id ?? party.body.party?.id);
+
+        await request(app.getHttpServer())
+          .delete(`${BASE}/applications/${appId}/parties/${partyId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(200);
+
+        // Barisnya masih ada — hanya dinonaktifkan.
+        const { rows } = await pgPool.query(
+          `SELECT is_active FROM business_parties WHERE id=$1`, [partyId]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].is_active).toBe(false);
+      });
+    });
+
+    // ── ZDR-60..ZDR-63: atomicitas & kompatibilitas review lama ─────────────
+    describe('ZDR-L. Atomicitas & legacy', () => {
+      it('ZDR-60: promosi gagal → SEMUA entitas live tidak berubah & review tetap SUBMITTED', async () => {
+        const { appId, personId } = await makeApprovedIndividual('L60');
+        const reviewId = await initiate(appId);
+
+        // Perubahan sah…
+        await stagePerson(reviewId, { address_identity: 'Jl. Gagal, Bandung' }).expect(200);
+        await request(app.getHttpServer())
+          .patch(`${BASE}/data-reviews/${reviewId}/draft/edd`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .send({ additional_information: { catatan: 'tidak boleh ikut tersimpan' } })
+          .expect(200);
+        // …lalu satu nilai yang baru ditolak DB saat promosi (CHECK gender).
+        await pgPool.query(
+          `UPDATE application_data_review_changes
+              SET after_data = after_data || '{"gender":"X"}'::jsonb
+            WHERE review_id=$1 AND entity_type='PERSON' AND superseded_at IS NULL`,
+          [reviewId],
+        );
+
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(500);
+
+        // Tidak ada promosi sebagian.
+        expect(await liveAddress(personId)).toContain('Jakarta');
+        const { rows: eddRows } = await pgPool.query(
+          `SELECT additional_information FROM application_edd WHERE application_id=$1`, [appId]);
+        if (eddRows[0]) {
+          expect(JSON.stringify(eddRows[0].additional_information)).not.toContain('tidak boleh ikut');
+        }
+        const { rows: revRows } = await pgPool.query(
+          `SELECT status, approved_at FROM application_data_reviews WHERE id=$1`, [reviewId]);
+        expect(revRows[0].status).toBe('SUBMITTED');
+        expect(revRows[0].approved_at).toBeNull();
+        const { rows: chRows } = await pgPool.query(
+          `SELECT promoted_at FROM application_data_review_changes
+            WHERE review_id=$1 AND superseded_at IS NULL`, [reviewId]);
+        expect(chRows.every((r: any) => r.promoted_at === null)).toBe(true);
+      });
+
+      it('ZDR-61: APPROVE dua kali ditolak — tidak ada promosi ganda', async () => {
+        const { appId } = await makeApprovedIndividual('L61');
+        const reviewId = await initiate(appId);
+        await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(201);
+
+        await decide(appId, { decision: 'APPROVED' }).expect(400);
+
+        const { rows } = await pgPool.query(
+          `SELECT count(*) AS n FROM application_data_review_changes
+            WHERE review_id=$1 AND promoted_at IS NOT NULL`, [reviewId]);
+        expect(Number(rows[0].n)).toBe(1);
+      });
+
+      it('ZDR-62: review lama (V1) tetap dapat dibaca dan diputuskan tanpa change-set', async () => {
+        const { appId, personId } = await makeApprovedIndividual('L62');
+        const reviewId = await initiate(appId);
+        // Simulasikan review yang dibuat sebelum arsitektur change-set.
+        await pgPool.query(
+          `UPDATE application_data_reviews
+              SET changes_model='V1', baseline_digest=NULL, baseline_captured_at=NULL
+            WHERE id=$1`,
+          [reviewId],
+        );
+
+        // Submit tanpa staged change tetap boleh untuk V1 (stagingnya memang
+        // belum pernah ada di model lama).
+        await submitReview(appId).expect(201);
+        const approved = await decide(appId, { decision: 'APPROVED' }).expect(201);
+        expect(approved.body.status).toBe('APPROVED');
+
+        // Tidak ada promosi apa pun — data live utuh.
+        expect(await liveAddress(personId)).toContain('Jakarta');
+      });
+
+      it('ZDR-64: riwayat change-set bertahan permanen & tidak dapat dihapus lewat API', async () => {
+        const { appId } = await makeApprovedIndividual('L64');
+        const reviewId = await initiate(appId);
+        const staged = await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+        const changeId = staged.body.change.id;
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(201);
+
+        // Setelah promosi, baris change tetap ada lengkap dengan before/after.
+        const { rows } = await pgPool.query(
+          `SELECT before_data, after_data, promoted_at FROM application_data_review_changes WHERE id=$1`,
+          [changeId],
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].promoted_at).not.toBeNull();
+        expect(rows[0].before_data.occupation).toBe('Karyawan Swasta');
+        expect(rows[0].after_data.occupation).toBe('Wiraswasta');
+
+        // Satu-satunya endpoint DELETE pada modul ini menolak menyentuh review
+        // yang sudah selesai — dan ia pun hanya men-supersede, tidak menghapus.
+        await request(app.getHttpServer())
+          .delete(`${BASE}/data-reviews/${reviewId}/draft/changes/${changeId}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(400);
+        await request(app.getHttpServer())
+          .delete(`${BASE}/data-reviews/${reviewId}/draft/changes/${changeId}`)
+          .set('Authorization', `Bearer ${complianceToken}`)
+          .expect(403);
+
+        const { rows: after } = await pgPool.query(
+          `SELECT count(*)::int AS n FROM application_data_review_changes WHERE id=$1`, [changeId]);
+        expect(after[0].n).toBe(1);
+      });
+
+      it('ZDR-65: membatalkan usulan saat DRAFT hanya men-supersede, barisnya tetap ada', async () => {
+        const { appId } = await makeApprovedIndividual('L65');
+        const reviewId = await initiate(appId);
+        const staged = await stagePerson(reviewId, { occupation: 'Wiraswasta' }).expect(200);
+        const changeId = staged.body.change.id;
+
+        await request(app.getHttpServer())
+          .delete(`${BASE}/data-reviews/${reviewId}/draft/changes/${changeId}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(200);
+
+        const { rows } = await pgPool.query(
+          `SELECT superseded_at FROM application_data_review_changes WHERE id=$1`, [changeId]);
+        expect(rows).toHaveLength(1);              // baris TIDAK dihapus
+        expect(rows[0].superseded_at).not.toBeNull();
+      });
+
+      it('ZDR-63: review V1 yang masih aktif naik ke V2 saat mulai memakai draft baru', async () => {
+        const { appId, personId } = await makeApprovedIndividual('L63');
+        const reviewId = await initiate(appId);
+        await pgPool.query(
+          `UPDATE application_data_reviews
+              SET changes_model='V1', baseline_digest=NULL, baseline_captured_at=NULL
+            WHERE id=$1`,
+          [reviewId],
+        );
+
+        // Mutasi draft pertama memicu ensureV2 + pengambilan baseline saat itu.
+        await stagePerson(reviewId, { address_identity: 'Jl. Naik Kelas, Bandung' }).expect(200);
+
+        const { rows } = await pgPool.query(
+          `SELECT changes_model, baseline_digest FROM application_data_reviews WHERE id=$1`,
+          [reviewId],
+        );
+        expect(rows[0].changes_model).toBe('V2');
+        expect(rows[0].baseline_digest).not.toBeNull();
+
+        // Selanjutnya berperilaku seperti review V2 penuh.
+        expect(await liveAddress(personId)).toContain('Jakarta');
+        await submitReview(appId).expect(201);
+        await decide(appId, { decision: 'APPROVED' }).expect(201);
+        expect(await liveAddress(personId)).toContain('Bandung');
+      });
     });
   });
 

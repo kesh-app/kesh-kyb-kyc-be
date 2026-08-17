@@ -42,6 +42,35 @@ export class ObsStorage {
     });
   }
 
+  /**
+   * Server-side copy — dipakai promosi Pengkinian Data untuk memindahkan objek
+   * dari prefix staging ke key final. Idempotent: menyalin ulang ke key tujuan
+   * yang sama menghasilkan objek yang sama, jadi retry promosi aman.
+   */
+  async copyObject(sourceKey: string, destKey: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.client.copyObject(
+        { Bucket: this.bucket, Key: destKey, CopySource: `${this.bucket}/${sourceKey}` },
+        (err: any, result: any) => {
+          if (err) {
+            this.logger.error(
+              `OBS copyObject error ${sourceKey} → ${destKey}: ${JSON.stringify(err)}`,
+            );
+            return reject(new Error(`OBS copy failed: ${err.message ?? JSON.stringify(err)}`));
+          }
+          if (result?.CommonMsg?.Status >= 300) {
+            return reject(
+              new Error(
+                `OBS copy error: HTTP ${result.CommonMsg.Status} ${result.CommonMsg.Message}`,
+              ),
+            );
+          }
+          resolve();
+        },
+      );
+    });
+  }
+
   async getSignedUrl(key: string, expiresSeconds = 300): Promise<string> {
     const result = this.client.createSignedUrlSync({
       Method: 'GET',
