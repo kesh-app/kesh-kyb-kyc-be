@@ -344,8 +344,11 @@ export class RescreenTransferDto {
 }
 
 export class SetTransferResultDto {
-  @IsString()
+  @IsIn(['SUCCESS', 'FAILED'], { message: 'result harus SUCCESS atau FAILED' })
   result!: 'SUCCESS' | 'FAILED';
+
+  @IsString() @IsNotEmpty() @MaxLength(150)
+  provider_name!: string;
 
   // Legacy fields — dipertahankan untuk backward compatibility.
   @IsOptional() @IsString()
@@ -354,7 +357,7 @@ export class SetTransferResultDto {
   @IsOptional() @IsString()
   attachmentUri?: string;
 
-  // ── Transfer Recording v2 — provider/result mapping (opsional) ──────
+  // ── Transfer Recording v2 — provider/result mapping ─────────────────
   @IsOptional() @IsString()
   result_notes?: string;
 

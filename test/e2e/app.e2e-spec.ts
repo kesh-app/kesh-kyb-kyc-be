@@ -1701,8 +1701,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${financeManagerToken}`)
         .send({ decision: 'APPROVE' })
         .expect(201);
-      expect(res.body.status).toBe('COMPLETED');
-      expect(res.body.result).toBe('SUCCESS');
+      expect(res.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+      expect(res.body.result).toBeNull();
+      expect(res.body.approved_by).not.toBeNull();
+      expect(res.body.approved_at).not.toBeNull();
+      expect(res.body.completed_at).toBeNull();
+      expect(res.body.transaction_date).not.toBeNull();
 
       const detail = await request(app.getHttpServer())
         .get(`${BASE}/transfers/${txId}`)
@@ -1715,6 +1719,145 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       expect(detail.body.approved_by_name).toBeTruthy();
       // ID numerik tetap ada (backward compatibility)
       expect(detail.body.created_by).not.toBeNull();
+
+      // Manager approval alone is not receipt-eligible and neither Manager nor
+      // FrontDesk may fabricate the provider result.
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}/receipt`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(400);
+      for (const token of [financeManagerToken, frontDeskToken]) {
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/result`)
+          .set('Authorization', `Bearer ${token}`)
+          .send({ result: 'SUCCESS', bank_reference_no: `BANK-FW04-${SUFFIX}` })
+          .expect(403);
+      }
+
+      const finalized = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/result`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          result: 'SUCCESS',
+          provider_name: 'Bank Nobu',
+          bank_reference_no: `BANK-FW04-${SUFFIX}`,
+          provider_reference_no: `PROVIDER-FW04-${SUFFIX}`,
+          result_notes: 'Berhasil menurut hasil bank',
+        })
+        .expect(201);
+      expect(finalized.body.status).toBe('COMPLETED');
+      expect(finalized.body.result).toBe('SUCCESS');
+      expect(finalized.body.provider_name).toBe('Bank Nobu');
+      expect(finalized.body.provider_name).not.toBe(finalized.body.beneficiary_bank_name);
+      expect(finalized.body.completed_at).not.toBeNull();
+      expect(finalized.body.result_updated_by).not.toBeNull();
+      // Manager approval audit is preserved, not overwritten by FinanceStaff.
+      expect(finalized.body.approved_by).toBe(res.body.approved_by);
+      expect(finalized.body.approved_at).toEqual(res.body.approved_at);
+
+      const finalDetail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(finalDetail.body.bank_reference_no).toBe(`BANK-FW04-${SUFFIX}`);
+      expect(finalDetail.body.provider_reference_no).toBe(`PROVIDER-FW04-${SUFFIX}`);
+      expect(finalDetail.body.provider_name).toBe('Bank Nobu');
+      expect(finalDetail.body.result_updated_by_name).toBeTruthy();
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}/receipt`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+    });
+
+    it('FW-04b: FinanceStaff result only after Manager, validates reference, and FAILED terminal', async () => {
+      const txId = await transferAtFinanceStage(`FW04B${SUFFIX}`);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/finance-review`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ action: 'APPROVE', notes: 'siap' })
+        .expect(201);
+      const managerApproved = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/decision`)
+        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .send({ decision: 'APPROVE' })
+        .expect(201);
+      expect(managerApproved.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/result`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({ result: 'SUCCESS', bank_reference_no: `BANK-NO-PROVIDER-${SUFFIX}` })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/result`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          result: 'FAILED',
+          provider_name: 'Bank Nobu',
+          provider_reference_no: `PROVIDER-FAIL-${SUFFIX}`,
+        })
+        .expect(400);
+
+      const failed = await request(app.getHttpServer())
+        .post(`${BASE}/transfers/${txId}/result`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          result: 'FAILED',
+          provider_name: 'Bank Nobu',
+          provider_reference_no: `PROVIDER-FAIL-${SUFFIX}`,
+          failed_reason: 'Ditolak oleh bank tujuan',
+        })
+        .expect(201);
+      expect(failed.body.status).toBe('COMPLETED');
+      expect(failed.body.result).toBe('FAILED');
+      expect(failed.body.completed_at).toBeNull();
+      expect(failed.body.failed_at).not.toBeNull();
+      expect(failed.body.approved_by).toBe(managerApproved.body.approved_by);
+      await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}/receipt`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(400);
+
+      const audits = await pgPool.query(
+        `SELECT action FROM audit_logs
+          WHERE object_type='TRANSFER' AND object_id=$1
+            AND action IN ('TRANSFER_MANAGER_APPROVED','TRANSFER_PROVIDER_RESULT_FINALIZED')`,
+        [txId],
+      );
+      expect(audits.rows.map((auditRow: any) => auditRow.action).sort()).toEqual([
+        'TRANSFER_MANAGER_APPROVED',
+        'TRANSFER_PROVIDER_RESULT_FINALIZED',
+      ]);
+
+      // Legacy rows without provider identity remain readable; never infer it
+      // from the beneficiary bank.
+      await pgPool.query(`UPDATE transfers SET provider_name=NULL WHERE id=$1`, [txId]);
+      const legacyDetail = await request(app.getHttpServer())
+        .get(`${BASE}/transfers/${txId}`)
+        .set('Authorization', `Bearer ${frontDeskToken}`)
+        .expect(200);
+      expect(legacyDetail.body.provider_name).toBeNull();
+    });
+
+    it('FW-04c: provider result rejects every pre-approval or non-result status', async () => {
+      const senderAppId = await createApprovedSenderForTransfer(`FW04C${SUFFIX}`);
+      const txId = await createAndSubmitTransfer(senderAppId);
+      for (const status of [
+        'DRAFT',
+        'SUBMITTED',
+        'PENDING_COMPLIANCE_REVIEW',
+        'PENDING_FINANCE_STAFF_REVIEW',
+        'PENDING_FINANCE_MANAGER_APPROVAL',
+        'REVISION_REQUIRED',
+        'REJECTED',
+      ]) {
+        await pgPool.query(`UPDATE transfers SET status=$2, result=NULL WHERE id=$1`, [txId, status]);
+        await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/result`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ result: 'SUCCESS', bank_reference_no: `BANK-${status}` })
+          .expect(400);
+      }
     });
 
     it('FW-05: OperationSupervisor dapat reject transfer layer 1 → REJECTED', async () => {
@@ -1886,7 +2029,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${financeManagerToken}`)
         .send({ decision: 'APPROVE' })
         .expect(201);
-      expect(done.body.status).toBe('COMPLETED');
+      expect(done.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
     });
 
     it('FW-13: FinanceManager tidak bisa approve transaksi yang belum disubmit ulang setelah dikembalikan', async () => {
@@ -5214,12 +5357,12 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .send({ decision: 'APPROVE', decision_notes: 'Approved by manager' })
         .expect(201);
 
-      expect(res.body.status).toBe('COMPLETED');
-      expect(res.body.result).toBe('SUCCESS');
+      expect(res.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+      expect(res.body.result).toBeNull();
       expect(res.body.approved_by).not.toBeNull();
       expect(String(res.body.approved_by)).toMatch(/^\d+$/);
       expect(res.body.approved_at).not.toBeNull();
-      expect(res.body.completed_at).not.toBeNull();
+      expect(res.body.completed_at).toBeNull();
       expect(res.body.decision_notes).toBe('Approved by manager');
     });
 
@@ -5274,9 +5417,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
     it('N-07: result SUCCESS → completed_at/result_updated_by/result_reference_no/bank_reference_no', async () => {
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txAutoRef}/result`)
-        .set('Authorization', `Bearer ${financeManagerToken}`)
+        .set('Authorization', `Bearer ${financeStaffToken}`)
         .send({
           result: 'SUCCESS',
+          provider_name: 'Bank Nobu',
           result_reference_no: `RES-${SUFFIX}`,
           bank_reference_no: `BANK-${SUFFIX}`,
           latest_transaction_status: '00',
@@ -5309,8 +5453,13 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
       const res = await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txFail}/result`)
-        .set('Authorization', `Bearer ${financeManagerToken}`)
-        .send({ result: 'FAILED', failed_reason: 'Saldo tidak mencukupi' })
+        .set('Authorization', `Bearer ${financeStaffToken}`)
+        .send({
+          result: 'FAILED',
+          provider_name: 'Bank Nobu',
+          provider_reference_no: `PROVIDER-FAILED-${SUFFIX}`,
+          failed_reason: 'Saldo tidak mencukupi',
+        })
         .expect(201);
 
       expect(res.body.status).toBe('COMPLETED');
@@ -5350,7 +5499,11 @@ describe('KYC/KYB E2E — Priority Tests', () => {
       await request(app.getHttpServer())
         .post(`${BASE}/transfers/${txSnap}/result`)
         .set('Authorization', `Bearer ${sysAdminToken}`)
-        .send({ result: 'SUCCESS' })
+        .send({
+          result: 'SUCCESS',
+          provider_name: 'Bank Nobu',
+          provider_reference_no: `PROVIDER-ADMIN-${SUFFIX}`,
+        })
         .expect(201);
     });
 
@@ -6117,10 +6270,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${financeManagerToken}`)
         .send({ decision: 'APPROVE', decision_notes: 'disetujui manager' })
         .expect(201);
-      expect(finalRes.body.status).toBe('COMPLETED');
-      expect(finalRes.body.result).toBe('SUCCESS');
+      expect(finalRes.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+      expect(finalRes.body.result).toBeNull();
       expect(finalRes.body.approved_at).not.toBeNull();
-      expect(finalRes.body.completed_at).not.toBeNull();
+      expect(finalRes.body.completed_at).toBeNull();
     });
 
     it('GF-13: FinanceManager cannot approve before FinanceStaff review → 400', async () => {
@@ -14094,7 +14247,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         const res = await approveFully(txId);
         const after = Date.now();
 
-        expect(res.body.status).toBe('COMPLETED');
+        expect(res.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
         expect(res.body.transaction_date).not.toBeNull();
         // requested_transfer_at kolom DATE → CURRENT_DATE, bukan now().
         expect(res.body.requested_transfer_at).toBe(todayAsDateColumnIso());
@@ -14136,7 +14289,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(returned.body.requested_transfer_at).toBeNull();
 
         const approved = await approveFully(txId);
-        expect(approved.body.status).toBe('COMPLETED');
+        expect(approved.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
         expect(approved.body.transaction_date).not.toBeNull();
         expect(approved.body.requested_transfer_at).not.toBeNull();
       });
@@ -14159,7 +14312,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         );
 
         const approved = await approveFully(txId);
-        expect(approved.body.status).toBe('COMPLETED');
+        expect(approved.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
         expect(new Date(approved.body.transaction_date).toISOString()).toBe(legacyTs);
         expect(approved.body.requested_transfer_at).toBe(
           new Date(2020, 4, 5).toISOString(),
@@ -14233,7 +14386,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         // Tidak ada mass approval: tiap anak melalui approval-nya sendiri.
         const approved = await approveFully(childId);
 
-        expect(approved.body.status).toBe('COMPLETED');
+        expect(approved.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
         expect(approved.body.transaction_date).not.toBeNull();
         expect(approved.body.requested_transfer_at).toBe(todayAsDateColumnIso());
       });
@@ -14341,7 +14494,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(201);
 
         const approved = await approveFinal(txId);
-        expect(approved.body.status).toBe('COMPLETED');
+        expect(approved.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
         expect(approved.body.transaction_date).not.toBeNull();
         expect(approved.body.requested_transfer_at).toBe(todayAsDateColumnIso());
       });
@@ -14512,7 +14665,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(400);
     });
 
-    it('ZT-08: transfer hasil bulk mengikuti alur approval normal → COMPLETED', async () => {
+    it('ZT-08: transfer hasil bulk mengikuti alur approval normal → menunggu hasil FinanceStaff', async () => {
       const bulk = await request(app.getHttpServer())
         .post(`${BASE}/transfers/bulk`)
         .set('Authorization', `Bearer ${frontDeskToken}`)
@@ -14542,8 +14695,8 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .set('Authorization', `Bearer ${financeManagerToken}`)
         .send({ decision: 'APPROVE' })
         .expect(201);
-      expect(decided.body.status).toBe('COMPLETED');
-      expect(decided.body.result).toBe('SUCCESS');
+      expect(decided.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+      expect(decided.body.result).toBeNull();
     });
 
     it('ZT-09: FinanceStaff tidak boleh bulk create transfer → 403', async () => {
@@ -15073,10 +15226,23 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${financeStaffToken}`)
           .send({ action: 'APPROVE', notes: 'ok' })
           .expect(201);
-        const done = await request(app.getHttpServer())
+        const approved = await request(app.getHttpServer())
           .post(`${BASE}/transfers/${id}/decision`)
           .set('Authorization', `Bearer ${financeManagerToken}`)
           .send({ decision: 'APPROVE' })
+          .expect(201);
+        expect(approved.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+        expect(approved.body.result).toBeNull();
+
+        const done = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${id}/result`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            result: 'SUCCESS',
+            provider_name: 'Bank Nobu',
+            bank_reference_no: `QLOLA-${id}-${SUFFIX}`,
+            result_notes: 'Hasil aktual bank/provider',
+          })
           .expect(201);
         expect(done.body.status).toBe('COMPLETED');
         expect(done.body.result).toBe('SUCCESS');
@@ -15740,14 +15906,15 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .expect(201);
         expect(approved.body.status).toBe('PENDING_FINANCE_MANAGER_APPROVAL');
 
-        // FinanceManager approval tetap tidak berubah oleh koreksi Maker ini.
+        // FinanceManager approval tetap tidak berubah oleh koreksi Maker ini,
+        // tetapi sekarang berhenti sebelum hasil aktual bank/provider.
         const done = await request(app.getHttpServer())
           .post(`${BASE}/transfers/${children[0].id}/decision`)
           .set('Authorization', `Bearer ${financeManagerToken}`)
           .send({ decision: 'APPROVE' })
           .expect(201);
-        expect(done.body.status).toBe('COMPLETED');
-        expect(done.body.result).toBe('SUCCESS');
+        expect(done.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+        expect(done.body.result).toBeNull();
       });
 
       // -- Kepemilikan batch untuk MAKER: instruksi bayar bank sungguhan --------
@@ -15852,6 +16019,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           qlolaItem({ beneficiaryAccountName: 'Qlola Submitted' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Compliance' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Manager' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Provider Result' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Revision' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Completed' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Rejected' }),
@@ -15865,9 +16033,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           [2, 'SUBMITTED'],
           [3, 'PENDING_COMPLIANCE_REVIEW'],
           [4, 'PENDING_FINANCE_MANAGER_APPROVAL'],
-          [5, 'REVISION_REQUIRED'],
-          [6, 'COMPLETED'],
-          [7, 'REJECTED'],
+          [5, 'PENDING_FINANCE_STAFF_RESULT'],
+          [6, 'REVISION_REQUIRED'],
+          [7, 'COMPLETED'],
+          [8, 'REJECTED'],
         ];
         for (const [idx, status] of forcedStatuses) {
           await pgPool.query(`UPDATE transfers SET status=$2 WHERE id=$1`, [
@@ -15878,10 +16047,10 @@ describe('KYC/KYB E2E — Priority Tests', () => {
 
         const { res, aoa } = await exportSheet(batchId, frontDeskToken, 'MAKER');
         expect(res.headers['x-qlola-eligible-count']).toBe('1');
-        expect(res.headers['x-qlola-total-count']).toBe('8');
+        expect(res.headers['x-qlola-total-count']).toBe('9');
         expect(aoa[DATA_ROW][1]).toBe(eligible.partner_reference_no);
         const flat = JSON.stringify(aoa);
-        for (let i = 1; i <= 7; i++) {
+        for (let i = 1; i <= 8; i++) {
           expect(flat).not.toContain(children[i].partner_reference_no);
         }
       });
@@ -19140,7 +19309,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${financeManagerToken}`)
           .send({ decision: 'APPROVE' })
           .expect(201);
-        expect(decided.body.status).toBe('COMPLETED');
+        expect(decided.body.status).toBe('PENDING_FINANCE_STAFF_RESULT');
+
+        const finalized = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${txId}/result`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({
+            result: 'SUCCESS',
+            provider_name: 'Bank Nobu',
+            bank_reference_no: `RESCREEN-${txId}-${SUFFIX}`,
+          })
+          .expect(201);
+        expect(finalized.body.status).toBe('COMPLETED');
+        expect(finalized.body.result).toBe('SUCCESS');
 
         // Suntik histori hit lama langsung ke transfer yang sudah COMPLETED.
         await pgPool.query(

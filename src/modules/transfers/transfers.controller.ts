@@ -154,7 +154,7 @@ export class TransfersController {
 
   // SET RESULT (SUCCESS / FAILED)
   @Post(":id/result")
-  @Roles("FinanceManager")
+  @Roles("FinanceStaff")
   async setResult(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
@@ -285,6 +285,13 @@ export class TransfersController {
   @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "Auditor", "FrontDesk")
   async snapPreview(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.snapPreview(id, req.user);
+  }
+
+  // Printable receipt data: only COMPLETED/SUCCESS is eligible.
+  @Get(":id/receipt")
+  @Roles("FinanceStaff", "FinanceManager", "OperationSupervisor", "ComplianceLead", "Auditor", "FrontDesk")
+  async receipt(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
+    return this.svc.getReceipt(id, req.user);
   }
 
   // GET TRANSFER DETAIL

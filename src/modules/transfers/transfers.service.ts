@@ -1619,30 +1619,36 @@ export class TransfersService {
 
     let next;
     if (dto.decision === "APPROVE") {
-      // FinanceManager final approval directly completes the transfer as SUCCESS.
-      // Ini satu-satunya titik "draft disetujui": tanggal transaksi & Tanggal
-      // Diminta distempel di sini, dalam UPDATE yang sama dengan perubahan status.
+      // Manager approves the instruction, but does not fabricate the
+      // bank/provider outcome. The approval stays the transaction-date anchor;
+      // FinanceStaff records the actual result in setResult().
       next = await this.pool.query(
         `UPDATE transfers SET
-          status='COMPLETED',
-          result='SUCCESS',
+          status='PENDING_FINANCE_STAFF_RESULT',
+          result=NULL,
           approved_by=$2,
           approved_at=now(),
-          completed_at=now(),${APPROVAL_DATE_STAMP_SQL}
+          completed_at=NULL,
+          failed_at=NULL,${APPROVAL_DATE_STAMP_SQL}
           decision_notes=$3,
           updated_at=now()
         WHERE id=$1
         RETURNING *`,
         [id, actorId, decisionNotes],
       );
-      if (row.created_by) {
-        await this.notifyTransferUser(
-          row.created_by,
-          "INFO",
-          id,
-          `Transfer ${next.rows[0].partner_reference_no ?? id} selesai`,
-        );
-      }
+      await this.notifyTransferRole(
+        id,
+        "FinanceStaff",
+        `Transfer ${next.rows[0].partner_reference_no ?? id} menunggu hasil bank/provider`,
+        "Finance Manager telah menyetujui transaksi. Lengkapi hasil aktual dari bank/provider.",
+      );
+      if (row.created_by) await this.notifyTransferUser(
+        row.created_by,
+        "INFO",
+        id,
+        `Transfer ${next.rows[0].partner_reference_no ?? id} disetujui Finance Manager`,
+        "Menunggu Finance Staff mencatat hasil aktual dari bank/provider.",
+      );
     } else if (dto.decision === "REJECT") {
       next = await this.pool.query(
         `UPDATE transfers SET
@@ -1671,7 +1677,7 @@ export class TransfersService {
 
     await this.audit(
       actorId,
-      `TRANSFER_${next.rows[0].status}`,
+      dto.decision === "APPROVE" ? "TRANSFER_MANAGER_APPROVED" : `TRANSFER_${next.rows[0].status}`,
       String(id),
       row,
       next.rows[0],
@@ -1696,12 +1702,14 @@ export class TransfersService {
     if (rowCount === 0) throw new NotFoundException("Transfer not found");
     const row = prev.rows[0];
 
-    if (user.role !== "FinanceManager" && !FULL_ACCESS_ROLES.includes(user.role)) {
-      throw new ForbiddenException("Only FinanceManager can set result");
+    if (user.role !== "FinanceStaff" && !FULL_ACCESS_ROLES.includes(user.role)) {
+      throw new ForbiddenException("Only FinanceStaff can finalize provider result");
     }
 
-    if (!["APPROVED", "COMPLETED"].includes(row.status)) {
-      throw new BadRequestException("Only APPROVED or COMPLETED can have result set");
+    if (row.status !== "PENDING_FINANCE_STAFF_RESULT") {
+      throw new BadRequestException(
+        "Hasil provider hanya dapat dicatat setelah persetujuan Finance Manager.",
+      );
     }
 
     if (dto.result !== "SUCCESS" && dto.result !== "FAILED") {
@@ -1711,6 +1719,25 @@ export class TransfersService {
     const actorId = resolveUserId(user);
     const resultNotes = dto.result_notes ?? dto.note ?? null;
     const isSuccess = dto.result === "SUCCESS";
+    const providerName = dto.provider_name?.trim();
+    if (!providerName) {
+      throw new BadRequestException("provider_name wajib diisi.");
+    }
+    const hasAuthoritativeReference = [
+      dto.result_reference_no,
+      dto.bank_reference_no,
+      dto.provider_reference_no,
+    ].some((value) => typeof value === "string" && value.trim().length > 0);
+    if (!hasAuthoritativeReference) {
+      throw new BadRequestException(
+        "Minimal salah satu nomor referensi hasil, bank, atau provider wajib diisi.",
+      );
+    }
+    if (!isSuccess && !(dto.failed_reason ?? "").trim()) {
+      throw new BadRequestException("failed_reason wajib diisi untuk hasil FAILED.");
+    }
+
+    await this.notifications.resolveForObject("transfer", id);
 
     const next = await this.pool.query(
       `UPDATE transfers SET
@@ -1723,6 +1750,7 @@ export class TransfersService {
         bank_reference_no = COALESCE($7, bank_reference_no),
         external_reference_no = COALESCE($8, external_reference_no),
         provider_reference_no = COALESCE($9, provider_reference_no),
+        provider_name = $19,
         latest_transaction_status = COALESCE($10, latest_transaction_status),
         transaction_status_desc = COALESCE($11, transaction_status_desc),
         provider_response_code = COALESCE($12, provider_response_code),
@@ -1755,12 +1783,13 @@ export class TransfersService {
         isSuccess ? new Date() : null,
         isSuccess ? null : new Date(),
         actorId,
+        providerName,
       ],
     );
 
     await this.audit(
       actorId,
-      "TRANSFER_SET_RESULT",
+      "TRANSFER_PROVIDER_RESULT_FINALIZED",
       String(id),
       row,
       next.rows[0],
@@ -1770,6 +1799,18 @@ export class TransfersService {
     // Auto monitoring evaluation pada hasil SUCCESS — tidak boleh menggagalkan transfer.
     if (isSuccess) {
       await this.monitoring.safeEvaluateTransfer(id, user);
+    }
+
+    if (row.created_by) {
+      await this.notifyTransferUser(
+        row.created_by,
+        "INFO",
+        id,
+        isSuccess
+          ? `Transfer ${next.rows[0].partner_reference_no ?? id} berhasil`
+          : `Transfer ${next.rows[0].partner_reference_no ?? id} gagal`,
+        isSuccess ? "Hasil aktual bank/provider telah dicatat." : (dto.failed_reason ?? undefined),
+      );
     }
 
     return next.rows[0];
@@ -1872,6 +1913,7 @@ export class TransfersService {
     "PENDING_COMPLIANCE_REVIEW",
     "PENDING_FINANCE_STAFF_REVIEW",
     "PENDING_FINANCE_MANAGER_APPROVAL",
+    "PENDING_FINANCE_STAFF_RESULT",
     "REVISION_REQUIRED",
     "COMPLETED",
     "REJECTED",
@@ -2268,6 +2310,16 @@ export class TransfersService {
     // hak baca detail transfer di atas — termasuk Auditor read-only.
     row.watchlist_hits = await this.fetchWatchlistHits(id);
 
+    return row;
+  }
+
+  async getReceipt(id: number, user: AuthedUser) {
+    const row = await this.getById(id, user);
+    if (row.status !== "COMPLETED" || row.result !== "SUCCESS") {
+      throw new BadRequestException(
+        "Resi hanya tersedia untuk transfer yang sudah COMPLETED dan SUCCESS.",
+      );
+    }
     return row;
   }
 
