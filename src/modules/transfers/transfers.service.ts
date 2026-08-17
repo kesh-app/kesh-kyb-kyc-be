@@ -1954,6 +1954,40 @@ export class TransfersService {
     };
   }
 
+  /**
+   * FrontDesk hanya boleh mengakses batch yang dia buat sendiri — satu-satunya
+   * model kepemilikan batch di KESH, dipakai getBulkBatchById (deteksi/lihat)
+   * dan exportBriQlola purpose=MAKER (unduh instruksi bayar) supaya keduanya
+   * tidak pernah berbeda pendapat soal siapa pemilik sebuah batch.
+   *
+   * `allowLegacyUnowned` membedakan dua konteks yang butuh sikap berbeda pada
+   * batch lama tanpa creator (created_by NULL):
+   *   true  (default, dipakai getBulkBatchById/list) — lolos, supaya batch
+   *         lama tetap bisa DIBACA. Perilaku ini TIDAK berubah oleh koreksi ini.
+   *   false (dipakai exportBriQlola purpose=MAKER) — ditolak. Maker
+   *         mengunduh instruksi bayar bank sungguhan; kepemilikan yang tidak
+   *         bisa dibuktikan tidak boleh dianggap "boleh" hanya karena
+   *         datanya lama. Jangan membackfill created_by untuk menghindari ini.
+   */
+  private assertFrontDeskOwnsBatch(
+    batch: { created_by: unknown },
+    user: AuthedUser,
+    { allowLegacyUnowned = true }: { allowLegacyUnowned?: boolean } = {},
+  ) {
+    if (user.role !== "FrontDesk") return;
+    const creator =
+      batch.created_by === null || batch.created_by === undefined
+        ? null
+        : String(batch.created_by);
+    if (creator === null) {
+      if (!allowLegacyUnowned) throw new ForbiddenException("Not allowed");
+      return;
+    }
+    if (creator !== String(resolveUserId(user))) {
+      throw new ForbiddenException("Not allowed");
+    }
+  }
+
   async getBulkBatchById(id: number, user: AuthedUser) {
     const q = await this.pool.query(this.batchSelectSql("WHERE tb.id = $1"), [id]);
     if ((q.rowCount ?? 0) === 0) {
@@ -1962,12 +1996,7 @@ export class TransfersService {
     const batch = this.mapBatchRow(q.rows[0]);
 
     // FrontDesk hanya boleh melihat batch yang dia buat (sama seperti list transfer).
-    if (user.role === "FrontDesk") {
-      const creator = batch.created_by === null ? null : String(batch.created_by);
-      if (creator !== null && creator !== String(resolveUserId(user))) {
-        throw new ForbiddenException("Not allowed");
-      }
-    }
+    this.assertFrontDeskOwnsBatch(batch, user);
 
     // Baris transfer anak memakai shape yang sama dengan list transfer.
     const transfers = await this.list(user, undefined, { batchId: id });
@@ -1980,13 +2009,15 @@ export class TransfersService {
   //
   // FINAL (default): HANYA transfer anak yang benar-benar selesai lewat
   // persetujuan internal KESH, yaitu status COMPLETED DAN result SUCCESS
-  // (hasil akhir decide() APPROVE oleh Finance Manager).
+  // (hasil akhir decide() APPROVE oleh Finance Manager). Diunduh
+  // FinanceStaff/FinanceManager — tidak berubah oleh koreksi Maker ini.
   //
-  // REVIEW: HANYA transfer anak berstatus PENDING_FINANCE_STAFF_REVIEW. Dipakai
-  // Finance Staff untuk mengecek data rekening/bank penerima SEBELUM menyetujui.
-  // Kalau ada yang salah, aksinya tetap per transaksi lewat
-  // POST /transfers/:id/finance-review {action:'RETURN'} — tidak ada alur
-  // pengembalian baru, dan file ini tidak mengubah status apa pun.
+  // MAKER: HANYA transfer anak berstatus PENDING_FINANCE_STAFF_REVIEW. Peran
+  // BRI Qlola adalah FrontDesk = Maker, FinanceStaff = Checker, FinanceManager
+  // = Approver — jadi file yang diunggah sebagai instruksi bayar diunduh
+  // FrontDesk, BUKAN FinanceStaff (mereka mengecek lewat
+  // POST /transfers/:id/finance-review, bukan lewat file ini). File ini tidak
+  // pernah mengubah status transfer apa pun; tidak ada alur pengembalian baru.
   //
   // Kedua populasi TIDAK PERNAH dicampur dalam satu file: satu masih bisa
   // berubah/dikembalikan, satunya sudah sah dieksekusi. Status lain
@@ -2002,9 +2033,30 @@ export class TransfersService {
     batchId: number,
     user: AuthedUser,
     purpose: QlolaPurpose = "FINAL",
+    ip?: string,
   ) {
+    // RBAC per-purpose: @Roles di controller hanya union kasar (FrontDesk,
+    // FinanceStaff, FinanceManager boleh MENCOBA endpoint) karena purpose baru
+    // diketahui lewat query string saat runtime. Pemeriksaan sebenarnya di sini.
+    const isMakerCaller =
+      user.role === "FrontDesk" || FULL_ACCESS_ROLES.includes(user.role);
+    const isFinalCaller =
+      user.role === "FinanceStaff" ||
+      user.role === "FinanceManager" ||
+      FULL_ACCESS_ROLES.includes(user.role);
+    if (purpose === "MAKER" && !isMakerCaller) {
+      throw new ForbiddenException(
+        "Hanya FrontDesk selaku Maker (atau SystemAdmin/Director) yang dapat mengunduh file ini.",
+      );
+    }
+    if (purpose === "FINAL" && !isFinalCaller) {
+      throw new ForbiddenException(
+        "Hanya FinanceStaff/FinanceManager (atau SystemAdmin/Director) yang dapat mengunduh file ini.",
+      );
+    }
+
     const batchQ = await this.pool.query(
-      `SELECT id, batch_no, total_count, qlola_debit_account, qlola_sender_name
+      `SELECT id, batch_no, total_count, qlola_debit_account, qlola_sender_name, created_by
          FROM transfer_batches WHERE id = $1`,
       [batchId],
     );
@@ -2013,9 +2065,25 @@ export class TransfersService {
     }
     const batch = batchQ.rows[0];
 
+    // Maker adalah instruksi bayar bank sungguhan: FrontDesk hanya boleh
+    // mengunduhnya untuk batch miliknya sendiri — sama persis dengan aturan
+    // kepemilikan getBulkBatchById (lihat assertFrontDeskOwnsBatch), bukan
+    // model baru. SystemAdmin/Director tidak disentuh (bukan role FrontDesk).
+    // Tidak berlaku untuk FINAL: FinanceStaff/FinanceManager tidak pernah
+    // FrontDesk, jadi pengecekan ini otomatis no-op untuk mereka.
+    //
+    // allowLegacyUnowned: false — beda dengan getBulkBatchById (yang tetap
+    // membiarkan batch lama created_by NULL terbaca). Di sini kepemilikan
+    // yang tidak bisa dibuktikan HARUS ditolak karena Maker menghasilkan
+    // instruksi bayar sungguhan, bukan sekadar tampilan. Jangan membackfill
+    // created_by batch lama untuk "memperbaiki" ini.
+    if (purpose === "MAKER") {
+      this.assertFrontDeskOwnsBatch(batch, user, { allowLegacyUnowned: false });
+    }
+
     // Filter kelayakan per tujuan — satu-satunya perbedaan antara kedua export.
     const eligibilitySql =
-      purpose === "REVIEW"
+      purpose === "MAKER"
         ? `t.status = 'PENDING_FINANCE_STAFF_REVIEW'`
         : `t.status = 'COMPLETED' AND t.result = 'SUCCESS'`;
 
@@ -2038,8 +2106,8 @@ export class TransfersService {
     if (rows.length === 0) {
       throw new BadRequestException({
         message:
-          purpose === "REVIEW"
-            ? "Belum ada transaksi yang menunggu review Finance Staff pada batch ini."
+          purpose === "MAKER"
+            ? "Belum ada transaksi yang siap dibuat sebagai Maker di BRI Qlola pada batch ini."
             : "Belum ada transaksi yang disetujui final pada batch ini, jadi belum ada yang bisa diekspor ke BRI Qlola.",
         purpose,
         eligible_count: 0,
@@ -2071,6 +2139,18 @@ export class TransfersService {
         errors,
       });
     }
+
+    // Audit unduhan: purpose + batch + siapa (actor_id) + kapan (created_at,
+    // default now()) + eligible_count sudah cukup terwakili oleh audit_logs yang
+    // ada — tidak perlu subsistem/tabel baru untuk ini.
+    await this.audit(
+      resolveUserId(user),
+      "TRANSFER_QLOLA_EXPORT",
+      String(batchId),
+      null,
+      { purpose, eligible_count: rows.length, total_count: Number(batch.total_count ?? 0) },
+      ip,
+    );
 
     return {
       fileName: buildQlolaFileName(batch.batch_no, purpose),

@@ -284,20 +284,25 @@ export function buildQlolaWorkbook(
 /**
  * Dua tujuan export, dua populasi baris yang TIDAK boleh dicampur dalam satu
  * file (lihat exportBriQlola):
- *   FINAL  — transaksi yang sudah disetujui final, siap dieksekusi di Qlola
- *   REVIEW — transaksi yang menunggu review Finance Staff; dipakai untuk
- *            mengecek data rekening/bank penerima SEBELUM approval
+ *   FINAL — transaksi yang sudah disetujui final, siap dieksekusi di Qlola
+ *   MAKER — transaksi PENDING_FINANCE_STAFF_REVIEW; diunduh FrontDesk selaku
+ *           Maker BRI Qlola (FinanceStaff = Checker, FinanceManager =
+ *           Approver) untuk diunggah sebagai instruksi bayar
+ *
+ * "REVIEW" tetap diterima sebagai alias input lama untuk MAKER — lihat
+ * normalisasi di TransfersController.exportBriQlola. Kanonis internal (nama
+ * file, header X-Qlola-Purpose, filter DB) selalu MAKER.
  */
-export const QLOLA_PURPOSES = ["FINAL", "REVIEW"] as const;
+export const QLOLA_PURPOSES = ["FINAL", "MAKER"] as const;
 export type QlolaPurpose = (typeof QLOLA_PURPOSES)[number];
 
 /**
  * BRI_QLOLA_BIF_<batch_no>_<YYYYMMDDHHmm>.xlsx untuk FINAL,
- * BRI_QLOLA_REVIEW_<batch_no>_<YYYYMMDDHHmm>.xlsx untuk REVIEW.
+ * BRI_QLOLA_MAKER_<batch_no>_<YYYYMMDDHHmm>.xlsx untuk MAKER.
  *
- * Penanda tujuan sengaja ada di nama file: file review TIDAK boleh sampai
- * terunggah ke Qlola sebagai instruksi bayar, jadi harus bisa dibedakan
- * sebelum dibuka. Timestamp = waktu unduh.
+ * Penanda tujuan sengaja ada di nama file: file Maker TIDAK boleh sampai
+ * terunggah ke Qlola sebagai file FINAL, jadi harus bisa dibedakan sebelum
+ * dibuka. Timestamp = waktu unduh.
  */
 export function buildQlolaFileName(
   batchNo: string,
@@ -305,6 +310,6 @@ export function buildQlolaFileName(
   now = new Date(),
 ): string {
   const safeBatch = String(batchNo ?? "").replace(/[^A-Za-z0-9_-]/g, "");
-  const tag = purpose === "REVIEW" ? "REVIEW" : "BIF";
+  const tag = purpose === "MAKER" ? "MAKER" : "BIF";
   return `BRI_QLOLA_${tag}_${safeBatch}_${formatValueDate(now)}.xlsx`;
 }

@@ -199,40 +199,45 @@ export class TransfersController {
   // EXPORT BRI QLOLA (BI-Fast)
   //
   //   ?purpose=FINAL  (default) — transfer anak COMPLETED/SUCCESS, siap dieksekusi
-  //   ?purpose=REVIEW           — transfer anak PENDING_FINANCE_STAFF_REVIEW,
-  //                               dipakai Finance Staff untuk mengecek data
-  //                               rekening/bank penerima sebelum menyetujui
+  //   ?purpose=MAKER            — transfer anak PENDING_FINANCE_STAFF_REVIEW,
+  //                               diunduh FrontDesk selaku Maker BRI Qlola
+  //                               untuk diunggah sebagai instruksi bayar
+  //   ?purpose=REVIEW           — alias lama untuk MAKER (kompatibilitas client
+  //                               lama), dinormalisasi ke MAKER di sini
   //
   // purpose dihilangkan = FINAL, supaya client lama tidak berubah perilakunya.
   //
-  // Sengaja lebih ketat dari READ_ROLES: file ini dipakai untuk mengeksekusi
-  // uang di Qlola, jadi hanya peran yang memproses/menyetujui yang boleh
-  // mengunduhnya. FrontDesk (pembuat batch) TIDAK termasuk — membuat pencatatan
-  // bukan berarti boleh menarik instruksi pembayaran ke bank.
-  // ComplianceLead, OperationSupervisor, ComplaintHandling & Auditor juga tidak:
-  // peran pengawasan, bukan pelaksana. Kedua tujuan memakai daftar peran yang
-  // sama; FinanceStaff memang pemakai utama jalur REVIEW.
+  // Peran BRI Qlola: FrontDesk = Maker, FinanceStaff = Checker,
+  // FinanceManager = Approver. Karena itu RBAC berbeda per purpose — decorator
+  // di bawah hanya union kasar (siapa boleh MENCOBA endpoint ini); pemeriksaan
+  // per-purpose yang sebenarnya (Maker hanya FrontDesk, FINAL hanya
+  // FinanceStaff/FinanceManager) ada di TransfersService.exportBriQlola karena
+  // purpose baru diketahui saat runtime lewat query string, sedangkan @Roles
+  // statis. ComplianceLead, OperationSupervisor, ComplaintHandling, Auditor,
+  // dan COO tidak termasuk peran pelaksana Qlola sama sekali.
   // SystemAdmin/Director tetap masuk lewat bypass RolesGuard.
   //
   // Harus dideklarasikan sebelum @Get("bulk-batches/:id")? Tidak — path ini
   // lebih panjang dan spesifik, jadi tidak bentrok.
   @Get("bulk-batches/:id/exports/bri-qlola")
-  @Roles("FinanceStaff", "FinanceManager")
+  @Roles("FrontDesk", "FinanceStaff", "FinanceManager")
   async exportBriQlola(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
     @Res() res: Response,
     @Query("purpose") purpose?: string,
   ) {
-    const requested = (purpose ?? "FINAL").toUpperCase();
+    const raw = (purpose ?? "FINAL").toUpperCase();
+    // REVIEW = alias lama; MAKER adalah nilai kanonis sejak koreksi Maker/Checker/Approver.
+    const requested = raw === "REVIEW" ? "MAKER" : raw;
     if (!QLOLA_PURPOSES.includes(requested as QlolaPurpose)) {
       throw new BadRequestException(
-        `purpose harus salah satu dari: ${QLOLA_PURPOSES.join(", ")}`,
+        `purpose harus salah satu dari: ${QLOLA_PURPOSES.join(", ")} (REVIEW diterima sebagai alias MAKER)`,
       );
     }
 
     const { fileName, buffer, eligible_count, total_count } =
-      await this.svc.exportBriQlola(id, req.user, requested as QlolaPurpose);
+      await this.svc.exportBriQlola(id, req.user, requested as QlolaPurpose, req.ip);
 
     res.setHeader(
       "Content-Type",

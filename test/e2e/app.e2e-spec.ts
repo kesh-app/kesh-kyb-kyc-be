@@ -15526,17 +15526,19 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         ]);
       });
 
-      // -- Export REVIEW: Finance Staff mengecek data sebelum menyetujui --------
+      // -- Export MAKER: FrontDesk mengunduh instruksi bayar sebagai Maker BRI Qlola --
       //
-      // Dua populasi tidak pernah bercampur: REVIEW hanya
-      // PENDING_FINANCE_STAFF_REVIEW, FINAL hanya COMPLETED+SUCCESS.
+      // Peran Qlola: FrontDesk = Maker, FinanceStaff = Checker (per transaksi
+      // lewat finance-review), FinanceManager = Approver. Dua populasi tidak
+      // pernah bercampur: MAKER hanya PENDING_FINANCE_STAFF_REVIEW, FINAL hanya
+      // COMPLETED+SUCCESS. "REVIEW" tetap diterima sebagai alias query lama.
 
-      it('ZQ-21: REVIEW mengekspor transfer yang menunggu review Finance Staff', async () => {
+      it('ZQ-21: FrontDesk dapat mengunduh Maker export saat PENDING_FINANCE_STAFF_REVIEW', async () => {
         const { batchId, children } = await createBatch([qlolaItem()]);
         const pending = await toFinanceStaffReview(children[0].id);
 
-        const { res, aoa } = await exportSheet(batchId, financeStaffToken, 'REVIEW');
-        expect(res.headers['x-qlola-purpose']).toBe('REVIEW');
+        const { res, aoa } = await exportSheet(batchId, frontDeskToken, 'MAKER');
+        expect(res.headers['x-qlola-purpose']).toBe('MAKER');
         expect(res.headers['x-qlola-eligible-count']).toBe('1');
         expect(aoa[DATA_ROW][1]).toBe(pending.partner_reference_no);
         // Struktur sheet sama persis dengan FINAL - kolom A:AJ tidak berubah.
@@ -15544,7 +15546,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(aoa[DATA_ROW][2]).toBe('BIF');
       });
 
-      it('ZQ-22: REVIEW tidak mengekspor PENDING_FINANCE_MANAGER_APPROVAL maupun COMPLETED', async () => {
+      it('ZQ-22: MAKER tidak mengekspor PENDING_FINANCE_MANAGER_APPROVAL maupun COMPLETED', async () => {
         const { batchId, children } = await createBatch([
           qlolaItem({ beneficiaryAccountName: 'Qlola Menunggu Manager' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Sudah Final' }),
@@ -15552,40 +15554,48 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         await toManagerApproval(children[0].id);
         await approveChild(children[1].id);
 
-        // Tidak ada satupun baris di tahap review -> 400, bukan file kosong.
-        const res = await exportReq(batchId, financeStaffToken, 'REVIEW').expect(400);
-        expect(res.body.purpose).toBe('REVIEW');
+        // Tidak ada satupun baris di tahap Maker -> 400, bukan file kosong.
+        // FrontDesk boleh MENCOBA (bukan 403); memang belum ada yang layak (400).
+        const res = await exportReq(batchId, frontDeskToken, 'MAKER').expect(400);
+        expect(res.body.purpose).toBe('MAKER');
         expect(res.body.eligible_count).toBe(0);
-        expect(res.body.message).toContain('menunggu review Finance Staff');
+        expect(res.body.message).toContain('siap dibuat sebagai Maker');
       });
 
-      it('ZQ-23: batch campuran - REVIEW dan FINAL menghasilkan baris berbeda', async () => {
+      it('ZQ-22b: FrontDesk tidak bisa mengekspor Maker saat batch masih DRAFT (400, bukan file)', async () => {
+        const { batchId } = await createBatch([qlolaItem()]);
+        // Seluruh baris masih DRAFT — belum lewat supervisor-review sama sekali.
+        const res = await exportReq(batchId, frontDeskToken, 'MAKER').expect(400);
+        expect(res.body.eligible_count).toBe(0);
+      });
+
+      it('ZQ-23: batch campuran - MAKER dan FINAL menghasilkan baris berbeda', async () => {
         const { batchId, children } = await createBatch([
-          qlolaItem({ beneficiaryAccountName: 'Qlola Review Row' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Maker Row' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Final Row' }),
           qlolaItem({ beneficiaryAccountName: 'Qlola Draft Row' }),
         ]);
-        const inReview = await toFinanceStaffReview(children[0].id);
+        const inMaker = await toFinanceStaffReview(children[0].id);
         const isFinal = await approveChild(children[1].id);
         // children[2] dibiarkan DRAFT.
 
-        const review = await exportSheet(batchId, financeStaffToken, 'REVIEW');
-        expect(review.res.headers['x-qlola-eligible-count']).toBe('1');
-        expect(review.aoa[DATA_ROW][1]).toBe(inReview.partner_reference_no);
+        const maker = await exportSheet(batchId, frontDeskToken, 'MAKER');
+        expect(maker.res.headers['x-qlola-eligible-count']).toBe('1');
+        expect(maker.aoa[DATA_ROW][1]).toBe(inMaker.partner_reference_no);
 
         const final = await exportSheet(batchId, financeManagerToken, 'FINAL');
         expect(final.res.headers['x-qlola-eligible-count']).toBe('1');
         expect(final.aoa[DATA_ROW][1]).toBe(isFinal.partner_reference_no);
 
         // Tidak boleh saling bocor.
-        expect(JSON.stringify(review.aoa)).not.toContain(isFinal.partner_reference_no);
-        expect(JSON.stringify(final.aoa)).not.toContain(inReview.partner_reference_no);
+        expect(JSON.stringify(maker.aoa)).not.toContain(isFinal.partner_reference_no);
+        expect(JSON.stringify(final.aoa)).not.toContain(inMaker.partner_reference_no);
       });
 
       it('ZQ-24: purpose dihilangkan = FINAL (kompatibilitas client lama)', async () => {
         const { batchId, children } = await createBatch([
           qlolaItem({ beneficiaryAccountName: 'Qlola Default Final' }),
-          qlolaItem({ beneficiaryAccountName: 'Qlola Default Review' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Default Maker' }),
         ]);
         const isFinal = await approveChild(children[0].id);
         await toFinanceStaffReview(children[1].id);
@@ -15602,7 +15612,7 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         expect(explicit.aoa[DATA_ROW][1]).toBe(isFinal.partner_reference_no);
       });
 
-      it('ZQ-25: nama file REVIEW memakai penanda REVIEW', async () => {
+      it('ZQ-25: nama file MAKER memakai penanda MAKER', async () => {
         const { batchId, children } = await createBatch([qlolaItem()]);
         await toFinanceStaffReview(children[0].id);
 
@@ -15611,18 +15621,29 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           .set('Authorization', `Bearer ${financeManagerToken}`)
           .expect(200);
 
-        const res = await exportReq(batchId, financeStaffToken, 'REVIEW')
+        const res = await exportReq(batchId, frontDeskToken, 'MAKER')
           .buffer(true)
           .parse(binaryParser)
           .expect(200);
         expect(res.headers['content-disposition']).toMatch(
           new RegExp(
-            `^attachment; filename="BRI_QLOLA_REVIEW_${batch.body.batch.batch_no}_\\d{12}\\.xlsx"$`,
+            `^attachment; filename="BRI_QLOLA_MAKER_${batch.body.batch.batch_no}_\\d{12}\\.xlsx"$`,
           ),
         );
       });
 
-      it('ZQ-26: validasi wajib Qlola juga memblokir REVIEW', async () => {
+      it('ZQ-25b: ?purpose=REVIEW tetap diterima sebagai alias MAKER (kompatibilitas)', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        const pending = await toFinanceStaffReview(children[0].id);
+
+        const { res, aoa } = await exportSheet(batchId, frontDeskToken, 'REVIEW');
+        // Kanonis: header & nama file selalu MAKER meski client mengirim REVIEW.
+        expect(res.headers['x-qlola-purpose']).toBe('MAKER');
+        expect(res.headers['content-disposition']).toContain('BRI_QLOLA_MAKER_');
+        expect(aoa[DATA_ROW][1]).toBe(pending.partner_reference_no);
+      });
+
+      it('ZQ-26: validasi wajib Qlola juga memblokir MAKER', async () => {
         const { batchId, children } = await createBatch([qlolaItem()]);
         const pending = await toFinanceStaffReview(children[0].id);
         // Lubangi data yang wajib untuk Qlola.
@@ -15631,33 +15652,38 @@ describe('KYC/KYB E2E — Priority Tests', () => {
           [Number(children[0].id)],
         );
 
-        const res = await exportReq(batchId, financeStaffToken, 'REVIEW').expect(400);
+        const res = await exportReq(batchId, frontDeskToken, 'MAKER').expect(400);
         expect(res.body.message).toBe('Belum siap diekspor ke BRI Qlola');
-        expect(res.body.purpose).toBe('REVIEW');
+        expect(res.body.purpose).toBe('MAKER');
         expect(res.body.errors[0].reference).toBe(pending.partner_reference_no);
         expect(res.body.errors[0].missing).toContain(
           'Ben Mobile Number (No. Handphone Penerima) belum diisi',
         );
       });
 
-      it('ZQ-27: RBAC REVIEW - hanya finance (+ SystemAdmin/Director)', async () => {
+      it('ZQ-27: RBAC MAKER - hanya FrontDesk (+ SystemAdmin/Director); Checker/Approver Qlola ditolak', async () => {
         const { batchId, children } = await createBatch([qlolaItem()]);
         await toFinanceStaffReview(children[0].id);
 
-        for (const token of [financeStaffToken, financeManagerToken, sysAdminToken, directorToken]) {
-          await exportReq(batchId, token, 'REVIEW')
+        for (const token of [frontDeskToken, sysAdminToken, directorToken]) {
+          await exportReq(batchId, token, 'MAKER')
             .buffer(true)
             .parse(binaryParser)
             .expect(200);
         }
+        // FinanceStaff (Checker) dan FinanceManager (Approver) berpartisipasi
+        // belakangan di alur approval, tapi bukan Maker — tidak boleh mengunduh
+        // file yang diunggah ke Qlola sebagai instruksi bayar.
         for (const token of [
-          frontDeskToken,
+          financeStaffToken,
+          financeManagerToken,
           operationSupervisorToken,
           complianceToken,
           auditorToken,
           complaintHandlingToken,
+          cooToken,
         ]) {
-          await exportReq(batchId, token, 'REVIEW').expect(403);
+          await exportReq(batchId, token, 'MAKER').expect(403);
         }
       });
 
@@ -15667,25 +15693,254 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         await exportReq(batchId, financeStaffToken, 'SOMETHING').expect(400);
       });
 
-      it('ZQ-29: file REVIEW tidak mengubah status transfer apa pun', async () => {
+      it('ZQ-29: file MAKER tidak mengubah status transfer apa pun, dan FinanceStaff tetap bisa APPROVE/RETURN sesudahnya', async () => {
         const { batchId, children } = await createBatch([qlolaItem()]);
         await toFinanceStaffReview(children[0].id);
-        await exportSheet(batchId, financeStaffToken, 'REVIEW');
+        await exportSheet(batchId, frontDeskToken, 'MAKER');
 
-        // Mengunduh hanya membaca - alur pengembalian tetap per transaksi.
+        // Mengunduh hanya membaca - status & alur finance-review tetap per transaksi.
         const detail = await request(app.getHttpServer())
           .get(`${BASE}/transfers/${children[0].id}`)
           .set('Authorization', `Bearer ${financeStaffToken}`)
           .expect(200);
         expect(detail.body.status).toBe('PENDING_FINANCE_STAFF_REVIEW');
 
-        // Dan RETURN per transaksi yang sudah ada tetap jalan setelahnya.
+        // FinanceStaff (Checker) tetap bisa RETURN setelah Frontline mengunduh.
         const returned = await request(app.getHttpServer())
           .post(`${BASE}/transfers/${children[0].id}/finance-review`)
           .set('Authorization', `Bearer ${financeStaffToken}`)
           .send({ action: 'RETURN', notes: 'rekening penerima salah' })
           .expect(201);
         expect(returned.body.status).toBe('REVISION_REQUIRED');
+      });
+
+      it('ZQ-29b: FinanceStaff tetap bisa APPROVE setelah Frontline mengunduh Maker export, sampai FinanceManager final', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        await exportSheet(batchId, frontDeskToken, 'MAKER');
+
+        const approved = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${children[0].id}/finance-review`)
+          .set('Authorization', `Bearer ${financeStaffToken}`)
+          .send({ action: 'APPROVE', notes: 'ok' })
+          .expect(201);
+        expect(approved.body.status).toBe('PENDING_FINANCE_MANAGER_APPROVAL');
+
+        // FinanceManager approval tetap tidak berubah oleh koreksi Maker ini.
+        const done = await request(app.getHttpServer())
+          .post(`${BASE}/transfers/${children[0].id}/decision`)
+          .set('Authorization', `Bearer ${financeManagerToken}`)
+          .send({ decision: 'APPROVE' })
+          .expect(201);
+        expect(done.body.status).toBe('COMPLETED');
+        expect(done.body.result).toBe('SUCCESS');
+      });
+
+      // -- Kepemilikan batch untuk MAKER: instruksi bayar bank sungguhan --------
+      //
+      // MAKER tidak lagi role-only: FrontDesk hanya boleh mengekspor batch
+      // miliknya sendiri, persis aturan yang sudah dipakai
+      // GET /transfers/bulk-batches/:id (assertFrontDeskOwnsBatch di service,
+      // dipakai ulang — bukan model kepemilikan baru). SystemAdmin/Director
+      // tidak dibatasi kepemilikan sama sekali.
+
+      let secondFrontDesk: { token: string; userId: string } | null = null;
+      async function ensureSecondFrontDesk() {
+        if (secondFrontDesk) return secondFrontDesk;
+        const email = `frontdesk2-qlola${SUFFIX}@test.local`;
+        await request(app.getHttpServer())
+          .post(`${BASE}/users/admins`)
+          .set('Authorization', `Bearer ${sysAdminToken}`)
+          .send({
+            email,
+            fullName: `Test FrontDesk 2 ${SUFFIX}`,
+            role: 'FrontDesk',
+            password: 'Test@123456',
+          })
+          .expect(201);
+        const login = await request(app.getHttpServer())
+          .post(`${BASE}/auth/login`)
+          .send({ email, password: 'Test@123456' })
+          .expect(201);
+        secondFrontDesk = { token: login.body.access_token, userId: String(login.body.user.id) };
+        return secondFrontDesk;
+      }
+
+      it('ZQ-30: pemilik batch (FrontDesk) bisa MAKER-export; FrontDesk lain ditolak 403 tanpa membocorkan info batch', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        const other = await ensureSecondFrontDesk();
+
+        // Kontrol positif: pemilik asli tetap bisa mengunduh.
+        await exportReq(batchId, frontDeskToken, 'MAKER')
+          .buffer(true)
+          .parse(binaryParser)
+          .expect(200);
+
+        // FrontDesk lain (bukan pembuat batch) ditolak — bukan karena role,
+        // tapi karena bukan pemilik. Body tidak boleh membocorkan
+        // eligible_count/daftar error/status batch.
+        const res = await exportReq(batchId, other.token, 'MAKER').expect(403);
+        expect(res.body.eligible_count).toBeUndefined();
+        expect(res.body.total_count).toBeUndefined();
+        expect(res.body.errors).toBeUndefined();
+        expect(JSON.stringify(res.body)).not.toMatch(
+          /eligible_count|PENDING_FINANCE_STAFF_REVIEW|BenBankIdentifier/i,
+        );
+      });
+
+      it('ZQ-31: alias ?purpose=REVIEW tidak bisa membypass kepemilikan batch', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        const other = await ensureSecondFrontDesk();
+
+        await exportReq(batchId, other.token, 'REVIEW').expect(403);
+      });
+
+      it('ZQ-32: SystemAdmin dan Director tetap bisa MAKER-export batch milik FrontDesk lain (tidak dibatasi kepemilikan)', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+
+        for (const token of [sysAdminToken, directorToken]) {
+          await exportReq(batchId, token, 'MAKER')
+            .buffer(true)
+            .parse(binaryParser)
+            .expect(200);
+        }
+      });
+
+      it('ZQ-33: penolakan cross-owner tidak membuat log audit TRANSFER_QLOLA_EXPORT; unduhan sah tetap tercatat', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        const other = await ensureSecondFrontDesk();
+
+        await exportReq(batchId, other.token, 'MAKER').expect(403);
+        const deniedLog = await pgPool.query(
+          `SELECT 1 FROM audit_logs WHERE action='TRANSFER_QLOLA_EXPORT' AND object_id=$1 AND actor_id=$2`,
+          [String(batchId), Number(other.userId)],
+        );
+        expect(deniedLog.rowCount).toBe(0);
+
+        // Kontrol: unduhan sah oleh pemilik memang tercatat — jadi tabel di
+        // atas kosong karena ditolak, bukan karena audit tidak pernah jalan.
+        await exportReq(batchId, frontDeskToken, 'MAKER').buffer(true).parse(binaryParser).expect(200);
+        const successLog = await pgPool.query(
+          `SELECT 1 FROM audit_logs WHERE action='TRANSFER_QLOLA_EXPORT' AND object_id=$1`,
+          [String(batchId)],
+        );
+        expect(successLog.rowCount).toBeGreaterThan(0);
+      });
+
+      it('ZQ-34: eligibilitas MAKER persis PENDING_FINANCE_STAFF_REVIEW — setiap status lain dikecualikan', async () => {
+        const { batchId, children } = await createBatch([
+          qlolaItem({ beneficiaryAccountName: 'Qlola Eligible' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Draft' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Submitted' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Compliance' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Manager' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Revision' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Completed' }),
+          qlolaItem({ beneficiaryAccountName: 'Qlola Rejected' }),
+        ]);
+        const eligible = await toFinanceStaffReview(children[0].id);
+        // children[1] dibiarkan DRAFT (default createBatch). Sisanya dipatok
+        // langsung lewat SQL — cepat & deterministik, sama seperti ZQ-04/ZQ-05
+        // dan tes PENDING_COMPLIANCE_REVIEW lain di file ini; tidak ada
+        // trigger DB pada kolom status transfers yang perlu direplay.
+        const forcedStatuses: Array<[number, string]> = [
+          [2, 'SUBMITTED'],
+          [3, 'PENDING_COMPLIANCE_REVIEW'],
+          [4, 'PENDING_FINANCE_MANAGER_APPROVAL'],
+          [5, 'REVISION_REQUIRED'],
+          [6, 'COMPLETED'],
+          [7, 'REJECTED'],
+        ];
+        for (const [idx, status] of forcedStatuses) {
+          await pgPool.query(`UPDATE transfers SET status=$2 WHERE id=$1`, [
+            Number(children[idx].id),
+            status,
+          ]);
+        }
+
+        const { res, aoa } = await exportSheet(batchId, frontDeskToken, 'MAKER');
+        expect(res.headers['x-qlola-eligible-count']).toBe('1');
+        expect(res.headers['x-qlola-total-count']).toBe('8');
+        expect(aoa[DATA_ROW][1]).toBe(eligible.partner_reference_no);
+        const flat = JSON.stringify(aoa);
+        for (let i = 1; i <= 7; i++) {
+          expect(flat).not.toContain(children[i].partner_reference_no);
+        }
+      });
+
+      // -- MAKER: batch lama tanpa creator (created_by NULL) HARUS ditolak ------
+      //
+      // getBulkBatchById sengaja MEMBIARKAN batch lama tanpa creator tetap
+      // terbaca (allowLegacyUnowned: true — tidak disentuh oleh koreksi ini).
+      // Tapi Maker menghasilkan instruksi bayar bank sungguhan: kepemilikan
+      // yang tidak bisa dibuktikan tidak boleh dianggap "boleh" hanya karena
+      // datanya lama. exportBriQlola memakai
+      // assertFrontDeskOwnsBatch(..., { allowLegacyUnowned: false }) untuk ini.
+      // Batch lama TIDAK di-backfill created_by-nya di mana pun.
+
+      async function nullOutBatchCreator(batchId: string) {
+        await pgPool.query(`UPDATE transfer_batches SET created_by = NULL WHERE id = $1`, [
+          Number(batchId),
+        ]);
+      }
+
+      it('ZQ-35: FrontDesk tidak bisa MAKER-export batch legacy created_by NULL - 403', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        await nullOutBatchCreator(batchId);
+
+        const res = await exportReq(batchId, frontDeskToken, 'MAKER').expect(403);
+        expect(res.body.eligible_count).toBeUndefined();
+        expect(res.body.errors).toBeUndefined();
+      });
+
+      it('ZQ-36: alias ?purpose=REVIEW pada batch created_by NULL tetap 403 (normalisasi tidak membypass)', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        await nullOutBatchCreator(batchId);
+
+        await exportReq(batchId, frontDeskToken, 'REVIEW').expect(403);
+      });
+
+      it('ZQ-37: SystemAdmin dan Director tetap bisa MAKER-export batch created_by NULL', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        await nullOutBatchCreator(batchId);
+
+        for (const token of [sysAdminToken, directorToken]) {
+          await exportReq(batchId, token, 'MAKER')
+            .buffer(true)
+            .parse(binaryParser)
+            .expect(200);
+        }
+      });
+
+      it('ZQ-38: getBulkBatchById tetap membiarkan FrontDesk membaca batch created_by NULL (perilaku legacy TIDAK berubah)', async () => {
+        const { batchId } = await createBatch([qlolaItem()]);
+        await nullOutBatchCreator(batchId);
+
+        const detail = await request(app.getHttpServer())
+          .get(`${BASE}/transfers/bulk-batches/${batchId}`)
+          .set('Authorization', `Bearer ${frontDeskToken}`)
+          .expect(200);
+        expect(detail.body.batch.batch_no).toBeTruthy();
+      });
+
+      it('ZQ-39: penolakan MAKER karena created_by NULL tidak membuat log audit TRANSFER_QLOLA_EXPORT', async () => {
+        const { batchId, children } = await createBatch([qlolaItem()]);
+        await toFinanceStaffReview(children[0].id);
+        await nullOutBatchCreator(batchId);
+
+        await exportReq(batchId, frontDeskToken, 'MAKER').expect(403);
+        const deniedLog = await pgPool.query(
+          `SELECT 1 FROM audit_logs WHERE action='TRANSFER_QLOLA_EXPORT' AND object_id=$1`,
+          [String(batchId)],
+        );
+        expect(deniedLog.rowCount).toBe(0);
       });
 
       it('ZQ-20: pemetaan exact-name yang dipakai sehari-hari tetap benar', async () => {
