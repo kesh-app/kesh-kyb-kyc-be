@@ -14228,6 +14228,105 @@ describe('KYC/KYB E2E — Priority Tests', () => {
         .expect(403);
     });
 
+    for (const financeRole of ['FinanceStaff', 'FinanceManager'] as const) {
+      const roleToken = () => financeRole === 'FinanceStaff' ? financeStaffToken : financeManagerToken;
+
+      it(`Z-C14A ${financeRole}: all CDD/KYC/KYB mutation routes return 403`, async () => {
+        const token = roleToken();
+        const businessRow = await pgPool.query(
+          'SELECT business_id FROM applications WHERE id=$1',
+          [bizAppId],
+        );
+        const businessId = businessRow.rows[0]?.business_id;
+        expect(businessId).toBeTruthy();
+
+        const mutations: Array<{
+          method: 'post' | 'patch' | 'delete';
+          path: string;
+          body?: Record<string, unknown>;
+          upload?: boolean;
+        }> = [
+          { method: 'post', path: `${BASE}/applications/individual`, body: {
+            full_name: `Forbidden ${financeRole}`,
+            identity_type: 'KTP',
+            identity_number: `3175${SUFFIX.padStart(12, '0')}`.slice(0, 16),
+            cif_relationship_type: 'OUR_CUSTOMER',
+          } },
+          { method: 'post', path: `${BASE}/applications/individual`, body: {
+            full_name: `Forbidden WIC ${financeRole}`,
+            identity_type: 'KTP',
+            identity_number: `3275${SUFFIX.padStart(12, '0')}`.slice(0, 16),
+            cif_relationship_type: 'WIC',
+          } },
+          { method: 'post', path: `${BASE}/applications/business`, body: {
+            legal_name: `PT Forbidden ${financeRole}`,
+            legal_form: 'PT',
+            npwp: npwp15(financeRole),
+          } },
+          { method: 'patch', path: `${BASE}/applications/${indivAppIdOk}`, body: { full_name: 'Forbidden edit' } },
+          { method: 'patch', path: `${BASE}/applications/${bizAppId}/business`, body: { legal_name: 'PT Forbidden edit' } },
+          { method: 'post', path: `${BASE}/applications/${indivAppIdOk}/documents/upload`, upload: true },
+          { method: 'delete', path: `${BASE}/applications/${indivAppIdOk}/documents/1` },
+          { method: 'post', path: `${BASE}/applications/${bizAppId}/parties`, body: {
+            role: 'BO', full_name: 'Forbidden BO', identity_type: 'KTP', identity_number: TEST_KTP_NUMBER,
+          } },
+          { method: 'patch', path: `${BASE}/applications/${bizAppId}/parties/1`, body: { full_name: 'Forbidden BO edit' } },
+          { method: 'delete', path: `${BASE}/applications/${bizAppId}/parties/1` },
+          { method: 'post', path: `${BASE}/business/${businessId}/parties`, body: {
+            role: 'BO', full_name: 'Forbidden generic BO', identity_type: 'KTP', identity_number: TEST_KTP_NUMBER,
+          } },
+          { method: 'post', path: `${BASE}/business/${businessId}/parties/link`, body: { person_id: 1, role: 'BO' } },
+          { method: 'delete', path: `${BASE}/business/${businessId}/parties/1` },
+          { method: 'patch', path: `${BASE}/applications/${indivAppIdOk}/edd`, body: { applicant_snapshot: { name: 'Forbidden' } } },
+          { method: 'patch', path: `${BASE}/applications/${indivAppIdOk}/submit` },
+          { method: 'patch', path: `${BASE}/applications/${indivAppIdOk}/decision`, body: { decision: 'APPROVED' } },
+          { method: 'post', path: `${BASE}/applications/${indivAppIdOk}/rescreen-watchlist` },
+          { method: 'post', path: `${BASE}/applications/${indivAppIdOk}/data-review/initiate`, body: { review_type: 'MANUAL' } },
+          { method: 'post', path: `${BASE}/applications/${indivAppIdOk}/data-review/submit` },
+          { method: 'post', path: `${BASE}/applications/${indivAppIdOk}/data-review/decision`, body: { decision: 'APPROVED' } },
+          { method: 'patch', path: `${BASE}/data-reviews/1/draft/person`, body: { full_name: 'Forbidden draft edit' } },
+          { method: 'patch', path: `${BASE}/data-reviews/1/draft/business`, body: { legal_name: 'Forbidden draft edit' } },
+          { method: 'post', path: `${BASE}/data-reviews/1/draft/parties`, body: { operation: 'ADD', role: 'BO' } },
+          { method: 'patch', path: `${BASE}/data-reviews/1/draft/edd`, body: { applicant_snapshot: { name: 'Forbidden' } } },
+          { method: 'delete', path: `${BASE}/data-reviews/1/draft/changes/1` },
+        ];
+
+        for (const mutation of mutations) {
+          let call = request(app.getHttpServer())[mutation.method](mutation.path)
+            .set('Authorization', `Bearer ${token}`);
+          if (mutation.upload) {
+            call = call
+              .field('doc_type', 'KTP')
+              .attach('file', Buffer.from('forbidden'), {
+                filename: 'forbidden.png',
+                contentType: 'image/png',
+              });
+          } else if (mutation.body) {
+            call = call.send(mutation.body);
+          }
+          await call.expect(403);
+        }
+      });
+
+      it(`Z-C14B ${financeRole}: intended CDD/KYC/KYB reads remain available`, async () => {
+        const token = roleToken();
+        const reads = [
+          `${BASE}/applications`,
+          `${BASE}/applications/${indivAppIdOk}`,
+          `${BASE}/applications/${indivAppIdOk}/documents`,
+          `${BASE}/applications/${bizAppId}/parties`,
+          `${BASE}/applications/${indivAppIdOk}/edd`,
+          `${BASE}/applications/${indivAppIdOk}/screening`,
+        ];
+        for (const path of reads) {
+          await request(app.getHttpServer())
+            .get(path)
+            .set('Authorization', `Bearer ${token}`)
+            .expect(200);
+        }
+      });
+    }
+
     it('Z-C15: OperationSupervisor KYC decision endpoint still accessible → not 403', async () => {
       // OperationSupervisor should reach the decision endpoint (may get 4xx for business reasons, not 403)
       const res = await request(app.getHttpServer())

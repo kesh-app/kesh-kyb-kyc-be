@@ -14,6 +14,7 @@ import {
 import { NotificationsService } from "../notifications/notifications.service";
 import { DataReviewDraftsService } from "./data-review-drafts.service";
 import { UploadsService } from "../uploads/uploads.service";
+import { assertCanMutateKyc } from "../../common/kyc-access";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 type Db = Pool | PoolClient;
@@ -316,6 +317,7 @@ export class DataReviewsService {
   // INITIATE / REQUEST — ComplianceLead/FrontDesk/SystemAdmin/Director
   // ---------------------------------------------------------------------------
   async initiate(appId: number, user: AuthedUser, dto: InitiateDataReviewDto) {
+    assertCanMutateKyc(user.role, "dataReviewInitiate");
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -402,6 +404,7 @@ export class DataReviewsService {
   // SUBMIT — FrontDesk/SystemAdmin/Director
   // ---------------------------------------------------------------------------
   async submit(appId: number, user: AuthedUser) {
+    assertCanMutateKyc(user.role, "dataReviewSubmit");
     const latest = await this.fetchLatestReview(appId);
     if (!latest || !["DRAFT", "RETURNED_FOR_REVISION"].includes(latest.status)) {
       throw new BadRequestException(
@@ -440,6 +443,7 @@ export class DataReviewsService {
   // DECISION — ComplianceLead/SystemAdmin/Director
   // ---------------------------------------------------------------------------
   async decision(appId: number, user: AuthedUser, dto: DataReviewDecisionDto) {
+    assertCanMutateKyc(user.role, "dataReviewDecision");
     const latest = await this.fetchLatestReview(appId);
     if (!latest || !["SUBMITTED", "IN_COMPLIANCE_REVIEW"].includes(latest.status)) {
       throw new BadRequestException(

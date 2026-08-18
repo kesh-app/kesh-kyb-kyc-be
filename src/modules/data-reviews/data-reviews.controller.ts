@@ -30,6 +30,12 @@ import {
   StagePartyDraftDto,
   StageDocumentDraftDto,
 } from "./dto";
+import {
+  DATA_REVIEW_DECISION_ROUTE_ROLES,
+  DATA_REVIEW_DRAFT_ROUTE_ROLES,
+  DATA_REVIEW_INITIATE_ROUTE_ROLES,
+  DATA_REVIEW_READ_ROUTE_ROLES,
+} from "../../common/kyc-access";
 
 // Worklist Pengkinian Data untuk menu FE.
 // Read-only: FrontDesk + ComplianceLead + Auditor (SystemAdmin/Director via bypass).
@@ -40,7 +46,7 @@ export class DataReviewsListController {
   constructor(private readonly svc: DataReviewsService) {}
 
   @Get()
-  @Roles("FrontDesk", "ComplianceLead", "Auditor")
+  @Roles(...DATA_REVIEW_READ_ROUTE_ROLES)
   async list(
     @Query(new ValidationPipe({ whitelist: true, transform: true }))
     query: ListDataReviewsQueryDto,
@@ -62,7 +68,7 @@ export class DataReviewsController {
 
   // STATUS — read-only (FrontDesk, ComplianceLead, Auditor; SystemAdmin/Director via bypass)
   @Get("status")
-  @Roles("FrontDesk", "ComplianceLead", "Auditor")
+  @Roles(...DATA_REVIEW_READ_ROUTE_ROLES)
   async status(@Param("id", ParseIntPipe) id: number) {
     return this.svc.getStatus(id);
   }
@@ -70,7 +76,7 @@ export class DataReviewsController {
   // INITIATE / REQUEST — ComplianceLead atau FrontDesk, kapan saja
   // (tidak harus menunggu jatuh tempo).
   @Post("initiate")
-  @Roles("ComplianceLead", "FrontDesk")
+  @Roles(...DATA_REVIEW_INITIATE_ROUTE_ROLES)
   async initiate(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
@@ -82,14 +88,14 @@ export class DataReviewsController {
   // SUBMIT hasil pengkinian untuk direview Compliance — FrontDesk saja
   // (ComplianceLead tidak boleh submit mewakili FrontDesk).
   @Post("submit")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   async submit(@Req() req: any, @Param("id", ParseIntPipe) id: number) {
     return this.svc.submit(id, req.user);
   }
 
   // DECISION — ComplianceLead (approve / return / reject)
   @Post("decision")
-  @Roles("ComplianceLead")
+  @Roles(...DATA_REVIEW_DECISION_ROUTE_ROLES)
   async decision(
     @Req() req: any,
     @Param("id", ParseIntPipe) id: number,
@@ -117,13 +123,13 @@ export class DataReviewDraftsController {
   // Read model: review + current + proposed + changes. Satu panggilan untuk
   // form Frontline maupun layar diff Compliance.
   @Get("draft")
-  @Roles("FrontDesk", "ComplianceLead", "Auditor")
+  @Roles(...DATA_REVIEW_READ_ROUTE_ROLES)
   async getDraft(@Param("reviewId", ParseIntPipe) reviewId: number) {
     return this.drafts.getDraft(reviewId);
   }
 
   @Get("changes")
-  @Roles("FrontDesk", "ComplianceLead", "Auditor")
+  @Roles(...DATA_REVIEW_READ_ROUTE_ROLES)
   async listChanges(@Param("reviewId", ParseIntPipe) reviewId: number) {
     const rows = await this.drafts.activeChanges(reviewId);
     return { data: rows.map((r) => this.drafts.presentChange(r)) };
@@ -131,7 +137,7 @@ export class DataReviewDraftsController {
 
   // ── Staging (FrontDesk saja; ComplianceLead mereview, tidak menyunting) ──
   @Patch("draft/person")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   async stagePerson(
     @Req() req: any,
     @Param("reviewId", ParseIntPipe) reviewId: number,
@@ -142,7 +148,7 @@ export class DataReviewDraftsController {
   }
 
   @Patch("draft/business")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   async stageBusiness(
     @Req() req: any,
     @Param("reviewId", ParseIntPipe) reviewId: number,
@@ -153,7 +159,7 @@ export class DataReviewDraftsController {
   }
 
   @Post("draft/parties")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   async stageParty(
     @Req() req: any,
     @Param("reviewId", ParseIntPipe) reviewId: number,
@@ -163,7 +169,7 @@ export class DataReviewDraftsController {
   }
 
   @Post("draft/documents")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   async stageDocument(
     @Req() req: any,
     @Param("reviewId", ParseIntPipe) reviewId: number,
@@ -174,7 +180,7 @@ export class DataReviewDraftsController {
 
   /** Upload bytes directly into the review staging prefix, then stage ADD/REPLACE. */
   @Post("draft/documents/upload")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   @UseInterceptors(
     FileInterceptor("file", {
       limits: {
@@ -260,7 +266,7 @@ export class DataReviewDraftsController {
   }
 
   @Patch("draft/edd")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   async stageEdd(
     @Req() req: any,
     @Param("reviewId", ParseIntPipe) reviewId: number,
@@ -271,7 +277,7 @@ export class DataReviewDraftsController {
   }
 
   @Delete("draft/changes/:changeId")
-  @Roles("FrontDesk")
+  @Roles(...DATA_REVIEW_DRAFT_ROUTE_ROLES)
   async discard(
     @Req() req: any,
     @Param("reviewId", ParseIntPipe) reviewId: number,

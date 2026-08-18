@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -9,6 +8,7 @@ import {
 import { Pool, PoolClient } from "pg";
 import { createHash, randomUUID } from "crypto";
 import { resolveUserId } from "../../common/auth.util";
+import { assertCanMutateKyc } from "../../common/kyc-access";
 
 type AuthedUser = { sub?: number | string; id?: number | string; role: string };
 type Db = Pool | PoolClient;
@@ -19,7 +19,6 @@ export const DRAFT_EDITABLE_STATUSES = ["DRAFT", "RETURNED_FOR_REVISION"];
 
 // Role yang boleh menyunting draft. ComplianceLead sengaja TIDAK ada di sini —
 // Compliance mereview, tidak mengarang perubahan atas nama Frontline.
-const DRAFT_EDITOR_ROLES = ["FrontDesk", "SystemAdmin", "Director"];
 
 /**
  * Kolom yang boleh diusulkan berubah lewat Pengkinian Data. Allow-list, bukan
@@ -120,11 +119,7 @@ export class DataReviewDraftsService {
 
   /** FrontDesk boleh edit hanya saat DRAFT/RETURNED_FOR_REVISION. */
   private assertDraftEditable(review: any, user: AuthedUser) {
-    if (!DRAFT_EDITOR_ROLES.includes(user.role)) {
-      throw new ForbiddenException(
-        "Hanya Frontline yang dapat menyunting draft pengkinian data.",
-      );
-    }
+    assertCanMutateKyc(user.role, "dataReviewDraft");
     if (!DRAFT_EDITABLE_STATUSES.includes(review.status)) {
       throw new BadRequestException(
         `Draft pengkinian data tidak dapat diubah saat status ${review.status}.`,
@@ -1033,6 +1028,7 @@ export class DataReviewDraftsService {
       copyObject: (from: string, to: string) => Promise<string>;
     },
   ) {
+    assertCanMutateKyc(user.role, "dataReviewDecision");
     const preReview = await this.loadReview(reviewId);
     if (preReview.status !== "SUBMITTED") {
       throw new BadRequestException(

@@ -31,6 +31,19 @@ import { JwtAuthGuard } from "../auth/jwt.guard";
 import { Roles } from "../auth/roles.decorator";
 import { RolesGuard } from "../auth/roles.guard";
 import { UploadsService } from "../uploads/uploads.service";
+import {
+  KYC_CREATE_ROUTE_ROLES,
+  KYC_DECISION_ROUTE_ROLES,
+  KYC_DELETE_DOCUMENT_ROUTE_ROLES,
+  KYC_DOCUMENT_CREATE_ROUTE_ROLES,
+  KYC_EDD_EDIT_ROUTE_ROLES,
+  KYC_EDD_READ_ROUTE_ROLES,
+  KYC_EDIT_ROUTE_ROLES,
+  KYC_PARTY_CREATE_ROUTE_ROLES,
+  KYC_PARTY_READ_ROUTE_ROLES,
+  KYC_RESCREEN_ROUTE_ROLES,
+  KYC_SUBMIT_ROUTE_ROLES,
+} from "../../common/kyc-access";
 
 @Controller("applications")
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -59,68 +72,72 @@ export class ApplicationsController {
     return this.svc.validateBeforeSubmit(appId);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Roles(...KYC_CREATE_ROUTE_ROLES)
   @Post("individual")
   async createInd(
     @Req() req: any,
     @Body(new ValidationPipe({ whitelist: true })) dto: CreateIndividualDto
   ) {
-    return this.svc.createIndividual(dto, req.user.sub, 1);
+    return this.svc.createIndividual(dto, req.user.sub, 1, req.user.role);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Roles(...KYC_CREATE_ROUTE_ROLES)
   @Post("business")
   async createBiz(
     @Req() req: any,
     @Body(new ValidationPipe({ whitelist: true })) dto: CreateBusinessDto
   ) {
-    return this.svc.createBusiness(dto, req.user.sub, 1);
+    return this.svc.createBusiness(dto, req.user.sub, 1, req.user.role);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Roles(...KYC_DOCUMENT_CREATE_ROUTE_ROLES)
   @Post(":id/documents")
   async addDoc(
     @Param("id", ParseIntPipe) appId: number,
-    @Body(new ValidationPipe({ whitelist: true })) dto: AddDocumentDto
+    @Body(new ValidationPipe({ whitelist: true })) dto: AddDocumentDto,
+    @Req() req: any,
   ) {
     return this.svc.addDocument(appId, {
       doc_type: dto.doc_type,
       file_uri: dto.file_uri,
-    });
+    }, req.user.role);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead", "SystemAdmin", "FinanceStaff", "FinanceManager", "Auditor", "OperationSupervisor")
+  @Roles(...KYC_PARTY_READ_ROUTE_ROLES)
   @Get(":id/parties")
   async listParties(@Param("id", ParseIntPipe) appId: number) {
     return this.svc.listParties(appId);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Roles(...KYC_PARTY_CREATE_ROUTE_ROLES)
   @Post(":id/parties")
   async addParty(
     @Param("id", ParseIntPipe) appId: number,
-    @Body(new ValidationPipe({ whitelist: true })) dto: CreatePartyDto
+    @Body(new ValidationPipe({ whitelist: true })) dto: CreatePartyDto,
+    @Req() req: any,
   ) {
-    return this.svc.addParty(appId, dto);
+    return this.svc.addParty(appId, dto, req.user.role);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Roles(...KYC_PARTY_CREATE_ROUTE_ROLES)
   @Patch(":id/parties/:partyId")
   async updateParty(
     @Param("id", ParseIntPipe) appId: number,
     @Param("partyId", ParseIntPipe) partyId: number,
-    @Body(new ValidationPipe({ whitelist: true })) dto: UpdatePartyDto
+    @Body(new ValidationPipe({ whitelist: true })) dto: UpdatePartyDto,
+    @Req() req: any,
   ) {
-    return this.svc.updateParty(appId, partyId, dto);
+    return this.svc.updateParty(appId, partyId, dto, req.user.role);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Roles(...KYC_PARTY_CREATE_ROUTE_ROLES)
   @Delete(":id/parties/:partyId")
   async removeParty(
     @Param("id", ParseIntPipe) appId: number,
-    @Param("partyId", ParseIntPipe) partyId: number
+    @Param("partyId", ParseIntPipe) partyId: number,
+    @Req() req: any,
   ) {
-    return this.svc.deleteParty(appId, partyId);
+    return this.svc.deleteParty(appId, partyId, req.user.role);
   }
 
   // detail aplikasi sdh ada; tambahkan endpoint hasil screening & risk
@@ -137,13 +154,13 @@ export class ApplicationsController {
   }
 
   // Re-screen manual setelah upload watchlist baru (tidak ada auto re-screen massal).
-  @Roles("ComplianceLead", "SystemAdmin", "Director")
+  @Roles(...KYC_RESCREEN_ROUTE_ROLES)
   @Post(":id/rescreen-watchlist")
   async rescreenWatchlist(
     @Param("id", ParseIntPipe) appId: number,
     @Req() req: any,
   ) {
-    return this.svc.rescreenWatchlist(appId, req.user.sub, req.ip);
+    return this.svc.rescreenWatchlist(appId, req.user.sub, req.user.role, req.ip);
   }
 
   @Get(":id/documents")
@@ -171,7 +188,7 @@ export class ApplicationsController {
     return this.svc.getDocument(appId, docId);
   }
 
-  @Roles("BranchAdmin", "FrontDesk", "ComplianceLead")
+  @Roles(...KYC_DOCUMENT_CREATE_ROUTE_ROLES)
   @Post(":id/documents/upload")
   @UseInterceptors(
     FileInterceptor("file", {
@@ -190,7 +207,8 @@ export class ApplicationsController {
   async uploadDocument(
     @Param("id", ParseIntPipe) appId: number,
     @UploadedFile() file: Express.Multer.File,
-    @Body("doc_type") docType?: string
+    @Body("doc_type") docType: string | undefined,
+    @Req() req: any,
   ) {
     if (!file) throw new BadRequestException("No file uploaded");
 
@@ -228,7 +246,7 @@ export class ApplicationsController {
         size: file.size ?? null,
         original_name: file.originalname ?? null,
       },
-    });
+    }, req.user.role);
 
     // For OBS: return a fresh signed URL valid for 5 min.
     // For LOCAL: return the direct static URL.
@@ -242,35 +260,35 @@ export class ApplicationsController {
 
   // Identitas Badan Usaha (KYB). Peran & status sama dengan PATCH :id
   // (SystemAdmin/Director lewat bypass RolesGuard).
-  @Roles("FrontDesk", "ComplianceLead")
+  @Roles(...KYC_EDIT_ROUTE_ROLES)
   @Patch(":id/business")
   async updateBusinessCdd(
     @Param("id", ParseIntPipe) appId: number,
     @Body() body: any,
     @Req() req: any,
   ) {
-    return this.svc.updateBusinessCdd(appId, body, req.user.sub, req.ip);
+    return this.svc.updateBusinessCdd(appId, body, req.user.sub, req.ip, req.user.role);
   }
 
-  @Roles("FrontDesk", "ComplianceLead")
+  @Roles(...KYC_EDIT_ROUTE_ROLES)
   @Patch(":id")
   async updateCdd(
     @Param("id", ParseIntPipe) appId: number,
     @Body() body: any,
     @Req() req: any,
   ) {
-    return this.svc.updateIndividualCdd(appId, body, req.user.sub, req.ip);
+    return this.svc.updateIndividualCdd(appId, body, req.user.sub, req.ip, req.user.role);
   }
 
   // ── EDD endpoints ────────────────────────────────────────────────────────
 
-  @Roles("FrontDesk", "ComplianceLead", "Auditor")
+  @Roles(...KYC_EDD_READ_ROUTE_ROLES)
   @Get(":id/edd")
   async getEdd(@Param("id", ParseIntPipe) appId: number) {
     return this.svc.getEdd(appId);
   }
 
-  @Roles("FrontDesk", "ComplianceLead")
+  @Roles(...KYC_EDD_EDIT_ROUTE_ROLES)
   @Patch(":id/edd")
   async saveEdd(
     @Param("id", ParseIntPipe) appId: number,
@@ -282,15 +300,15 @@ export class ApplicationsController {
 
   // ─────────────────────────────────────────────────────────────────────────
 
-  @Roles("FrontDesk", "ComplianceLead")
+  @Roles(...KYC_SUBMIT_ROUTE_ROLES)
   @Patch(":id/submit")
   async submit(@Param("id", ParseIntPipe) appId: number, @Req() req: any) {
-    return this.svc.submit(appId, req.user.sub);
+    return this.svc.submit(appId, req.user.sub, req.user.role);
   }
 
   // KYC/KYB decision: OperationSupervisor untuk LOW/MEDIUM risk,
   // ComplianceLead untuk HIGH risk, Director/SystemAdmin via bypass.
-  @Roles("OperationSupervisor", "ComplianceLead")
+  @Roles(...KYC_DECISION_ROUTE_ROLES)
   @Patch(":id/decision")
   async decide(
     @Param("id", ParseIntPipe) appId: number,
@@ -300,13 +318,14 @@ export class ApplicationsController {
     return this.svc.decide(appId, dto.decision, dto.reason ?? null, req.user);
   }
 
-  @Roles("FrontDesk", "ComplianceLead")
+  @Roles(...KYC_DELETE_DOCUMENT_ROUTE_ROLES)
   @Delete(":id/documents/:docId")
   async deleteDoc(
     @Param("id", ParseIntPipe) appId: number,
-    @Param("docId", ParseIntPipe) docId: number
+    @Param("docId", ParseIntPipe) docId: number,
+    @Req() req: any,
   ) {
-    const doc = await this.svc.deleteDocument(appId, docId);
+    const doc = await this.svc.deleteDocument(appId, docId, req.user.role);
     const key = doc?.extracted_json?.object_key as string | undefined;
     if (key) await this.uploads.deleteObject(key);
     return { ok: true, deleted_id: docId };

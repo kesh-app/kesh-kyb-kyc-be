@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Pool } from 'pg';
+import { assertCanMutateKyc } from '../../common/kyc-access';
 
 @Injectable()
 export class BusinessService {
@@ -38,7 +39,23 @@ export class BusinessService {
     if (!rows[0]) throw new NotFoundException('Business not found');
   }
 
-  async createPerson(dto: any) {
+  /** Direct party writes must obey the same final-state integrity as /applications. */
+  private async assertMutableBusiness(businessId: number) {
+    const { rows } = await this.pool.query(
+      `SELECT a.status
+         FROM applications a
+        WHERE a.business_id=$1`,
+      [businessId],
+    );
+    if (!rows[0]) throw new NotFoundException('Application not found for business');
+    if (rows[0].status === 'APPROVED' || rows[0].status === 'REJECTED') {
+      throw new BadRequestException(
+        `Data pihak tidak dapat diubah langsung pada aplikasi berstatus ${rows[0].status}. Gunakan alur Pengkinian Data.`,
+      );
+    }
+  }
+
+  private async createPerson(dto: any) {
     const q = await this.pool.query(
       `INSERT INTO persons (full_name, identity_type, identity_number, address_identity, pob, dob, nationality, phone, gender, occupation, email)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -54,8 +71,10 @@ export class BusinessService {
     return q.rows[0].id as number;
   }
 
-  async addPartyWithNewPerson(businessId: number, dto: any) {
+  async addPartyWithNewPerson(businessId: number, dto: any, actorRole: string) {
+    assertCanMutateKyc(actorRole, 'partyCreate');
     await this.ensureBusiness(businessId);
+    await this.assertMutableBusiness(businessId);
 
     // B.2 Nomor Identitas Pengurus/BO/Pemegang Saham: maksimal 16 karakter.
     if (dto.identity_number && String(dto.identity_number).length > 16) {
@@ -112,8 +131,15 @@ export class BusinessService {
     return res.rows[0];
   }
 
-  async linkExistingPerson(businessId: number, personId: number, role: string) {
+  async linkExistingPerson(
+    businessId: number,
+    personId: number,
+    role: string,
+    actorRole: string,
+  ) {
+    assertCanMutateKyc(actorRole, 'partyCreate');
     await this.ensureBusiness(businessId);
+    await this.assertMutableBusiness(businessId);
     const { rows: p } = await this.pool.query('SELECT id FROM persons WHERE id=$1', [personId]);
     if (!p[0]) throw new NotFoundException('Person not found');
 
@@ -145,8 +171,10 @@ export class BusinessService {
     return rows;
   }
 
-  async removeParty(businessId: number, partyId: number) {
+  async removeParty(businessId: number, partyId: number, actorRole: string) {
+    assertCanMutateKyc(actorRole, 'partyDelete');
     await this.ensureBusiness(businessId);
+    await this.assertMutableBusiness(businessId);
     const { rows } = await this.pool.query(
       `DELETE FROM business_parties WHERE id=$1 AND business_id=$2 RETURNING id`,
       [partyId, businessId]

@@ -9,6 +9,7 @@ import {
 import { Pool } from "pg";
 import { computeRbaV01, INDUSTRY_MAP, type RbaInput } from "./rba-v01.engine";
 import { NotificationsService } from "../notifications/notifications.service";
+import { assertCanMutateKyc } from "../../common/kyc-access";
 
 // ─── Internal Preliminary Risk Scoring — RBA v2 ────────────────────────────
 // Bukan formula resmi BI. Dipakai sebagai dasar review compliance internal.
@@ -767,7 +768,13 @@ export class ApplicationsService {
   }
 
   // applications.service.ts
-  async createIndividual(dto: any, userId: number, branchId?: number) {
+  async createIndividual(
+    dto: any,
+    userId: number,
+    branchId: number | undefined,
+    actorRole: string,
+  ) {
+    assertCanMutateKyc(actorRole, "create");
     const norm = (s: string) => (s || "").replace(/\D+/g, "").trim(); // buang non-digit untuk KTP
     if (dto.identity_type === "KTP")
       dto.identity_number = norm(dto.identity_number);
@@ -1145,8 +1152,10 @@ export class ApplicationsService {
     appId: number,
     dto: any,
     userId: number,
-    ip?: string,
+    ip: string | undefined,
+    actorRole: string,
   ) {
+    assertCanMutateKyc(actorRole, "edit");
     const { rows: apps } = await this.pool.query(
       `SELECT a.id, a.type, a.status, a.person_id,
               p.cif_relationship_type, p.identity_type
@@ -1160,7 +1169,7 @@ export class ApplicationsService {
     // Aplikasi Business punya tabel & aturan sendiri — teruskan ke updater KYB
     // supaya PATCH :id lama tidak lagi buntu untuk badan usaha.
     if (app.type === "BUSINESS") {
-      return this.updateBusinessCdd(appId, dto, userId, ip);
+      return this.updateBusinessCdd(appId, dto, userId, ip, actorRole);
     }
     if (app.type !== "INDIVIDUAL" || !app.person_id) {
       throw new BadRequestException(
@@ -1363,8 +1372,10 @@ export class ApplicationsService {
     appId: number,
     dto: any,
     userId: number,
-    ip?: string,
+    ip: string | undefined,
+    actorRole: string,
   ) {
+    assertCanMutateKyc(actorRole, "edit");
     const { rows: apps } = await this.pool.query(
       `SELECT id, type, status, business_id FROM applications WHERE id=$1`,
       [appId],
@@ -1577,7 +1588,13 @@ export class ApplicationsService {
     return n;
   }
 
-  async createBusiness(dto: any, userId: number, branchId?: number) {
+  async createBusiness(
+    dto: any,
+    userId: number,
+    branchId: number | undefined,
+    actorRole: string,
+  ) {
+    assertCanMutateKyc(actorRole, "create");
     // ── B.5 NPWP Badan Usaha: wajib tepat 15 digit angka (digits only) ─────────
     const npwpRaw = typeof dto.npwp === "string" ? dto.npwp.trim() : "";
     if (!/^\d{15}$/.test(npwpRaw)) {
@@ -1767,7 +1784,9 @@ export class ApplicationsService {
   async addDocument(
     appId: number,
     dto: { doc_type: string; file_uri: string; extracted_json?: any },
+    actorRole: string,
   ) {
+    assertCanMutateKyc(actorRole, "documentCreate");
     const { rows: apps } = await this.pool.query(
       `SELECT id FROM applications WHERE id=$1`,
       [appId],
@@ -2868,7 +2887,13 @@ export class ApplicationsService {
    * Re-screen manual — dipakai setelah upload watchlist baru agar aplikasi lama
    * ikut dievaluasi ulang. Tidak ada auto re-screen massal di fase ini.
    */
-  async rescreenWatchlist(appId: number, actorId: number, ip?: string) {
+  async rescreenWatchlist(
+    appId: number,
+    actorId: number,
+    actorRole: string,
+    ip?: string,
+  ) {
+    assertCanMutateKyc(actorRole, "rescreen");
     const before = await this.getScreeningHits(appId);
     const risk = await this.screenAndComputeRisk(appId);
     const after = await this.getScreeningHits(appId);
@@ -2928,7 +2953,8 @@ export class ApplicationsService {
   }
 
   // Create / upsert person, then attach into business_parties
-  async addParty(appId: number, dto: any) {
+  async addParty(appId: number, dto: any, actorRole: string) {
+    assertCanMutateKyc(actorRole, "partyCreate");
     const { rows: appRows } = await this.pool.query(
       `SELECT id, business_id, type FROM applications WHERE id=$1`,
       [appId],
@@ -3070,7 +3096,13 @@ export class ApplicationsService {
    * dipertahankan supaya CIF, relasi dokumen, dan audit trail tidak hilang.
    * Hanya field yang dikirim yang ditulis.
    */
-  async updateParty(appId: number, partyId: number, dto: any) {
+  async updateParty(
+    appId: number,
+    partyId: number,
+    dto: any,
+    actorRole: string,
+  ) {
+    assertCanMutateKyc(actorRole, "partyCreate");
     const { rows: appRows } = await this.pool.query(
       `SELECT id, business_id, type FROM applications WHERE id=$1`,
       [appId],
@@ -3221,7 +3253,10 @@ export class ApplicationsService {
     return rows[0];
   }
 
-  async deleteParty(appId: number, partyId: number) {
+  async deleteParty(appId: number, partyId: number, actorRole: string) {
+    // This legacy applications route has always allowed BranchAdmin as well as
+    // FrontDesk/ComplianceLead, so use the party-create capability here too.
+    assertCanMutateKyc(actorRole, "partyCreate");
     const { rows: appRows } = await this.pool.query(
       `SELECT id, business_id, type FROM applications WHERE id=$1`,
       [appId],
@@ -3248,7 +3283,8 @@ export class ApplicationsService {
     return { ok: true };
   }
 
-  async submit(appId: number, reviewerId: number) {
+  async submit(appId: number, reviewerId: number, actorRole: string) {
+    assertCanMutateKyc(actorRole, "submit");
     const { rows: statusRows } = await this.pool.query(
       `SELECT status FROM applications WHERE id=$1`,
       [appId],
@@ -3611,7 +3647,8 @@ export class ApplicationsService {
     return doc;
   }
 
-  async deleteDocument(appId: number, docId: number) {
+  async deleteDocument(appId: number, docId: number, actorRole: string) {
+    assertCanMutateKyc(actorRole, "documentDelete");
     await this.assertMutableApplication(appId, "Dokumen");
     const doc = await this.getDocument(appId, docId);
     await this.pool.query(`DELETE FROM documents WHERE id=$1`, [docId]);
@@ -3671,6 +3708,7 @@ export class ApplicationsService {
     body: any,
     user: { sub?: number | string; id?: number | string; role: string },
   ) {
+    assertCanMutateKyc(user.role, "eddEdit");
     const { complete = false } = body;
     const userId = Number(user.sub ?? (user as any).id);
     const role = user.role;
@@ -3958,6 +3996,7 @@ export class ApplicationsService {
     reason: string | null,
     user: { sub?: number | string; id?: number | string; role: string },
   ) {
+    assertCanMutateKyc(user.role, "decision");
     const reviewerId = user.sub ?? (user as any).id;
 
     const { rows } = await this.pool.query(
